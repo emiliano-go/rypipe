@@ -1,17 +1,47 @@
-# rypipe
+<p align="center">
+  <h1 align="center">rypipe</h1>
+</p>
 
-[![CI](https://github.com/emiliano-go/rypipe/actions/workflows/test.yml/badge.svg)](https://github.com/emiliano-go/rypipe/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <strong>Format-agnostic columnar engine for XML, JSON, CSV, HTML, and more.</strong>
+</p>
 
-A format-agnostic columnar engine that turns XML, JSON, CSV, HTML, and other
-row-oriented byte streams into Apache Arrow record batches. The engine is
-written in Rust and exposes both a Rust API and Python bindings via PyO3.
+<p align="center">
+  Parse row-oriented byte streams into Apache Arrow record batches with a Rust
+  core, Python bindings, parallel scheduling, memory-bounded execution, and
+  query pushdown.
+</p>
+
+<p align="center">
+  <a href="https://www.python.org/downloads/">
+    <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white&style=for-the-badge" alt="Python">
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/Rust-1.78%2B-000000?logo=rust&logoColor=white&style=for-the-badge" alt="Rust">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-10AC84?style=for-the-badge" alt="License">
+  </a>
+  <a href="https://github.com/emiliano-go/rypipe/actions/workflows/test.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/emiliano-go/rypipe/test.yml?branch=master&style=for-the-badge&logo=github&label=Tests" alt="Tests">
+  </a>
+  <a href="https://github.com/emiliano-go/rypipe/tree/master/docs">
+    <img src="https://img.shields.io/badge/Docs-docs%2F-8A2BE2?style=for-the-badge&logo=readthedocs" alt="Docs">
+  </a>
+</p>
+
+---
+
+## What is rypipe
 
 `rypipe` separates format-specific parsing (splitting, row extraction) from
-format-agnostic execution (typed column builders, projection, filtering,
+format-agnostic execution (typed column builders, filtering, projection,
 dictionary encoding, parallel scheduling, memory-bounded execution, and Arrow
 export). Add a new format by implementing two small traits: `Splitter` and
 `RecordParser`.
+
+The first adapter, `rypipe-xml`, implements the Crystal Reports XML grammar
+extracted from [crxml](https://github.com/emiliano-go/crxml).
 
 ## Features
 
@@ -93,7 +123,7 @@ Full docs and integration guides are in the `docs/` directory:
 - [Integrating with crxml](docs/integrating-crxml.md)
 - [Performance](docs/performance.md)
 
-## Why rypipe?
+## Why rypipe
 
 `rypipe` was extracted from [crxml](https://github.com/emiliano-go/crxml), a
 high-performance Crystal Reports XML parser. The goal was to keep crxml's
