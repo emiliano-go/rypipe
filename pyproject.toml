@@ -1,0 +1,40 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rypipe"
+version = "0.1.0"
+description = "Generic columnar engine for XML, JSON, CSV and more — Rust core with Python bindings"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Emiliano Gandini", email = "emiliano.gandini@protonmail.com"}
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+pyarrow = ["pyarrow>=15"]
+pandas = ["pandas>=1.5"]
+polars = ["polars>=0.20"]
+all = ["rypipe[pyarrow,pandas,polars]"]
+dev = [
+    "pytest>=7",
+    "maturin>=1.4,<2.0",
+    "rypipe[all]",
+]
+
+[project.urls]
+Homepage = "https://github.com/emiliano-go/rypipe"
+Repository = "https://github.com/emiliano-go/rypipe"
+
+[tool.maturin]
+manifest-path = "crates/rypipe-python/Cargo.toml"
+module-name = "_rypipe"
+features = ["pyo3/extension-module"]
+profile = "release"
+
+[tool.pytest.ini_options]
+testpaths = ["crates/rypipe-python/tests"]
+python_files = ["test_*.py"]
