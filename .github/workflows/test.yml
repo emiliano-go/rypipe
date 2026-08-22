@@ -1,0 +1,45 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Export PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Install Python build tools
+        run: pip install maturin pyarrow
+
+      - name: Build Python extension
+        run: maturin build --release --manifest-path crates/rypipe-python/Cargo.toml
+
+      - name: Run Python smoke tests
+        run: |
+          pip install pytest target/wheels/*.whl
+          pytest crates/rypipe-python/tests/test_read.py
