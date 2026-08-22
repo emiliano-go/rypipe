@@ -9,7 +9,7 @@ authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
 
 [dependencies]
 rypipe-core = { path = "../rypipe-core" }
-quick-xml = "0.36"
+quick-xml = "0.41"
 memchr = "2"
 simdutf8 = "0.1"
 rustc-hash = "2"
