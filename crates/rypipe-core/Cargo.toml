@@ -1,0 +1,22 @@
+[package]
+name = "rypipe-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Format-agnostic columnar engine with Arrow export"
+repository = "https://github.com/emiliano-go/rypipe"
+authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
+
+[features]
+default = []
+mmap = ["dep:memmap2"]
+
+[dependencies]
+arrow = { version = "=55.2.0", default-features = false }
+rayon = "1"
+memchr = "2"
+simdutf8 = "0.1"
+lexical = "7"
+rustc-hash = "2"
+thiserror = "2"
+memmap2 = { version = "0.9", optional = true }
