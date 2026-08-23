@@ -19,15 +19,28 @@ cargo run --release -p rypipe-core --example bench_throughput
 
 Hardware: Linux workstation, AMD Ryzen 9 5900X, DDR4-3200, release build.
 
-| Path | Rows | Time | Rows/s | MB/s |
-|------|------|------|--------|------|
-| `Pipeline::read_path` | 5,000,000 | 1.34 s | 3.75 M | 224 |
-| `Pipeline::read_path_par` (4 chunks) | 5,000,000 | 1.47 s | 3.41 M | 204 |
-| `Pipeline::read_path_par` (8 chunks) | 5,000,000 | 1.45 s | 3.44 M | 206 |
-| `Pipeline::read_path_stream` (64 MiB) | 5,000,000 | 1.99 s | 2.51 M | 150 |
+| Path | Rows | Time | Rows/s | MB/s | RSS |
+|------|------|------|--------|------|-----|
+| `Pipeline::read_path` | 5,000,000 | 1.31 s | 3.83 M | 229 | 290 MB |
+| `Pipeline::read_path_par` (4 chunks) | 5,000,000 | 1.46 s | 3.43 M | 205 | 432 MB |
+| `Pipeline::read_path_par` (8 chunks) | 5,000,000 | 1.49 s | 3.35 M | 200 | 529 MB |
+| `Pipeline::read_path_stream` (64 MiB) | 5,000,000 | 1.98 s | 2.53 M | 151 | 629 MB |
 
-Memory stayed around **330 MB RSS** for the single-thread and parallel paths.
-The bounded streaming path kept intermediate batches near the 64 MiB budget.
+Single-thread parse is fastest for this simple TSV adapter because chunk
+overhead dominates. Parallel mode trades a small throughput drop for much
+higher CPU utilization and scales better with heavier parsers. The bounded
+streaming path keeps intermediate batches near the 64 MiB budget but has higher
+peak RSS because of the Arrow export buffer.
+
+Run the benchmark yourself:
+
+```bash
+# Rust example
+cargo run --release -p rypipe-core --example bench_throughput
+
+# Python wrapper that also writes JSON results
+python benchmarks/bench_throughput.py --output .benchmarks/rypipe.json
+```
 
 ## Tuning knobs
 

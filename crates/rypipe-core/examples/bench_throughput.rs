@@ -6,7 +6,7 @@
 //!     cargo run --release -p rypipe-core --example bench_throughput
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::time::Instant;
 
 use rypipe_core::{
@@ -89,14 +89,33 @@ impl RecordParser for TsvParser {
     }
 }
 
-fn run(name: &str, f: impl FnOnce() -> Result<usize>) {
+fn current_rss_kb() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        let file = File::open("/proc/self/status").ok()?;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.ok()?;
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                return rest.split_whitespace().next().and_then(|n| n.parse().ok());
+            }
+        }
+    }
+    None
+}
+
+fn run(name: &str, input_bytes: usize, f: impl FnOnce() -> Result<usize>) {
     let start = Instant::now();
     let rows = f().expect("benchmark failed");
     let elapsed = start.elapsed();
     let secs = elapsed.as_secs_f64();
+    let rows_per_sec = rows as f64 / secs;
+    let mb_per_sec = input_bytes as f64 / secs / 1_000_000.0;
+    let memory = current_rss_kb()
+        .map(|kb| format!("{:6.0} MB", kb as f64 / 1024.0))
+        .unwrap_or_else(|| "  N/A  ".to_string());
     println!(
-        "{name:24} {secs:8.3}s  {rows:10} rows  {:8.0} rows/s",
-        rows as f64 / secs
+        "{name:24} {secs:8.3}s  {rows:10} rows  {:8.0} rows/s  {:6.1} MB/s  RSS {memory}",
+        rows_per_sec, mb_per_sec
     );
 }
 
@@ -117,22 +136,22 @@ fn main() -> Result<()> {
             .type_as("count", FieldType::Int64),
     );
 
-    run("single-thread", || {
+    run("single-thread", bytes, || {
         let batch = pipeline.read_path(&path, false, false)?;
         Ok(batch.num_rows())
     });
 
-    run("parallel (4 chunks)", || {
+    run("parallel (4 chunks)", bytes, || {
         let batches = pipeline.read_path_par(&path, 4, false, false)?;
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())
     });
 
-    run("parallel (8 chunks)", || {
+    run("parallel (8 chunks)", bytes, || {
         let batches = pipeline.read_path_par(&path, 8, false, false)?;
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())
     });
 
-    run("bounded (64 MiB)", || {
+    run("bounded (64 MiB)", bytes, || {
         let batches =
             pipeline.read_path_stream(&path, MemoryBudget::new(64 * 1024 * 1024), false)?;
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())
