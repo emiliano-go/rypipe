@@ -9,6 +9,7 @@ import pytest
 
 import rypipe
 from rypipe import (
+    Adapter,
     CastTypes,
     DropFields,
     FilterRows,
@@ -256,3 +257,38 @@ def test_filter_rows_invalid_compare_op():
 def test_drop_fields_rejects_string():
     with pytest.raises(TypeError):
         DropFields("name")
+
+
+class _TableAdapter(Adapter):
+    """Adapter that returns a fixed table from ``read``."""
+
+    def __init__(self, table: pa.Table, **kwargs):
+        self._table = table
+        # Skip Source.__init__ path validation.
+        self._path = Path("mock")
+        self._field_mapping = kwargs.get("field_mapping", {})
+        self._drop_fields = kwargs.get("drop_fields", [])
+        self._filter = kwargs.get("filter", None)
+        self._field_types = kwargs.get("field_types", {})
+        self._dictionary_columns = kwargs.get("dictionary_columns", [])
+        self._schema = kwargs.get("schema", [])
+        self._auto_dict = kwargs.get("auto_dict", False)
+        self._use_mmap = kwargs.get("use_mmap", True)
+        self._batch_size = kwargs.get("batch_size", 1024)
+        self._cached_arrow = None
+
+    def read(self, path: str, **kwargs):
+        return _apply_plan(self._table, kwargs)
+
+
+def test_adapter_subclass_read(sample_table):
+    src = _TableAdapter(sample_table)
+    rows = collect(src | RenameFields({"name": "full_name"}))
+    assert rows[0]["full_name"] == "Alice"
+
+
+def test_adapter_subclass_filter(sample_table):
+    src = _TableAdapter(sample_table)
+    rows = collect(src | FilterRows(field="city", op="==", value="LA"))
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Bob"

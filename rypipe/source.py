@@ -160,3 +160,43 @@ class Source(ABC):
         from .pipeline import Pipeline
 
         return Pipeline(self) | stage
+
+
+class Adapter(Source):
+    """Convenience base class for building adapter sources.
+
+    Subclasses only need to implement ``read(self, path, **kwargs)`` and return
+    a ``pyarrow.Table``. Plan kwargs (rename, drop, cast, filter, ...) are
+    collected automatically and passed through to ``read``. The rest of the
+    Source API (caching, iteration, sinks, and the ``|`` pipeline operator)
+    comes for free.
+
+    Example::
+
+        class CsvAdapter(rypipe.Adapter):
+            def read(self, path, **kwargs):
+                return _rypipe_csv.read_csv(path, **kwargs)
+
+        source = CsvAdapter("data.csv")
+        df = (
+            source
+            | RenameFields({"old_name": "new_name"})
+            | DropFields(["internal_id"])
+        ).to_dataframe()
+    """
+
+    __slots__ = ()
+
+    def read(self, path: str, **kwargs: Any) -> pa.Table:
+        """Read ``path`` into a ``pyarrow.Table``.
+
+        ``kwargs`` contains the merged pushdown plan. Implementations should
+        pass unknown kwargs down to the underlying parser.
+        """
+        raise NotImplementedError("subclasses must implement read()")
+
+    def _read_arrow(self, plan_overrides: Optional[dict[str, Any]] = None) -> pa.Table:
+        plan = self._build_plan_kwargs()
+        if plan_overrides:
+            plan.update(plan_overrides)
+        return self.read(str(self._path), **plan)

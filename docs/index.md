@@ -49,9 +49,9 @@ print(table.num_rows, table.num_columns)
 
 ### Pipeline API
 
-Adapters that expose a `rypipe.Source` subclass give you a chainable pipeline
+Adapters that expose a `rypipe.Adapter` subclass give you a chainable pipeline
 with automatic fusion of rename, drop, cast, and filter stages into the Rust
-parse loop::
+parse loop. Subclasses only implement ``read(path, **kwargs)``::
 
 ```python
 from rypipe import RenameFields, DropFields, CastTypes, FilterRows
