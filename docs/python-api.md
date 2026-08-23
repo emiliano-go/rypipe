@@ -6,7 +6,8 @@ packages build on.
 
 `rypipe` itself does **not** ship any format parsers. Install a separate adapter
 package and import it; the adapter registers itself with `rypipe` so the
-high-level `read` API works.
+high-level `read` API works. Adapters can also expose a `Source` subclass and
+get the pipeline/stage/sink API for free.
 
 ## Building the Python module
 
@@ -20,22 +21,75 @@ Python package and the `_rypipe` Rust extension.
 
 ## Public API (`import rypipe`)
 
-### `rypipe.register_adapter`
+### `rypipe.Source`
 
-Adapter packages call this on import to make themselves available to `rypipe.read`.
+Abstract base class for row-oriented file sources. Adapter packages subclass it
+and implement `_read_arrow`. Once they do, users get pipelines, stages, and
+sinks with no extra work.
 
 ```python
-import rypipe
+from rypipe import Source
 
-class MyAdapter:
-    def read(self, path, **kwargs):
+class MySource(Source):
+    def _read_arrow(self, plan_overrides=None):
+        # Build plan from construction kwargs + overrides, call the parser,
+        # return a pyarrow.Table.
         ...
-
-rypipe.register_adapter("myfmt", MyAdapter(), extensions=[".myfmt"])
 ```
 
-The adapter object must expose a `read(path, **kwargs)` method that returns a
-`pyarrow.Table`.
+A `Source` exposes:
+
+- Row iteration: `for row in source`
+- Table export: `source.to_arrow()`, `source.to_pandas()`, `source.to_polars()`,
+  `source.to_parquet(path)`
+- Pipeline operator: `source | RenameFields(...)`
+- Caching: `source.clear_cache()`
+
+### Pipeline stages
+
+`rypipe` ships the same fusable stages crxml used. Stages that rename, drop,
+cast, or filter constants are pushed into the Rust parse loop when the source
+supports plan kwargs.
+
+```python
+from rypipe import RenameFields, DropFields, CastTypes, FilterRows
+
+pipeline = (
+    source
+    | RenameFields({"old_name": "new_name"})
+    | DropFields(["internal_id"])
+    | CastTypes({"amount": float, "qty": int})
+    | FilterRows(field="status", op="==", value="active")
+)
+```
+
+`CastTypes` accepts Python callables (`int`, `float`, `bool`, `str`). When the
+callable maps to a Rust type (`int64`, `float64`, `bool`), it is fused into the
+Rust parse loop.
+
+`FilterRows` supports both constant filters and column-to-column comparisons:
+
+```python
+FilterRows(field="status", op="==", value="active")
+FilterRows(field_a="amount", op=">", field_b="threshold")
+```
+
+Supported ops: `==`, `!=`, `>`, `<`, `>=`, `<=`.
+
+### Pipeline sinks
+
+```python
+from rypipe import collect, to_arrow, to_dataframe, to_csv, to_parquet
+
+rows = collect(pipeline)
+table = to_arrow(pipeline)
+df = to_dataframe(pipeline)
+to_csv(pipeline, "out.csv")
+to_parquet(pipeline, "out.parquet")
+```
+
+Sinks try the fused Arrow path first and fall back to dict iteration when the
+pipeline ends with a generic stage.
 
 ### `rypipe.read`
 
@@ -131,8 +185,8 @@ Arrow `RecordBatch`es into a single `pyarrow.Table`.
 
 ## Plan kwargs
 
-All public `read` functions accept the same pushdown kwargs, which are passed
-through to the adapter.
+All public `read` functions and `Source` constructors accept the same pushdown
+kwargs, which are passed through to the adapter.
 
 | Kwarg | Type | Effect |
 |-------|------|--------|

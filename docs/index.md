@@ -47,6 +47,27 @@ table = rypipe.read(
 print(table.num_rows, table.num_columns)
 ```
 
+### Pipeline API
+
+Adapters that expose a `rypipe.Source` subclass give you a chainable pipeline
+with automatic fusion of rename, drop, cast, and filter stages into the Rust
+parse loop::
+
+```python
+from rypipe import RenameFields, DropFields, CastTypes, FilterRows
+import my_adapter
+
+source = my_adapter.MySource("data.myfmt")
+
+df = (
+    source
+    | RenameFields({"old_name": "new_name"})
+    | DropFields(["internal_id"])
+    | CastTypes({"amount": float, "qty": int})
+    | FilterRows(field="status", op="==", value="active")
+).to_dataframe()
+```
+
 ### From Rust
 
 ```rust
