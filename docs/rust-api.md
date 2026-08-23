@@ -11,7 +11,61 @@ rypipe-core = { path = "../rypipe/crates/rypipe-core" }
 rypipe-xml = { path = "../rypipe/crates/rypipe-xml" }
 ```
 
-## A minimal XML example
+## Recommended entry point: `Pipeline`
+
+`Pipeline` wires a `Splitter` and `RecordParser` together and removes the
+boilerplate of opening files and choosing an execution mode.
+
+```rust
+use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
+use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+
+fn main() -> rypipe_core::Result<()> {
+    let pipeline = Pipeline::new(
+        CrystalXmlSplitter::with_row_tag(b"Row"),
+        CrystalXmlDecoder::with_row_tag(b"Row"),
+    )
+    .with_plan(
+        ExecutionPlan::new()
+            .rename("old_name", "new_name")
+            .drop("junk")
+            .type_as("amount", FieldType::Float64)
+            .dictionary("status")
+            .filter_eq("status", "active")
+            .schema_order(["id", "status", "amount"])
+            .with_auto_dict(true),
+    );
+
+    // Single-file parse.
+    let batch = pipeline.read_path("data.xml", false, false)?;
+    println!("rows={} cols={}", batch.num_rows(), batch.num_columns());
+
+    // Parallel parse.
+    let batches = pipeline.read_path_par("data.xml", 8, false, false)?;
+
+    // Bounded-memory streaming.
+    let batches = pipeline.read_path_stream(
+        "huge.xml",
+        rypipe_core::MemoryBudget::new(500_000_000),
+        false,
+    )?;
+
+    Ok(())
+}
+```
+
+`rypipe-xml` also provides a shortcut constructor:
+
+```rust
+use rypipe_xml::xml_pipeline;
+
+let pipeline = xml_pipeline("Row");
+let batch = pipeline.read_path("data.xml", false, false)?;
+```
+
+## A minimal XML example (low level)
+
+If you prefer to control every step, use `TableBuilder` directly:
 
 ```rust
 use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
@@ -33,15 +87,31 @@ fn main() -> rypipe_core::Result<()> {
 
 ## `ExecutionPlan`
 
-```rust
-use rypipe_core::{ExecutionPlan, FieldType, FilterPredicate};
+The builder API is the recommended way to construct a plan:
 
+```rust
+use rypipe_core::{CompareOp, ExecutionPlan, FieldType};
+
+let plan = ExecutionPlan::new()
+    .rename("old_name", "new_name")
+    .drop("junk")
+    .type_as("amount", FieldType::Float64)
+    .dictionary("status")
+    .filter_eq("status", "active")
+    .filter_compare("amount", CompareOp::Gt, "threshold")
+    .schema_order(["id", "status", "amount"])
+    .with_auto_dict(true);
+```
+
+You can still mutate the fields directly when you need to:
+
+```rust
 let mut plan = ExecutionPlan::new();
 plan.field_map.insert("old_name".into(), "new_name".into());
 plan.drop_fields.insert("junk".into());
 plan.field_types.insert("amount".into(), FieldType::Float64);
 plan.dictionary_columns.insert("status".into());
-plan.filter = Some(FilterPredicate::Equal {
+plan.filter = Some(rypipe_core::FilterPredicate::Equal {
     field: "status".into(),
     value: "active".into(),
 });
@@ -65,7 +135,7 @@ sink.put_field("missing", Value::Null);
 For XML everything is a string, but JSON or CSV adapters can emit native typed
 values and skip string parsing.
 
-## Parallel parse
+## Parallel parse (low level)
 
 ```rust
 use rypipe_core::{parallel::ParallelExecutor, ExecutionPlan};
@@ -83,7 +153,7 @@ let batches = ParallelExecutor::parse(&bytes, &splitter, decoder, plan, 8)?;
 batch per chunk; the merge path returns a single merged batch when `auto_dict`
 or a `Compare` filter is enabled.
 
-## Bounded parse
+## Bounded parse (low level)
 
 ```rust
 use rypipe_core::{

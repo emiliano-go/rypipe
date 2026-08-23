@@ -1,7 +1,8 @@
 # Python API
 
-`rypipe-python` compiles to an extension module named `_rypipe`. It exposes the
-same columnar entry points that crxml historically used, plus typed exceptions.
+`rypipe-python` builds a mixed Rust/Python package. The public API lives in the
+`rypipe` package; `_rypipe` is the low-level Rust extension and is kept for
+backward compatibility.
 
 ## Building the Python module
 
@@ -10,31 +11,31 @@ export PYO3_PYTHON=/path/to/python3.12
 maturin develop --release
 ```
 
-`maturin` builds `crates/rypipe-python/Cargo.toml` and installs the module as
-`_rypipe`.
+`maturin` builds `crates/rypipe-python/Cargo.toml` and installs both the `rypipe`
+Python package and the `_rypipe` Rust extension.
 
-## Exceptions
+## Public API (`import rypipe`)
 
-| Exception | Meaning |
-|-----------|---------|
-| `_rypipe.XmlError` | Malformed input or parse failure (including invalid UTF-8). |
-| `_rypipe.PlanError` | Invalid pushdown plan (unknown field type, bad filter op). |
-| `_rypipe.MergeError` | Chunk-merge conflict (e.g. type mismatch across chunks). |
+### `rypipe.read`
 
-## `read_to_columnar`
-
-Single-threaded, whole-file parse.
+Single entry point for all formats and execution modes.
 
 ```python
-import _rypipe as rp
+import rypipe
 
-table = rp.read_to_columnar(
+table = rypipe.read("data.xml")
+
+# Same call with all common options:
+table = rypipe.read(
     "data.xml",
+    format="xml",            # inferred from extension when omitted
     row_tag="Row",
-    field_mapping={"old_name": "new_name"},
-    drop_fields=["internal_id"],
-    field_types={"amount": "float64", "qty": "int64"},
-    dictionary_columns=["status"],
+    mode="par",              # "sync" | "multi" | "par" | "stream"
+    chunks=4,
+    rename={"old_name": "new_name"},
+    drop=["internal_id"],
+    fields={"amount": "float64", "qty": "int64"},
+    dictionary=["status"],
     filter={"field": "status", "op": "==", "value": "active"},
     schema=["id", "status", "amount"],
     auto_dict=False,
@@ -45,61 +46,88 @@ table = rp.read_to_columnar(
 
 Returns a `pyarrow.Table`.
 
-## `read_to_columnar_multi`
+### `rypipe.read_par`
 
-Sequential chunked parse + merge. Useful when you want deterministic chunking
-without rayon overhead.
+Convenience wrapper for parallel mode.
 
 ```python
-table = rp.read_to_columnar_multi(
+table = rypipe.read_par("data.xml", chunks=8, fields={"amount": "float64"})
+```
+
+### `rypipe.read_stream`
+
+Convenience wrapper for bounded-memory streaming. `memory` accepts an int
+(bytes) or a human-readable string such as `"128MiB"`.
+
+```python
+table = rypipe.read_stream("huge.xml", memory="500MiB", row_tag="Row")
+```
+
+### Format auto-detection
+
+`rypipe.read` infers the format from the file extension when `format` is not
+provided:
+
+| Extension | Format |
+|-----------|--------|
+| `.xml` | `xml` |
+
+Pass `format="xml"` explicitly for extensionless paths.
+
+### Exceptions
+
+| Exception | Meaning |
+|-----------|---------|
+| `rypipe.XmlError` | Malformed input or parse failure (including invalid UTF-8). |
+| `rypipe.PlanError` | Invalid pushdown plan (unknown field type, bad filter op). |
+| `rypipe.MergeError` | Chunk-merge conflict (e.g. type mismatch across chunks). |
+| `rypipe.RypipeError` | Invalid API usage (bad memory string, unknown extension). |
+
+## Low-level API (`import _rypipe`)
+
+`_rypipe` exposes the same columnar entry points that crxml historically used,
+plus a new generic `_rypipe.read` dispatch function.
+
+### `_rypipe.read`
+
+Format-agnostic dispatch used by the `rypipe` wrapper.
+
+```python
+import _rypipe
+
+table = _rypipe.read(
     "data.xml",
-    row_tag="Row",
+    "xml",
+    format_options={"row_tag": "Row"},
+    mode="par",
     num_chunks=4,
+    memory=64_000_000,
     field_types={"amount": "float64"},
 )
 ```
 
-## `read_to_columnar_par`
+### Legacy entry points
 
-Parallel chunked parse via rayon.
+| Function | Mode |
+|----------|------|
+| `_rypipe.read_to_columnar` | sync |
+| `_rypipe.read_to_columnar_multi` | sequential multi-chunk |
+| `_rypipe.read_to_columnar_par` | parallel |
+| `_rypipe.read_to_columnar_bounded` | bounded memory |
 
-```python
-table = rp.read_to_columnar_par(
-    "data.xml",
-    row_tag="Row",
-    num_chunks=8,
-    field_types={"amount": "float64"},
-)
-```
-
-Use more chunks than CPU cores (crxml uses `threads * 4`) for better load
-balancing.
-
-## `read_to_columnar_bounded`
-
-Memory-bounded parse. Reads the file in batches sized to fit within `memory`
-bytes of intermediate builder storage.
-
-```python
-table = rp.read_to_columnar_bounded(
-    "huge.xml",
-    memory=500_000_000,  # 500 MB
-    row_tag="Row",
-    field_types={"amount": "float64"},
-)
-```
+These accept the original crxml-style kwargs (`field_mapping`, `drop_fields`,
+`field_types`, etc.).
 
 ## Plan kwargs
 
-All four functions accept the same pushdown kwargs.
+All public functions accept the same pushdown kwargs.
 
 | Kwarg | Type | Effect |
 |-------|------|--------|
-| `row_tag` | `str` | XML row element name (default `"Row"`). |
-| `field_mapping` | `dict[str, str]` | Rename raw fields. |
-| `drop_fields` | `list[str]` | Drop fields by resolved name. |
-| `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, or `"string"`. |
-| `dictionary_columns` | `list[str]` | Explicit dictionary encoding. |
+| `rename` / `field_mapping` | `dict[str, str]` | Rename raw fields. |
+| `drop` / `drop_fields` | `list[str]` | Drop fields by resolved name. |
+| `fields` / `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, or `"string"`. |
+| `dictionary` / `dictionary_columns` | `list[str]` | Explicit dictionary encoding. |
 | `filter` | `dict` | Per-row or post-reduce filter (see below). |
 | `schema` | `list[str]` | Output column order. |
 | `auto_dict` | `bool` | Upgrade low-cardinality string columns to dictionary. |
