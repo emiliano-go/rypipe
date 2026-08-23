@@ -53,6 +53,91 @@ impl ExecutionPlan {
         Self::default()
     }
 
+    /// Rename a raw field to an output column name.
+    pub fn rename(mut self, raw: impl Into<String>, output: impl Into<String>) -> Self {
+        self.field_map.insert(raw.into(), output.into());
+        self
+    }
+
+    /// Drop a single raw/output field.
+    pub fn drop(mut self, field: impl Into<String>) -> Self {
+        self.drop_fields.insert(field.into());
+        self
+    }
+
+    /// Drop many raw/output fields.
+    pub fn drop_many<I, S>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.drop_fields.extend(fields.into_iter().map(Into::into));
+        self
+    }
+
+    /// Set the storage type for an output column.
+    pub fn type_as(mut self, field: impl Into<String>, field_type: FieldType) -> Self {
+        self.field_types.insert(field.into(), field_type);
+        self
+    }
+
+    /// Dict-encode an output column.
+    pub fn dictionary(mut self, field: impl Into<String>) -> Self {
+        self.dictionary_columns.insert(field.into());
+        self
+    }
+
+    /// Keep only rows where `field == value` (string comparison, per-row).
+    pub fn filter_eq(mut self, field: impl Into<String>, value: impl Into<String>) -> Self {
+        self.filter = Some(FilterPredicate::Equal {
+            field: field.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    /// Keep only rows where `field != value` (string comparison, per-row).
+    pub fn filter_ne(mut self, field: impl Into<String>, value: impl Into<String>) -> Self {
+        self.filter = Some(FilterPredicate::NotEqual {
+            field: field.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    /// Keep only rows where `field_a op field_b` (post-reduce via Arrow compute).
+    pub fn filter_compare(
+        mut self,
+        field_a: impl Into<String>,
+        op: CompareOp,
+        field_b: impl Into<String>,
+    ) -> Self {
+        self.filter = Some(FilterPredicate::Compare {
+            field_a: field_a.into(),
+            op,
+            field_b: field_b.into(),
+        });
+        self
+    }
+
+    /// Set the output column order. Columns not listed appear after the listed
+    /// ones in first-appearance order.
+    pub fn schema_order<I, S>(mut self, order: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.schema_order = order.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Enable or disable automatic dictionary upgrade for low-cardinality
+    /// string columns.
+    pub fn with_auto_dict(mut self, yes: bool) -> Self {
+        self.auto_dict = yes;
+        self
+    }
+
     /// Determine the storage type for an output column name.
     pub fn column_type(&self, name: &str) -> FieldType {
         if let Some(ft) = self.field_types.get(name) {
