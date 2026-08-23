@@ -117,3 +117,9 @@ Then use `perf`, `cargo flamegraph`, or ` samply` to profile.
 - A generic streaming `RecordParser` could support chunked async input.
 - Dictionary encoding could be made incremental across chunks to recover the
   fast path for `auto_dict=True`.
+
+## See also
+
+- [Architecture](./architecture.md): engine design and fast/merge paths.
+- [Rust API](./rust-api.md): tuning `num_chunks` and `memory` from Rust.
+- [Python API](./python-api.md): the same knobs from Python.

@@ -196,6 +196,12 @@ let table = record_batches_to_pyarrow_table(py, &batches)?;
 For a pure-Rust program you do not need this; `arrow::record_batch::RecordBatch`
 is already sufficient.
 
+## See also
+
+- [Writing a format adapter](./writing-adapters.md): implement `Splitter` and `RecordParser`.
+- [Architecture](./architecture.md): how the pieces fit together.
+- [Python API](./python-api.md): the Python bindings over the same engine.
+
 ## Writing a custom sink
 
 You can implement `ColumnarSink` yourself for specialized behavior. Most users
