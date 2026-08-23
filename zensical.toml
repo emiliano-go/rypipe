@@ -1,0 +1,114 @@
+[project]
+site_name = "rypipe"
+site_description = "Format-agnostic columnar engine for XML, JSON, CSV, HTML, and more. Rust core, Python bindings, parallel scheduling, memory-bounded execution, and Arrow export."
+site_url = "https://rypipe.emiliano-go.com/"
+docs_dir = "docs"
+site_dir = "site"
+
+copyright = "&copy; 2026 Emiliano Gandini Outeda"
+
+extra_css = ["stylesheets/extra.css"]
+
+[project.theme]
+variant = "modern"
+custom_dir = "docs/overrides"
+font.text = "Ubuntu"
+font.code = "JetBrains Mono"
+features = [
+    "navigation.instant",
+    "navigation.instant.prefetch",
+    "navigation.tabs",
+    "navigation.indexes",
+    "navigation.top",
+    "navigation.footer",
+    "search.suggest",
+    "search.highlight",
+    "content.code.copy",
+    "content.code.annotate",
+    "toc.follow",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/emiliano-go/rypipe"
+name = "rypipe on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/rypipe/"
+name = "rypipe on PyPI"
+
+[[project.nav]]
+"Home" = "index.md"
+
+[[project.nav]]
+"Python API" = "python-api.md"
+
+[[project.nav]]
+"Rust Core" = "rust-api.md"
+
+[[project.nav]]
+"Writing Adapters" = "writing-adapters.md"
+
+[[project.nav]]
+"Architecture" = "architecture.md"
+
+[[project.nav]]
+"Performance" = "performance.md"
+
+[[project.nav]]
+"Integrating crxml" = "integrating-crxml.md"
+
+[project.markdown_extensions]
+"seoslug.contrib.zensical" = {
+  canonical_host = "rypipe.emiliano-go.com",
+  public_base_url = "https://rypipe.emiliano-go.com/",
+  site_name = "rypipe",
+  title_template = "{title} - rypipe",
+  publisher_name = "Emiliano Gandini Outeda",
+  locale = "en_US",
+  twitter_site = "@emiliano_go_",
+  auto_generate_schema = true,
+}
+
+[project.markdown_extensions.tables]
+
+[project.markdown_extensions.admonition]
+
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+
+[project.markdown_extensions.pymdownx.inlinehilite]
+
+[project.markdown_extensions.pymdownx.snippets]
+
+[project.markdown_extensions.pymdownx.superfences]
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+
+[project.markdown_extensions.pymdownx.tasklist]
+custom_checkbox = true
+
+[project.markdown_extensions.attr_list]
+
+[project.markdown_extensions.md_in_html]

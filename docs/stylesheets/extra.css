@@ -1,0 +1,64 @@
+:root {
+    --md-primary-fg-color: #cd4bfb;
+}
+
+/* Zensical renders a synthetic homepage H1 for root index.md. */
+.md-content__inner > h1#__skip {
+    display: none;
+}
+
+/* Prevent wrapping in the first-column code cells of dependency tables. */
+.md-typeset table td:first-child code {
+    white-space: nowrap;
+}
+
+/*
+ * Mobile sidebar drawer.
+ *
+ * The Zensical "modern" theme HTML includes a hamburger button, drawer
+ * checkbox (#__drawer), and overlay, but no CSS to show/hide the sidebar
+ * on small screens - the sidebar is always visible as a sticky column.
+ *
+ * This overrides the sidebar to a fixed overlay drawer on mobile (<1220px).
+ */
+@media screen and (max-width: 76.234375em) {
+    .md-sidebar--primary {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        bottom: 0 !important;
+        height: 100dvh !important;
+        max-width: 20rem;
+        width: 80vw !important;
+        z-index: 99 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border-radius: 0 !important;
+        border-right: 1px solid var(--md-default-fg-color--lightest);
+        transform: translateX(-100%) !important;
+        transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+
+    .md-sidebar--primary .md-sidebar__scrollwrap {
+        overscroll-behavior-y: contain;
+    }
+
+    body.drawer-open .md-sidebar--primary {
+        transform: translateX(0) !important;
+    }
+
+    .md-overlay {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 98 !important;
+        background: rgba(0,0,0,0.4);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    body.drawer-open .md-overlay {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}

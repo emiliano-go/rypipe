@@ -1,0 +1,1225 @@
+# rypipe Documentation
+> Full documentation for rypipe: format-agnostic columnar engine for XML, JSON, CSV, HTML, and more
+> Source: https://rypipe.emiliano-go.com
+> Pages: 7
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/architecture/
+========================================================================
+
+# Architecture
+
+`rypipe` is built around one idea: **separate the parts of parsing that depend
+on a file format from the parts that don't.**
+
+The format-specific side answers questions like:
+
+- Where does one row end and the next begin?
+- How do I extract field names and values from a row?
+- What is the encoding / entity-escaping rule?
+
+The format-agnostic side answers questions like:
+
+- How do I store rows as typed columns?
+- How do I rename, drop, cast, filter, and reorder columns?
+- How do I export to Arrow?
+- How do I parallelize parsing while staying inside a memory budget?
+
+## High-level flow
+
+```
+input bytes
+    │
+    ▼
+┌─────────────────┐
+│   Splitter      │  ← format-specific: finds safe chunk boundaries
+└────────┬────────┘
+         │ Vec<Range<usize>>
+         ▼
+┌─────────────────┐
+│ RecordParser    │  ← format-specific: turns bytes into field events
+│   begin_row()   │
+│   put_field()   │
+│   end_row()     │
+└────────┬────────┘
+         │ Value events
+         ▼
+┌─────────────────┐
+│  TableBuilder   │  ← format-agnostic: columnar storage + plan
+│ (ColumnarSink)  │
+└────────┬────────┘
+         │ RecordBatch
+         ▼
+┌─────────────────┐
+│  Arrow export   │  ← format-agnostic: C Data Interface / compute kernels
+└─────────────────┘
+```
+
+## Crate overview
+
+### `rypipe-core`
+
+The pure-Rust engine. It has no `pyo3` or `quick-xml` dependency and no
+format-specific logic.
+
+| Module | Responsibility |
+|--------|----------------|
+| `value` | `Value<'a>` enum: `Str(&str)`, `Int64`, `Float64`, `Bool`, `Null`. |
+| `plan` | `ExecutionPlan`, `FieldType`, `FilterPredicate`, `CompareOp`. |
+| `columnar` | `StrColumn`, `ColumnBuilder`, dictionary encoding, auto-dict heuristic. |
+| `engine` | `TableBuilder`, the main `ColumnarSink` implementation. |
+| `merge` | `TableBuilder::extend`, `engines_to_record_batches`. |
+| `arrow_export` | Build Arrow arrays, apply `Compare` filters via `arrow::compute`. |
+| `decoder` | `Splitter`, `RecordParser`, `ColumnarSink` traits. |
+| `parallel` | `ParallelExecutor` over a `Splitter` + `RecordParser`. |
+| `bounded` | `BoundedExecutor` + `MemoryBudget` for streaming large files. |
+| `input` | `InputBuffer` abstraction: mmap or owned `Vec<u8>`. |
+| `error` | Unified `Error` / `Result` type. |
+
+### `rypipe-xml`
+
+The first format adapter. It provides:
+
+- `CrystalXmlDecoder` (implements `RecordParser`): emits field events for
+  Crystal Reports XML rows (`<Row>`, `<Field>`, `<Text>`, `<Section>`,
+  attributes, `FormattedValue` / `Value` / `TextValue`).
+- `CrystalXmlSplitter` (implements `Splitter`): finds safe row boundaries
+  while skipping comments and CDATA.
+
+### `rypipe-python`
+
+PyO3 bindings that expose the same entry points crxml historically used:
+
+- `read_to_columnar`
+- `read_to_columnar_multi`
+- `read_to_columnar_par`
+- `read_to_columnar_bounded`
+
+It also exposes reusable Rust helpers (`export::record_batches_to_pyarrow_table`)
+so downstream crates like crxml can reuse the Python/Arrow boundary.
+
+## The decoder API
+
+The boundary between format-specific and format-agnostic code is three traits.
+
+### `Splitter`
+
+```rust
+pub trait Splitter: Send + Sync {
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize>;
+    fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize;
+}
+```
+
+`find_split_points` returns sorted byte offsets. Adjacent offsets define a
+chunk range. The first offset should be `0` and the last should be
+`bytes.len()`. A good splitter guarantees that each chunk starts at a valid
+row boundary so chunks can be parsed independently.
+
+`estimate_bytes_per_row` is used by the bounded executor to size batches.
+
+### `RecordParser`
+
+```rust
+pub trait RecordParser: Send + Sync {
+    fn validate(&self, bytes: &[u8]) -> Result<()>;
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()>;
+}
+```
+
+`validate` checks well-formedness once per chunk (e.g. UTF-8 validity). The
+main parse loop then calls `begin_row`, `put_field`, and `end_row` on the sink.
+
+`RecordParser` never sees the `ExecutionPlan`. It only resolves native field
+identities to plain names. For XML that means emitting the attribute/child name;
+for CSV it means mapping a header index to a column name internally.
+
+### `ColumnarSink`
+
+```rust
+pub trait ColumnarSink {
+    fn begin_row(&mut self);
+    fn put_field(&mut self, name: &str, value: Value<'_>);
+    fn end_row(&mut self);
+    fn wants(&self, _name: &str) -> bool { true }
+    fn finish(&mut self) -> Result<RecordBatch>;
+}
+```
+
+`TableBuilder` is the canonical implementation. It:
+
+1. Resolves the field name through `ExecutionPlan::resolve_field` (rename-then-drop).
+2. Ensures a `ColumnBuilder` exists for the resolved name.
+3. Applies **last-write-wins** within the current row.
+4. On `end_row`, null-fills missing columns and evaluates per-row filters.
+5. On `finish`, sorts columns by `schema_order`, runs auto-dict upgrade, and
+   builds Arrow arrays.
+
+`wants` lets parsers skip fields that will be dropped, avoiding wasted
+extraction work.
+
+## Execution plan
+
+`ExecutionPlan` is the format-agnostic pushdown target.
+
+```rust
+pub struct ExecutionPlan {
+    pub field_map: HashMap<String, String>,       // rename
+    pub drop_fields: HashSet<String>,             // drop
+    pub field_types: HashMap<String, FieldType>,  // cast
+    pub dictionary_columns: HashSet<String>,      // explicit dict encoding
+    pub filter: Option<FilterPredicate>,          // per-row or post-reduce
+    pub schema_order: Vec<String>,                // output column order
+    pub auto_dict: bool,                          // auto-dict upgrade
+}
+```
+
+Field resolution order:
+
+1. `field_map` renames the raw field.
+2. `drop_fields` checks the resolved name.
+3. `field_types` / `dictionary_columns` chooses the storage type.
+4. `filter` rejects rows during `end_row` (for `Equal`/`NotEqual`) or after
+   assembly (for `Compare`).
+
+`FilterPredicate::Compare` is evaluated after the `RecordBatch` is built using
+`arrow::compute` comparison kernels and `filter_record_batch`. This removes the
+previous dependency on calling `pyarrow.compute` from inside Rust.
+
+## Columnar storage
+
+### `StrColumn`
+
+Strings are stored in one contiguous byte arena plus `i32` offsets and a
+validity bitmap. This is exactly the Arrow string layout, so export is a block
+copy of two buffers.
+
+- `push` appends bytes and an offset; no per-cell `String` allocation.
+- `pop` truncates the arena; enables row-level filtering without compaction.
+- `append` merges another column by base-shifting offsets.
+
+### `ColumnBuilder`
+
+An enum over storage types:
+
+```rust
+pub(crate) enum ColumnBuilder {
+    String(StrColumn),
+    Int64(Vec<Option<i64>>),
+    Float64(Vec<Option<f64>>),
+    Boolean(Vec<Option<bool>>),
+    Dictionary { codes: Vec<Option<i32>>, dict: Vec<String>, index: HashMap<String, i32> },
+}
+```
+
+Typed builders parse from `Value::Str` or accept native typed `Value` variants
+directly. Unparseable strings become `None` (null).
+
+Dictionary encoding uses a `value → i32` side index. When two dictionary
+columns are merged, the right-hand dictionary is remapped into the left-hand
+one and codes are translated in one pass.
+
+## Parallel execution
+
+`ParallelExecutor::parse` does the following:
+
+1. Calls `Splitter::find_split_points`.
+2. Converts points to non-empty `Range<usize>` chunks.
+3. Uses `rayon::par_iter` to parse each chunk independently into a
+   `TableBuilder`.
+4. **Fast path**: if `auto_dict` is false and there is no `Compare` filter,
+   each builder is exported as its own `RecordBatch` in parallel via
+   `engines_to_record_batches`. No serial merge happens.
+5. **Merge path**: if `auto_dict` or a `Compare` filter is present, chunk
+   builders are merged sequentially, the filter is applied, and a single
+   `RecordBatch` is returned.
+
+Panic catching per chunk prevents one malformed chunk from killing the whole
+parallel parse.
+
+## Bounded execution
+
+`BoundedExecutor::run` keeps peak memory near a configured budget:
+
+1. Opens the file via `InputBuffer`.
+2. Estimates `bytes_per_row` from the splitter.
+3. Computes `rows_per_batch` from the budget.
+4. Splits the file into at most 64 batches.
+5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and
+   resets the builder.
+6. Returns a `Vec<RecordBatch>`; the caller concatenates.
+
+Because the input buffer is dropped before the parse phase begins for bounded
+mode, mmap-backed pages are released before downstream work starts.
+
+## Memory model
+
+- `InputBuffer::Mmap` maps the file and applies `MADV_WILLNEED` (prefault) or
+  `MADV_SEQUENTIAL` (RSS-sensitive) advice on Unix. The mapping is dropped
+  before Arrow export, so no borrowed bytes outlive it.
+- `InputBuffer::Owned` simply reads the file into a `Vec<u8>`.
+- `StrColumn` owns its bytes; Arrow arrays are built from owned buffers.
+- Numeric columns use dense `Vec<Option<T>>`.
+
+## Error handling
+
+`rypipe-core` uses one `Error` enum:
+
+```rust
+pub enum Error {
+    Utf8(...),
+    Plan(String),
+    Merge(String),
+    Io(...),
+    Arrow(...),
+}
+```
+
+Adapters can map their own errors into this type. `rypipe-python` maps these
+to `XmlError`, `PlanError`, and `MergeError` Python exceptions.
+
+## Why this shape?
+
+The original crxml engine was fast but tightly coupled to Crystal Reports XML.
+Extracting it into rypipe keeps those performance characteristics (arena
+string storage, SIMD UTF-8 validation, zero-copy event parsing, GIL release,
+parallel chunking, memory bounding) while making them available to other
+formats. A new adapter only needs to answer "where are the rows?" and "what are
+the fields?"; the engine handles the rest.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/
+========================================================================
+
+# rypipe documentation
+
+`rypipe` is a format-agnostic columnar engine that turns byte streams into
+Apache Arrow record batches. It separates **format-specific** parsing from
+**format-agnostic** execution, so the same engine can parse XML, JSON, CSV,
+HTML, or any other row-oriented format once you provide a small adapter.
+
+## What rypipe is
+
+- A Rust workspace with three crates:
+  - [`rypipe-core`](./architecture.md#rypipe-core): the generic engine.
+  - [`rypipe-xml`](./architecture.md#rypipe-xml): Crystal Reports XML adapter.
+  - [`rypipe-python`](./architecture.md#rypipe-python): PyO3 bindings.
+- Zero-copy friendly: decoders emit borrowed strings; the engine copies only
+  when necessary.
+- GIL-free parsing: all heavy work runs outside Python's GIL.
+- Memory-bounded and parallel by design.
+
+## What rypipe is not
+
+- Not a full query engine. It handles projection, renaming, dropping, casting,
+  filtering, and dictionary encoding, not joins, aggregations, or SQL.
+- Not a one-size-fits-all parser. Each format needs a `RecordParser` + `Splitter`
+  adapter.
+
+## Quick start
+
+### From Python
+
+```bash
+export PYO3_PYTHON=/path/to/python3.12
+maturin develop --release
+```
+
+```python
+import _rypipe as rp
+
+table = rp.read_to_columnar_par(
+    "data.xml",
+    row_tag="Row",
+    field_types={"amount": "float64"},
+    filter={"field": "status", "op": "==", "value": "active"},
+)
+print(table.num_rows, table.num_columns)
+```
+
+### From Rust
+
+```rust
+use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
+use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+
+let input = InputBuffer::open("data.xml".as_ref(), false, false)?;
+let mut builder = TableBuilder::with_plan(1024, ExecutionPlan::new());
+CrystalXmlDecoder::with_row_tag(b"Row").parse_chunk(input.as_slice(), &mut builder)?;
+let batch = builder.finish()?;
+```
+
+## Guides
+
+- [Architecture](./architecture.md): how the pieces fit together.
+- [Python API](./python-api.md): `_rypipe` functions and options.
+- [Rust API](./rust-api.md): using `rypipe-core` and writing custom adapters.
+- [Writing a format adapter](./writing-adapters.md): adding CSV, JSON, etc.
+- [Integrating with crxml](./integrating-crxml.md): how crxml consumes rypipe.
+- [Performance](./performance.md): benchmarks and tuning knobs.
+
+## Repository layout
+
+```
+rypipe/
+├── Cargo.toml                 # workspace
+├── pyproject.toml             # maturin / Python package
+├── README.md
+├── LICENSE
+├── crates/
+│   ├── rypipe-core/           # generic engine
+│   ├── rypipe-xml/            # Crystal XML adapter
+│   └── rypipe-python/         # PyO3 bindings
+└── docs/
+    └── (this directory)
+```
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrating-crxml/
+========================================================================
+
+# Integrating with crxml
+
+`crxml` was the first consumer of `rypipe`. Its Rust crate now contains only:
+
+- The streaming `CrxmlReader` / `RowParser` engine (Crystal-specific).
+- Thin FFI wrappers that call into `rypipe-core` and `rypipe-xml` for the
+  columnar paths.
+
+This guide explains how the integration works so you can do the same in your
+own project.
+
+## Cargo setup
+
+In `src/crxml_core/Cargo.toml`:
+
+```toml
+[dependencies]
+rypipe-core = { path = "../../../rypipe/crates/rypipe-core" }
+rypipe-xml = { path = "../../../rypipe/crates/rypipe-xml" }
+
+pyo3 = { version = "0.24", features = ["extension-module"] }
+quick-xml = "0.36"        # still needed for the stream engine
+arrow = { version = "=55.2.0", default-features = false, features = ["pyarrow"] }
+rustc-hash = "2"
+mimalloc = { version = "0.1", default-features = false }
+```
+
+## Keeping the public Python API unchanged
+
+crxml kept the same four `#[pyfunction]` signatures and the same exception
+names (`XmlError`, `PlanError`, `MergeError`). The bodies changed from inline
+engine code to rypipe calls.
+
+Example: `read_to_columnar`
+
+```rust
+#[pyfunction]
+fn read_to_columnar(
+    py: Python<'_>,
+    path: String,
+    row_tag: Option<String>,
+    // ... same kwargs as before
+) -> PyResult<PyObject> {
+    let plan = build_plan_from_kwargs(...)?;
+    let p = Path::new(&path);
+    let row_tag = row_tag.unwrap_or_else(|| "Row".to_string()).into_bytes();
+
+    let batch = py.allow_threads(|| -> PyResult<RecordBatch> {
+        let input = rypipe_core::InputBuffer::open(p, use_mmap, prefault)
+            .map_err(|e| PyIOError::new_err(...))?;
+        let mut engine = rypipe_core::TableBuilder::with_plan(
+            (input.as_slice().len() / 512).max(64),
+            plan.clone(),
+        );
+        let decoder = rypipe_xml::CrystalXmlDecoder::with_row_tag(&row_tag);
+        decoder.validate(input.as_slice()).map_err(...)?;
+        decoder.parse_chunk(input.as_slice(), &mut engine).map_err(...)?;
+        let mut batch = engine.finish().map_err(...)?;
+        if let Some(ref filter) = plan.filter {
+            batch = rypipe_core::apply_compare_filter(batch, filter).map_err(...)?;
+        }
+        Ok(batch)
+    })?;
+
+    export_record_batch_to_pyarrow(py, batch)
+}
+```
+
+`build_plan_from_kwargs` can be reimplemented locally for exact error-message
+compatibility, or you can reuse `rypipe_python::plan_kwargs::execution_plan_from_kwargs`.
+
+## Export helper
+
+crxml already depends on `arrow` with the `pyarrow` feature, so exporting a
+`RecordBatch` is a one-liner:
+
+```rust
+use arrow::pyarrow::ToPyArrow;
+
+fn export_record_batch_to_pyarrow(py: Python<'_>, batch: RecordBatch) -> PyResult<PyObject> {
+    batch.to_pyarrow(py)
+}
+```
+
+For multiple batches, use `pyarrow.concat_tables` via Python or reuse
+`rypipe_python::export::record_batches_to_pyarrow_table`.
+
+## Parallel and bounded wrappers
+
+For `read_to_columnar_par`, call `rypipe_core::ParallelExecutor::parse`:
+
+```rust
+let batches = rypipe_core::parallel::ParallelExecutor::parse(
+    bytes,
+    &rypipe_xml::CrystalXmlSplitter::with_row_tag(&row_tag),
+    rypipe_xml::CrystalXmlDecoder::with_row_tag(&row_tag),
+    plan,
+    num_chunks,
+)?;
+```
+
+For `read_to_columnar_bounded`, call `rypipe_core::bounded::BoundedExecutor`:
+
+```rust
+let batches = rypipe_core::bounded::BoundedExecutor::new(
+    rypipe_core::bounded::MemoryBudget::new(memory_bytes),
+)
+.run(path, &splitter, decoder, plan, prefault)?;
+```
+
+## Error mapping
+
+Map `rypipe_core::Error` variants to your Python exceptions:
+
+```rust
+fn map_err(e: rypipe_core::Error) -> PyErr {
+    match e {
+        rypipe_core::Error::Utf8(_) | rypipe_core::Error::Plan(s) if s.contains("XML") =>
+            XmlError::new_err(s),
+        rypipe_core::Error::Plan(s) => PlanError::new_err(s),
+        rypipe_core::Error::Merge(s) => MergeError::new_err(s),
+        rypipe_core::Error::Io(e) => PyIOError::new_err(e.to_string()),
+        rypipe_core::Error::Arrow(e) => pyo3::exceptions::PyException::new_err(e.to_string()),
+    }
+}
+```
+
+## Why keep the stream engine separate?
+
+The streaming `CrxmlReader` returns `list[dict[str, str]]` and releases the GIL
+in batches. It is tightly coupled to Crystal Reports XML row semantics and is
+not part of the columnar engine, so it stayed in crxml.
+
+## Verification
+
+After the integration, crxml's full pytest suite should pass:
+
+```bash
+export PYO3_PYTHON=/path/to/python3.12
+cd /path/to/crxml
+maturin develop --release
+python -m pytest tests/
+```
+
+The differential tests (`test_differential.py`) compare the columnar/multi/par/
+bounded paths against an independent ElementTree oracle, confirming that the
+rypipe-backed engine produces the same results as the original crxml engine.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/performance/
+========================================================================
+
+# Performance
+
+`rypipe` inherits the performance profile of the original crxml engine: arena
+string storage, SIMD UTF-8 validation, zero-copy event parsing, GIL-free
+parsing, and parallel chunking. This page shows measured numbers and explains
+the tuning knobs.
+
+## Measured throughput
+
+Hardware: Linux workstation, 100 MB synthetic Crystal Reports XML file,
+90,384 rows, Python 3.12, release build.
+
+| Path | Time | Rows/s | MB/s |
+|------|------|--------|------|
+| `read_to_columnar` | 0.395 s | 229k | 253 |
+| `read_to_columnar_multi` (4 chunks) | 0.267 s | 339k | 375 |
+| `read_to_columnar_par` (8 chunks) | 0.098 s | 923k | 1,021 |
+| Stream iteration | 0.449 s | 201k | 223 |
+| Columnar iteration | 0.318 s | 284k | 314 |
+| Parallel iteration | 0.159 s | 567k | 627 |
+| Columnar → Arrow Table | 0.224 s | 403k | 446 |
+| Parallel → Arrow Table | 0.050 s | 1.80M | 1,989 |
+| Columnar → DataFrame | 0.214 s | 422k | 467 |
+| Parallel → DataFrame | 0.055 s | 1.64M | 1,808 |
+
+Memory stayed around **530 MB RSS** for native exports; Python object overhead
+added ~60 MB for iteration or DataFrame conversion.
+
+## Tuning knobs
+
+### Number of chunks (`num_chunks`)
+
+`rypipe-core::ParallelExecutor` accepts `num_chunks`. More chunks improve load
+balancing but add scheduling overhead. crxml uses `threads * 4` based on VTune
+measurements on a 24-core machine. For most workloads, 2-4 times the number of
+logical cores is a good starting point.
+
+### Memory budget (`memory`)
+
+`BoundedExecutor` keeps intermediate builder storage under the given byte
+budget. It does not include Arrow export or downstream pandas conversion; set
+the budget lower than total RAM. A value like 500 MB is reasonable for
+workstations.
+
+### `use_mmap` and `prefault`
+
+| Combination | Best for |
+|-------------|----------|
+| `use_mmap=True, prefault=True` | Speed when the file fits in RAM. |
+| `use_mmap=True, prefault=False` | Large files where RSS matters. |
+| `use_mmap=False` | Portability; reads into a `Vec<u8>`. |
+
+`prefault=True` uses `MADV_WILLNEED` to fault the whole file up front.
+`prefault=False` uses `MADV_SEQUENTIAL` so the kernel can drop pages behind the
+reader.
+
+### `auto_dict`
+
+When `auto_dict=True`, string columns with low cardinality are upgraded to
+dictionary encoding. This reduces memory and can speed up downstream operations,
+but it forces a serial merge of all chunk builders in parallel mode, which
+raises peak RSS and removes the fast per-chunk export path.
+
+Use `auto_dict=True` when:
+
+- Columns have many repeated values.
+- You need smaller Arrow files or faster group-by/filter operations.
+
+Use `auto_dict=False` when:
+
+- Throughput is the top priority.
+- Columns are high cardinality or already numeric.
+
+### `field_types`
+
+Casting strings to numbers during parse avoids storing intermediate strings and
+lets numeric `Compare` filters use native kernels. If you know a column is
+numeric, declare it.
+
+### `schema`
+
+Providing `schema_order` avoids the small cost of sorting columns at finish time
+and makes output column order deterministic across chunks.
+
+## Fast path vs merge path
+
+`ParallelExecutor` has two internal paths:
+
+- **Fast path**: when `auto_dict` is false and there is no `Compare` filter,
+  each chunk is exported as its own `RecordBatch` in parallel. No serial merge.
+- **Merge path**: when `auto_dict` or a `Compare` filter is enabled, chunk
+  builders are merged sequentially before export. Peak RSS is higher.
+
+If you need both a `Compare` filter and maximum throughput, consider filtering
+after export in Python/Arrow instead.
+
+## GIL behavior
+
+All parse paths release the GIL during the heavy Rust work. The Arrow C Data
+Interface export re-acquires the GIL briefly. For `read_to_columnar_par`, the
+entire parallel parse runs outside the GIL.
+
+## Profiling
+
+Build with the `profiling` profile for symbols:
+
+```bash
+cargo build --profile profiling -p rypipe-core
+```
+
+Then use `perf`, `cargo flamegraph`, or ` samply` to profile.
+
+## Future work
+
+- CSV and NDJSON adapters should be faster than XML because their splitters and
+  parsers are simpler.
+- A generic streaming `RecordParser` could support chunked async input.
+- Dictionary encoding could be made incremental across chunks to recover the
+  fast path for `auto_dict=True`.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/python-api/
+========================================================================
+
+# Python API
+
+`rypipe-python` builds a mixed Rust/Python package. The public API lives in the
+`rypipe` package; `_rypipe` is the low-level Rust extension and is kept for
+backward compatibility.
+
+## Building the Python module
+
+```bash
+export PYO3_PYTHON=/path/to/python3.12
+maturin develop --release
+```
+
+`maturin` builds `crates/rypipe-python/Cargo.toml` and installs both the `rypipe`
+Python package and the `_rypipe` Rust extension.
+
+## Public API (`import rypipe`)
+
+### `rypipe.read`
+
+Single entry point for all formats and execution modes.
+
+```python
+import rypipe
+
+table = rypipe.read("data.xml")
+
+# Same call with all common options:
+table = rypipe.read(
+    "data.xml",
+    format="xml",            # inferred from extension when omitted
+    row_tag="Row",
+    mode="par",              # "sync" | "multi" | "par" | "stream"
+    chunks=4,
+    rename={"old_name": "new_name"},
+    drop=["internal_id"],
+    fields={"amount": "float64", "qty": "int64"},
+    dictionary=["status"],
+    filter={"field": "status", "op": "==", "value": "active"},
+    schema=["id", "status", "amount"],
+    auto_dict=False,
+    use_mmap=False,
+    prefault=False,
+)
+```
+
+Returns a `pyarrow.Table`.
+
+### `rypipe.read_par`
+
+Convenience wrapper for parallel mode.
+
+```python
+table = rypipe.read_par("data.xml", chunks=8, fields={"amount": "float64"})
+```
+
+### `rypipe.read_stream`
+
+Convenience wrapper for bounded-memory streaming. `memory` accepts an int
+(bytes) or a human-readable string such as `"128MiB"`.
+
+```python
+table = rypipe.read_stream("huge.xml", memory="500MiB", row_tag="Row")
+```
+
+### Format auto-detection
+
+`rypipe.read` infers the format from the file extension when `format` is not
+provided:
+
+| Extension | Format |
+|-----------|--------|
+| `.xml` | `xml` |
+
+Pass `format="xml"` explicitly for extensionless paths.
+
+### Exceptions
+
+| Exception | Meaning |
+|-----------|---------|
+| `rypipe.XmlError` | Malformed input or parse failure (including invalid UTF-8). |
+| `rypipe.PlanError` | Invalid pushdown plan (unknown field type, bad filter op). |
+| `rypipe.MergeError` | Chunk-merge conflict (e.g. type mismatch across chunks). |
+| `rypipe.RypipeError` | Invalid API usage (bad memory string, unknown extension). |
+
+## Low-level API (`import _rypipe`)
+
+`_rypipe` exposes the same columnar entry points that crxml historically used,
+plus a new generic `_rypipe.read` dispatch function.
+
+### `_rypipe.read`
+
+Format-agnostic dispatch used by the `rypipe` wrapper.
+
+```python
+import _rypipe
+
+table = _rypipe.read(
+    "data.xml",
+    "xml",
+    format_options={"row_tag": "Row"},
+    mode="par",
+    num_chunks=4,
+    memory=64_000_000,
+    field_types={"amount": "float64"},
+)
+```
+
+### Legacy entry points
+
+| Function | Mode |
+|----------|------|
+| `_rypipe.read_to_columnar` | sync |
+| `_rypipe.read_to_columnar_multi` | sequential multi-chunk |
+| `_rypipe.read_to_columnar_par` | parallel |
+| `_rypipe.read_to_columnar_bounded` | bounded memory |
+
+These accept the original crxml-style kwargs (`field_mapping`, `drop_fields`,
+`field_types`, etc.).
+
+## Plan kwargs
+
+All public functions accept the same pushdown kwargs.
+
+| Kwarg | Type | Effect |
+|-------|------|--------|
+| `rename` / `field_mapping` | `dict[str, str]` | Rename raw fields. |
+| `drop` / `drop_fields` | `list[str]` | Drop fields by resolved name. |
+| `fields` / `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, or `"string"`. |
+| `dictionary` / `dictionary_columns` | `list[str]` | Explicit dictionary encoding. |
+| `filter` | `dict` | Per-row or post-reduce filter (see below). |
+| `schema` | `list[str]` | Output column order. |
+| `auto_dict` | `bool` | Upgrade low-cardinality string columns to dictionary. |
+| `use_mmap` | `bool` | Memory-map the input file. |
+| `prefault` | `bool` | `MADV_WILLNEED` when mmap is enabled. |
+
+## Filters
+
+Constant equality/inequality (evaluated per-row during parse):
+
+```python
+filter={"field": "status", "op": "==", "value": "active"}
+filter={"field": "status", "op": "!=", "value": "archived"}
+```
+
+Column-to-column comparison (evaluated after the table is assembled):
+
+```python
+filter={"field_a": "amount", "op": ">", "field_b": "threshold"}
+```
+
+Supported comparison ops: `>`, `<`, `>=`, `<=`, `==`, `!=`.
+
+## Reusing the Rust helpers from another extension
+
+If you are building a separate PyO3 crate (like crxml), you can depend on
+`rypipe-python` for the plan/Export helpers, or just call `rypipe-core` and
+`rypipe-xml` directly and copy the small export logic. See
+[Integrating with crxml](./integrating-crxml.md).
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/rust-api/
+========================================================================
+
+# Rust API
+
+`rypipe-core` is a pure-Rust crate. This guide shows how to use it directly and
+how its pieces compose.
+
+## Dependencies
+
+```toml
+[dependencies]
+rypipe-core = { path = "../rypipe/crates/rypipe-core" }
+rypipe-xml = { path = "../rypipe/crates/rypipe-xml" }
+```
+
+## Recommended entry point: `Pipeline`
+
+`Pipeline` wires a `Splitter` and `RecordParser` together and removes the
+boilerplate of opening files and choosing an execution mode.
+
+```rust
+use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
+use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+
+fn main() -> rypipe_core::Result<()> {
+    let pipeline = Pipeline::new(
+        CrystalXmlSplitter::with_row_tag(b"Row"),
+        CrystalXmlDecoder::with_row_tag(b"Row"),
+    )
+    .with_plan(
+        ExecutionPlan::new()
+            .rename("old_name", "new_name")
+            .drop("junk")
+            .type_as("amount", FieldType::Float64)
+            .dictionary("status")
+            .filter_eq("status", "active")
+            .schema_order(["id", "status", "amount"])
+            .with_auto_dict(true),
+    );
+
+    // Single-file parse.
+    let batch = pipeline.read_path("data.xml", false, false)?;
+    println!("rows={} cols={}", batch.num_rows(), batch.num_columns());
+
+    // Parallel parse.
+    let batches = pipeline.read_path_par("data.xml", 8, false, false)?;
+
+    // Bounded-memory streaming.
+    let batches = pipeline.read_path_stream(
+        "huge.xml",
+        rypipe_core::MemoryBudget::new(500_000_000),
+        false,
+    )?;
+
+    Ok(())
+}
+```
+
+`rypipe-xml` also provides a shortcut constructor:
+
+```rust
+use rypipe_xml::xml_pipeline;
+
+let pipeline = xml_pipeline("Row");
+let batch = pipeline.read_path("data.xml", false, false)?;
+```
+
+## A minimal XML example (low level)
+
+If you prefer to control every step, use `TableBuilder` directly:
+
+```rust
+use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
+use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+
+fn main() -> rypipe_core::Result<()> {
+    let input = InputBuffer::open("data.xml".as_ref(), false, false)?;
+    let mut builder = TableBuilder::with_plan(1024, ExecutionPlan::new());
+
+    let decoder = CrystalXmlDecoder::with_row_tag(b"Row");
+    decoder.validate(input.as_slice())?;
+    decoder.parse_chunk(input.as_slice(), &mut builder)?;
+
+    let batch = builder.finish()?;
+    println!("rows={} cols={}", batch.num_rows(), batch.num_columns());
+    Ok(())
+}
+```
+
+## `ExecutionPlan`
+
+The builder API is the recommended way to construct a plan:
+
+```rust
+use rypipe_core::{CompareOp, ExecutionPlan, FieldType};
+
+let plan = ExecutionPlan::new()
+    .rename("old_name", "new_name")
+    .drop("junk")
+    .type_as("amount", FieldType::Float64)
+    .dictionary("status")
+    .filter_eq("status", "active")
+    .filter_compare("amount", CompareOp::Gt, "threshold")
+    .schema_order(["id", "status", "amount"])
+    .with_auto_dict(true);
+```
+
+You can still mutate the fields directly when you need to:
+
+```rust
+let mut plan = ExecutionPlan::new();
+plan.field_map.insert("old_name".into(), "new_name".into());
+plan.drop_fields.insert("junk".into());
+plan.field_types.insert("amount".into(), FieldType::Float64);
+plan.dictionary_columns.insert("status".into());
+plan.filter = Some(rypipe_core::FilterPredicate::Equal {
+    field: "status".into(),
+    value: "active".into(),
+});
+plan.schema_order = vec!["id".into(), "status".into(), "amount".into()];
+plan.auto_dict = true;
+```
+
+## `Value`
+
+Decoders emit `Value<'a>`:
+
+```rust
+use rypipe_core::Value;
+
+sink.put_field("amount", Value::Float64(123.45));
+sink.put_field("name", Value::Str("Alice"));
+sink.put_field("flag", Value::Bool(true));
+sink.put_field("missing", Value::Null);
+```
+
+For XML everything is a string, but JSON or CSV adapters can emit native typed
+values and skip string parsing.
+
+## Parallel parse (low level)
+
+```rust
+use rypipe_core::{parallel::ParallelExecutor, ExecutionPlan};
+use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+
+let bytes = std::fs::read("data.xml")?;
+let splitter = CrystalXmlSplitter::with_row_tag(b"Row");
+let decoder = CrystalXmlDecoder::with_row_tag(b"Row");
+let plan = ExecutionPlan::new();
+
+let batches = ParallelExecutor::parse(&bytes, &splitter, decoder, plan, 8)?;
+```
+
+`ParallelExecutor::parse` returns a `Vec<RecordBatch>`. The fast path emits one
+batch per chunk; the merge path returns a single merged batch when `auto_dict`
+or a `Compare` filter is enabled.
+
+## Bounded parse (low level)
+
+```rust
+use rypipe_core::{
+    bounded::{BoundedExecutor, MemoryBudget},
+    ExecutionPlan,
+};
+use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+use std::path::Path;
+
+let splitter = CrystalXmlSplitter::with_row_tag(b"Row");
+let decoder = CrystalXmlDecoder::with_row_tag(b"Row");
+let batches = BoundedExecutor::new(MemoryBudget::new(500_000_000))
+    .run(Path::new("huge.xml"), &splitter, decoder, ExecutionPlan::new(), false)?;
+```
+
+## Apply a post-reduce Compare filter
+
+```rust
+use rypipe_core::{apply_compare_filter, FilterPredicate, CompareOp};
+
+let predicate = FilterPredicate::Compare {
+    field_a: "amount".into(),
+    op: CompareOp::Gt,
+    field_b: "threshold".into(),
+};
+let filtered = apply_compare_filter(batch, &predicate)?;
+```
+
+## Export helpers
+
+`rypipe-python` provides:
+
+```rust
+use rypipe_python::export::record_batches_to_pyarrow_table;
+
+// Inside a PyO3 function:
+let table = record_batches_to_pyarrow_table(py, &batches)?;
+```
+
+For a pure-Rust program you do not need this; `arrow::record_batch::RecordBatch`
+is already sufficient.
+
+## Writing a custom sink
+
+You can implement `ColumnarSink` yourself for specialized behavior. Most users
+should use `TableBuilder`.
+
+```rust
+use rypipe_core::{ColumnarSink, Value, Result};
+use arrow::record_batch::RecordBatch;
+
+struct RowCounter { rows: usize }
+
+impl ColumnarSink for RowCounter {
+    fn begin_row(&mut self) {}
+    fn put_field(&mut self, _name: &str, _value: Value<'_>) {}
+    fn end_row(&mut self) { self.rows += 1; }
+    fn finish(&mut self) -> Result<RecordBatch> {
+        Ok(RecordBatch::new_empty(std::sync::Arc::new(
+            arrow::datatypes::Schema::empty(),
+        )))
+    }
+}
+```
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/writing-adapters/
+========================================================================
+
+# Writing a format adapter
+
+A `rypipe` adapter is just two small types: a `Splitter` and a `RecordParser`.
+Once you have those, the `Pipeline` API wires them into single-file,
+parallel, and bounded-memory execution with one line of code.
+
+## Adapter crate layout
+
+```
+crates/rypipe-csv/
+├── Cargo.toml
+└── src/
+    ├── lib.rs
+    ├── splitter.rs
+    └── decoder.rs
+```
+
+```toml
+[dependencies]
+rypipe-core = { path = "../rypipe-core" }
+memchr = "2"
+```
+
+## Implement `Splitter`
+
+The splitter finds safe chunk boundaries. For CSV that means newline outside
+quotes; for JSONL it is just newline; for JSON arrays it means brace balance.
+
+```rust
+use rypipe_core::Splitter;
+
+pub struct CsvSplitter;
+
+impl Splitter for CsvSplitter {
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
+        if max_chunks <= 1 || bytes.is_empty() {
+            return vec![0, bytes.len()];
+        }
+        let mut points = vec![0];
+        let mut in_quotes = false;
+        for (i, &b) in bytes.iter().enumerate().skip(1) {
+            if b == b'"' {
+                in_quotes = !in_quotes;
+            } else if b == b'\n' && !in_quotes && points.len() < max_chunks {
+                points.push(i);
+            }
+        }
+        if *points.last().unwrap() != bytes.len() {
+            points.push(bytes.len());
+        }
+        points
+    }
+
+    fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+        let newline_count = sample.iter().filter(|&&b| b == b'\n').count().max(1);
+        (sample.len() / newline_count).max(1)
+    }
+}
+```
+
+Rules:
+
+- The first point must be `0`; the last must be `bytes.len()`.
+- Adjacent equal points produce empty ranges that the engine ignores.
+- Each chunk must start at a valid row boundary.
+
+## Implement `RecordParser`
+
+```rust
+use rypipe_core::{RecordParser, ColumnarSink, Value, Result};
+
+pub struct CsvDecoder {
+    header: Vec<String>,
+}
+
+impl RecordParser for CsvDecoder {
+    fn validate(&self, bytes: &[u8]) -> Result<()> {
+        simdutf8::basic::from_utf8(bytes)
+            .map_err(|e| rypipe_core::Error::Utf8(e.to_string()))?;
+        Ok(())
+    }
+
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            sink.begin_row();
+            for (col, value) in self.header.iter().zip(line.split(',')) {
+                if sink.wants(col) {
+                    sink.put_field(col, Value::Str(value));
+                }
+            }
+            sink.end_row();
+        }
+        Ok(())
+    }
+}
+```
+
+Key points:
+
+- Call `sink.wants(name)` before expensive extraction to skip dropped fields.
+- Emit `Value::Str` for stringly formats; emit typed `Value` variants when the
+  format has native numbers/booleans.
+- Do not call `end_row()` for partial trailing rows; the engine will discard
+  them.
+
+## Run it with `Pipeline`
+
+`Pipeline` is the recommended entry point. It handles file opening, plan
+application, and all execution modes.
+
+```rust
+use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
+use rypipe_csv::{CsvDecoder, CsvSplitter};
+
+let pipeline = Pipeline::new(CsvSplitter, CsvDecoder {
+    header: vec!["a".into(), "b".into()],
+});
+
+// Single-file parse.
+let batch = pipeline.read_path("data.csv", false, false)?;
+
+// Parallel parse.
+let batches = pipeline.read_path_par("data.csv", 4, false, false)?;
+
+// Bounded-memory streaming.
+let batches = pipeline.read_path_stream(
+    "huge.csv",
+    rypipe_core::MemoryBudget::new(128 * 1024 * 1024),
+    false,
+)?;
+```
+
+## Pushdown plans with the builder API
+
+```rust
+use rypipe_core::{CompareOp, ExecutionPlan, FieldType};
+
+let plan = ExecutionPlan::new()
+    .rename("raw_amount", "amount")
+    .drop("internal_id")
+    .type_as("amount", FieldType::Float64)
+    .type_as("quantity", FieldType::Int64)
+    .dictionary("status")
+    .filter_eq("status", "active")
+    .schema_order(["quantity", "amount", "status"]);
+
+let batch = pipeline.with_plan(plan).read_path("data.csv", false, false)?;
+```
+
+## Adding Python bindings
+
+If you want a standalone `_rypipe_csv` extension, create a PyO3 crate that:
+
+1. Builds an `ExecutionPlan` from kwargs (reuse `rypipe_python::plan_kwargs`).
+2. Calls `Pipeline::read_path_par` or `Pipeline::read_path_stream`.
+3. Exports via `rypipe_python::export::record_batches_to_pyarrow_table`.
+
+Or add the new adapter behind a format selector in `rypipe-python` itself.
+The `_rypipe.read(path, format="...", format_options={...})` entry point is
+format-agnostic; adding a new Rust parser only requires a new match arm.
+
+## Testing an adapter
+
+Recommended tests:
+
+- Empty input.
+- Single row.
+- Multi-row with all field types.
+- Rename/drop/type/filter pushdown via `ExecutionPlan`.
+- Splitter invariants (monotonic points, no inverted ranges, coverage).
+- Multi-chunk equivalence: parse whole file vs. split + merge.
+- Partial trailing row discarded cleanly.
+- `Pipeline::read_path`, `read_path_par`, and `read_path_stream` agree.
+
+See `rypipe-xml/tests/integration_test.rs` for a concrete example.

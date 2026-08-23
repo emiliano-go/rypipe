@@ -1,0 +1,20 @@
+# rypipe Documentation
+
+> Format-agnostic columnar engine for XML, JSON, CSV, HTML, and more. Parse row-oriented byte streams into Apache Arrow record batches with a Rust core, Python bindings, parallel scheduling, memory-bounded execution, and query pushdown.
+
+## Overview
+- [rypipe](https://rypipe.emiliano-go.com/): Format-agnostic columnar engine that turns byte streams into Arrow record batches
+
+## API
+- [Python API](https://rypipe.emiliano-go.com/python-api/): Python bindings built on the `_rypipe` Rust extension
+- [Rust Core](https://rypipe.emiliano-go.com/rust-api/): Use the pure-Rust `rypipe-core` crate directly
+
+## Extending
+- [Writing Adapters](https://rypipe.emiliano-go.com/writing-adapters/): Add a new format by implementing `Splitter` and `RecordParser`
+- [Integrating crxml](https://rypipe.emiliano-go.com/integrating-crxml/): How crxml consumes `rypipe-core` and `rypipe-xml`
+
+## Internals
+- [Architecture](https://rypipe.emiliano-go.com/architecture/): Splitting, row extraction, typed builders, and engine design
+- [Performance](https://rypipe.emiliano-go.com/performance/): Parallel scheduling, memory budgets, and optimization notes
+
+For the full documentation in a single file, see [llms-full.txt](https://rypipe.emiliano-go.com/llms-full.txt).

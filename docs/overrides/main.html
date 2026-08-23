@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+{% endblock %}
+
+{% block site_meta %}
+{# _seo_head is emitted by the seoslug.contrib.zensical markdown extension. #}
+{% if page.meta and page.meta._seo_head %}
+{{ page.meta._seo_head | safe }}
+{% else %}
+{{ super() }}
+{% endif %}
+<link rel="alternate" type="text/plain" title="LLMs TXT" href="/llms.txt">
+<link rel="alternate" type="text/plain" title="LLMs Full" href="/llms-full.txt">
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+(function() {
+  var drawer = document.getElementById('__drawer');
+  if (drawer) {
+    drawer.addEventListener('change', function() {
+      document.body.classList.toggle('drawer-open', this.checked);
+    });
+    document.addEventListener('click', function(e) {
+      var pageLink = e.target.closest('.md-sidebar--primary a.md-nav__link[href]');
+      if (pageLink && drawer.checked) {
+        drawer.checked = false;
+        document.body.classList.remove('drawer-open');
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}
