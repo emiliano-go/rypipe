@@ -49,9 +49,11 @@ impl ParallelExecutor {
                     parser.parse_chunk(&bytes[range.clone()], &mut sink)?;
                     Ok(sink)
                 }))
-                .unwrap_or_else(|_| Err(crate::Error::Merge(
-                    "worker panicked during parallel parse".to_string(),
-                )))
+                .unwrap_or_else(|_| {
+                    Err(crate::Error::Merge(
+                        "worker panicked during parallel parse".to_string(),
+                    ))
+                })
             })
             .collect();
 
@@ -64,7 +66,12 @@ impl ParallelExecutor {
         let plan = engines[0].plan.clone();
 
         // Fast path: no auto_dict and no post-reduce Compare filter.
-        if !plan.auto_dict && !matches!(plan.filter, Some(crate::plan::FilterPredicate::Compare { .. })) {
+        if !plan.auto_dict
+            && !matches!(
+                plan.filter,
+                Some(crate::plan::FilterPredicate::Compare { .. })
+            )
+        {
             return engines_to_record_batches(engines, &plan);
         }
 

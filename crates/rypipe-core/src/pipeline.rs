@@ -73,7 +73,12 @@ where
     /// `use_mmap` requests a memory-mapped input when the `"mmap"` feature is
     /// enabled; otherwise the file is read into memory. `prefault` pre-faults
     /// mapped pages when true.
-    pub fn read_path(&self, path: impl AsRef<Path>, use_mmap: bool, prefault: bool) -> Result<RecordBatch> {
+    pub fn read_path(
+        &self,
+        path: impl AsRef<Path>,
+        use_mmap: bool,
+        prefault: bool,
+    ) -> Result<RecordBatch> {
         let input = InputBuffer::open(path.as_ref(), use_mmap, prefault)?;
         self.read_bytes(input.as_slice())
     }
@@ -106,8 +111,13 @@ where
         budget: MemoryBudget,
         prefault: bool,
     ) -> Result<Vec<RecordBatch>> {
-        BoundedExecutor::new(budget)
-            .run(path.as_ref(), &self.splitter, self.parser.clone(), self.plan.clone(), prefault)
+        BoundedExecutor::new(budget).run(
+            path.as_ref(),
+            &self.splitter,
+            self.parser.clone(),
+            self.plan.clone(),
+            prefault,
+        )
     }
 }
 
@@ -159,8 +169,7 @@ mod tests {
         }
 
         fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
-            let text = std::str::from_utf8(bytes)
-                .map_err(|e| crate::Error::Plan(e.to_string()))?;
+            let text = std::str::from_utf8(bytes).map_err(|e| crate::Error::Plan(e.to_string()))?;
             for line in text.lines() {
                 if line.is_empty() {
                     continue;

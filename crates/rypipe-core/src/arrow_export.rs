@@ -1,7 +1,7 @@
 use arrow::array::{ArrayRef, AsArray, BooleanArray};
-use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
-use arrow::compute::kernels::cast::cast;
 use arrow::compute::filter_record_batch;
+use arrow::compute::kernels::cast::cast;
+use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow::datatypes::{DataType, Float64Type};
 use arrow::record_batch::RecordBatch;
 
@@ -19,17 +19,29 @@ pub fn null_array(datatype: &DataType, len: usize) -> ArrayRef {
 /// kernels and `filter_record_batch`.  No Python callable is invoked.
 /// Per-row `Equal`/`NotEqual` filters are already applied during row assembly
 /// and are a no-op here.
-pub fn apply_compare_filter(batch: RecordBatch, predicate: &FilterPredicate) -> Result<RecordBatch> {
-    let FilterPredicate::Compare { field_a, op, field_b } = predicate else {
+pub fn apply_compare_filter(
+    batch: RecordBatch,
+    predicate: &FilterPredicate,
+) -> Result<RecordBatch> {
+    let FilterPredicate::Compare {
+        field_a,
+        op,
+        field_b,
+    } = predicate
+    else {
         return Ok(batch);
     };
 
-    let col_a = batch
-        .column_by_name(field_a)
-        .ok_or_else(|| crate::Error::Plan(format!("compare filter references unknown column {field_a:?}")))?;
-    let col_b = batch
-        .column_by_name(field_b)
-        .ok_or_else(|| crate::Error::Plan(format!("compare filter references unknown column {field_b:?}")))?;
+    let col_a = batch.column_by_name(field_a).ok_or_else(|| {
+        crate::Error::Plan(format!(
+            "compare filter references unknown column {field_a:?}"
+        ))
+    })?;
+    let col_b = batch.column_by_name(field_b).ok_or_else(|| {
+        crate::Error::Plan(format!(
+            "compare filter references unknown column {field_b:?}"
+        ))
+    })?;
 
     let mask = compare_columns(col_a, col_b, *op)?;
     Ok(filter_record_batch(&batch, &mask)?)
@@ -60,7 +72,10 @@ fn compare_columns(col_a: &ArrayRef, col_b: &ArrayRef, op: CompareOp) -> Result<
     // concrete array reference.  Numeric columns are compared as f64;
     // everything else is compared as UTF-8.
     let (a, b): (ArrayRef, ArrayRef) = if is_numeric(dt_a) && is_numeric(dt_b) {
-        (cast(col_a, &DataType::Float64)?, cast(col_b, &DataType::Float64)?)
+        (
+            cast(col_a, &DataType::Float64)?,
+            cast(col_b, &DataType::Float64)?,
+        )
     } else {
         (cast(col_a, &DataType::Utf8)?, cast(col_b, &DataType::Utf8)?)
     };
