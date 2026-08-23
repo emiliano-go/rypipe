@@ -45,7 +45,7 @@ pub trait ColumnarSink {
 
 /// Convert split-point offsets returned by a `Splitter` into non-empty
 /// `Range<usize>` chunks.
-pub(crate) fn split_points_to_ranges(points: &[usize], len: usize) -> Vec<Range<usize>> {
+pub fn split_points_to_ranges(points: &[usize], len: usize) -> Vec<Range<usize>> {
     if points.len() < 2 {
         return std::iter::once(0..len).collect();
     }
