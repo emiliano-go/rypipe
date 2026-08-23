@@ -65,6 +65,15 @@ name = "rypipe on PyPI"
 "Writing Adapters" = "writing-adapters.md"
 
 [[project.nav]]
+"Examples" = "examples.md"
+
+[[project.nav]]
+"Advanced" = "advanced.md"
+
+[[project.nav]]
+"crxml Adapter" = "crxml-adapter.md"
+
+[[project.nav]]
 "Architecture" = "architecture.md"
 
 [[project.nav]]
