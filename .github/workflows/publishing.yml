@@ -5,36 +5,131 @@ on:
     types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+env:
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
-    name: Build distribution
+  # The extension is built against the stable ABI (abi3-py310), so a single
+  # wheel per platform covers CPython 3.10 and every later version.
+  linux:
+    name: Wheel (${{ matrix.platform }} ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # manylinux2014 pins the glibc floor at 2.17, so the wheels install
+          # on Debian 11, Ubuntu 20.04, RHEL 8 and Amazon Linux 2. Building on
+          # the runner directly would emit manylinux_2_34 and exclude them.
+          - target: x86_64
+            platform: manylinux
+            manylinux: "2014"
+          - target: aarch64
+            platform: manylinux
+            manylinux: "2014"
+          - target: x86_64
+            platform: musllinux
+            manylinux: musllinux_1_2
+          - target: aarch64
+            platform: musllinux
+            manylinux: musllinux_1_2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist
+          sccache: "true"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform }}-${{ matrix.target }}
+          path: dist/
+
+  macos:
+    name: Wheel (macOS ${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: "true"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/
+
+  windows:
+    name: Wheel (Windows ${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: ${{ matrix.target }}
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: "true"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist/
+
+  sdist:
+    name: Source distribution
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
         with:
-          python-version: "3.13"
+          command: sdist
+          args: --out dist
 
-      - name: Install build deps
-        run: pip install maturin
-
-      - name: Build wheels
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
-        run: |
-          maturin build --release --out dist -i python
-
-      - name: Upload distributions
+      - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: wheels-sdist
           path: dist/
 
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [linux, macos, windows, sdist]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -45,8 +140,12 @@ jobs:
       - name: Download distributions
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: wheels-*
+          merge-multiple: true
           path: dist/
+
+      - name: List distributions
+        run: ls -l dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
