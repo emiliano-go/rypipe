@@ -32,6 +32,8 @@ Repository = "https://github.com/emiliano-go/rypipe"
 [tool.maturin]
 manifest-path = "crates/rypipe-python/Cargo.toml"
 module-name = "_rypipe"
+python-source = "."
+python-packages = ["_rypipe", "rypipe"]
 features = ["pyo3/extension-module"]
 profile = "release"
 
