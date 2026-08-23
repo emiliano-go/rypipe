@@ -20,8 +20,8 @@ impl RecordParser for LineParser {
     }
 
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
         for line in text.lines() {
             if line.is_empty() {
                 continue;
@@ -93,7 +93,13 @@ fn test_bounded_executor_produces_matching_batches() {
 
     let executor = BoundedExecutor::new(MemoryBudget::new(12));
     let batches = executor
-        .run(&path, &LineSplitter, LineParser, ExecutionPlan::new(), false)
+        .run(
+            &path,
+            &LineSplitter,
+            LineParser,
+            ExecutionPlan::new(),
+            false,
+        )
         .unwrap();
 
     assert!(
@@ -112,10 +118,7 @@ fn test_bounded_executor_produces_matching_batches() {
     assert_eq!(concatenated.num_rows(), expected.num_rows());
     assert_eq!(concatenated.schema(), expected.schema());
 
-    let actual = concatenated
-        .column_by_name("A")
-        .unwrap()
-        .as_string::<i32>();
+    let actual = concatenated.column_by_name("A").unwrap().as_string::<i32>();
     let exp = expected.column_by_name("A").unwrap().as_string::<i32>();
     for i in 0..exp.len() {
         assert_eq!(actual.value(i), exp.value(i));

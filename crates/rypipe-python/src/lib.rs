@@ -35,9 +35,9 @@ pub fn py_err_from_rypipe(err: rypipe_core::Error) -> PyErr {
         rypipe_core::Error::Plan(msg) => PlanError::new_err(msg),
         rypipe_core::Error::Merge(msg) => MergeError::new_err(msg),
         rypipe_core::Error::Io(e) => pyo3::exceptions::PyIOError::new_err(e.to_string()),
-        rypipe_core::Error::Arrow(e) => pyo3::exceptions::PyException::new_err(format!(
-            "Arrow error: {e}"
-        )),
+        rypipe_core::Error::Arrow(e) => {
+            pyo3::exceptions::PyException::new_err(format!("Arrow error: {e}"))
+        }
     }
 }
 

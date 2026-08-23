@@ -64,9 +64,7 @@ pub fn execution_plan_from_kwargs(
             let field_b = f.get("field_b").unwrap().to_owned();
             let cop = CompareOp::from_str(&op).ok_or_else(|| {
                 let valid = ">, <, >=, <=, ==, !=";
-                PlanError::new_err(format!(
-                    "unsupported compare op {op:?}; valid: {valid}"
-                ))
+                PlanError::new_err(format!("unsupported compare op {op:?}; valid: {valid}"))
             })?;
             plan.filter = Some(FilterPredicate::Compare {
                 field_a,

@@ -83,8 +83,7 @@ impl BoundedExecutor {
             file.seek(SeekFrom::Start(chunk.start as u64))?;
             file.read_exact(&mut chunk_buf)?;
 
-            let mut chunk_engine =
-                TableBuilder::with_plan((chunk_len / 512).max(64), plan.clone());
+            let mut chunk_engine = TableBuilder::with_plan((chunk_len / 512).max(64), plan.clone());
             parser.validate(&chunk_buf)?;
             parser.parse_chunk(&chunk_buf, &mut chunk_engine)?;
 
@@ -107,7 +106,10 @@ impl BoundedExecutor {
 
         if let Some(ref filter) = plan.filter {
             for batch in &mut batches {
-                *batch = apply_compare_filter(std::mem::replace(batch, RecordBatch::new_empty(batch.schema())), filter)?;
+                *batch = apply_compare_filter(
+                    std::mem::replace(batch, RecordBatch::new_empty(batch.schema())),
+                    filter,
+                )?;
             }
         }
 

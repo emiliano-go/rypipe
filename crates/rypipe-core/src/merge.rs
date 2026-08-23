@@ -22,8 +22,7 @@ impl TableBuilder {
         let other_rows = other.row_count;
 
         // 1. Create columns from other that self doesn't have yet.
-        let have: std::collections::HashSet<String> =
-            self.column_order.iter().cloned().collect();
+        let have: std::collections::HashSet<String> = self.column_order.iter().cloned().collect();
         for name in &other.column_order {
             if !have.contains(name) {
                 let est = self_rows + other.estimated_rows.max(64);
@@ -113,7 +112,10 @@ pub fn engines_to_record_batches(
 
     if let Some(ref filter) = plan.filter {
         for batch in &mut batches {
-            *batch = apply_compare_filter(std::mem::replace(batch, RecordBatch::new_empty(schema.clone())), filter)?;
+            *batch = apply_compare_filter(
+                std::mem::replace(batch, RecordBatch::new_empty(schema.clone())),
+                filter,
+            )?;
         }
     }
 
