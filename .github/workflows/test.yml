@@ -42,4 +42,4 @@ jobs:
       - name: Run Python smoke tests
         run: |
           pip install pytest target/wheels/*.whl
-          pytest crates/rypipe-python/tests/test_read.py
+          pytest crates/rypipe-python/tests/
