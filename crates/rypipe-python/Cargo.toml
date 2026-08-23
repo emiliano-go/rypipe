@@ -3,17 +3,16 @@ name = "rypipe-python"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "PyO3 bindings over rypipe-core and rypipe-xml"
+description = "PyO3 bindings over the rypipe-core columnar engine"
 repository = "https://github.com/emiliano-go/rypipe"
 authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
 
 [lib]
 name = "_rypipe"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module"] }
 arrow = { version = "=55.2.0", default-features = false, features = ["pyarrow", "ffi"] }
 rypipe-core = { path = "../rypipe-core" }
-rypipe-xml = { path = "../rypipe-xml" }
 mimalloc = { version = "0.1", default-features = false }
