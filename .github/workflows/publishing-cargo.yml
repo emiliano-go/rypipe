@@ -1,0 +1,47 @@
+name: Publish to crates.io
+
+# The trusted publisher registered on crates.io is bound to this workflow
+# filename and the `cargo` environment below. Renaming either breaks OIDC.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish rypipe-core
+    runs-on: ubuntu-latest
+    environment:
+      name: cargo
+      url: https://crates.io/crates/rypipe-core
+    permissions:
+      # Required to mint the GitHub OIDC token that crates.io exchanges for a
+      # short-lived publish token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify the package builds from its packaged tarball
+        run: cargo publish --dry-run -p rypipe-core
+
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish rypipe-core
+        run: cargo publish -p rypipe-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
