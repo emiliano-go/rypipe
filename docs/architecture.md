@@ -82,8 +82,12 @@ For example, an XML adapter lives in its own package and provides an
 
 PyO3 bindings and Python package glue for the engine. It provides:
 
-- The `rypipe` Python package: an adapter registry (`register_adapter`,
-  `read`, `read_par`, `read_stream`) and the shared exception types.
+- The `rypipe` Python package:
+  - `Adapter` and `Source` base classes for adapter packages.
+  - Fusable pipeline stages: `RenameFields`, `DropFields`, `CastTypes`, `FilterRows`.
+  - Sinks: `collect`, `to_arrow`, `to_dataframe`, `to_pandas`, `to_polars`, `to_parquet`, `to_csv`.
+  - An adapter registry (`register_adapter`, `read`, `read_par`, `read_stream`)
+    and the shared exception types.
 - The `_rypipe` native extension: typed exceptions (`ParseError`, `XmlError`,
   `PlanError`, `MergeError`) and Rust helper functions
   (`execution_plan_from_kwargs`, `record_batches_to_pyarrow_table`) that adapter

@@ -6,11 +6,11 @@
 - [rypipe](https://rypipe.emiliano-go.com/): Format-agnostic columnar engine that turns byte streams into Arrow record batches
 
 ## API
-- [Python API](https://rypipe.emiliano-go.com/python-api/): Python bindings built on the `_rypipe` Rust extension
+- [Python API](https://rypipe.emiliano-go.com/python-api/): `Adapter`/`Source` pipeline API, stages, sinks, and the `rypipe.read` registry
 - [Rust Core](https://rypipe.emiliano-go.com/rust-api/): Use the pure-Rust `rypipe-core` crate directly
 
 ## Extending
-- [Writing Adapters](https://rypipe.emiliano-go.com/writing-adapters/): Add a new format by implementing `Splitter` and `RecordParser`
+- [Writing Adapters](https://rypipe.emiliano-go.com/writing-adapters/): Add a format by implementing `Splitter`/`RecordParser` or subclassing `rypipe.Adapter`
 
 ## Internals
 - [Architecture](https://rypipe.emiliano-go.com/architecture/): Splitting, row extraction, typed builders, and engine design
