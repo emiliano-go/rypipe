@@ -1,6 +1,6 @@
 [project]
 site_name = "rypipe"
-site_description = "Format-agnostic columnar engine for XML, JSON, CSV, HTML, and more. Rust core, Python bindings, parallel scheduling, memory-bounded execution, and Arrow export."
+site_description = "Format-agnostic columnar ingestion engine. Rust core, Python bindings, parallel scheduling, memory-bounded execution, and Arrow export."
 site_url = "https://rypipe.emiliano-go.com/"
 docs_dir = "docs"
 site_dir = "site"
