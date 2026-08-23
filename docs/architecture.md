@@ -275,8 +275,8 @@ to `XmlError`, `PlanError`, and `MergeError` Python exceptions.
 
 ## Why this shape?
 
-The original crxml engine was fast but tightly coupled to one XML dialect.
-Extracting it into rypipe keeps those performance characteristics (arena
+The engine was originally fast but tightly coupled to one XML dialect.
+Abstracting it into rypipe keeps those performance characteristics (arena
 string storage, SIMD UTF-8 validation, zero-copy event parsing, GIL release,
 parallel chunking, memory bounding) while making them available to other
 formats. A new adapter only needs to answer "where are the rows?" and "what are

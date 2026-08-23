@@ -62,9 +62,9 @@ A `Source` exposes:
 
 ### Pipeline stages
 
-`rypipe` ships the same fusable stages crxml used. Stages that rename, drop,
-cast, or filter constants are pushed into the Rust parse loop when the source
-supports plan kwargs.
+`rypipe` ships fusable pipeline stages. Stages that rename, drop, cast, or
+filter constants are pushed into the Rust parse loop when the source supports
+plan kwargs.
 
 ```python
 from rypipe import RenameFields, DropFields, CastTypes, FilterRows
