@@ -67,11 +67,15 @@ let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
 `engines_to_record_batches`, and `apply_compare_filter`. The decoder API is
 `Splitter`, `RecordParser`, and `ColumnarSink`.
 
-## Arrow version pin
+## Arrow and PyO3 version pins
 
-`arrow` is pinned exactly (`=55.2.0`). The Arrow C Data Interface is not stable
+`arrow` is pinned exactly (`=59.2.0`). The Arrow C Data Interface is not stable
 across minor versions, and this crate exports through it. Bump only after
 testing both directions.
+
+`rypipe-python` pins `pyo3` to the version required by `arrow-pyarrow`
+(currently `0.29`). The two must move together; bumping one without the other
+produces a native `python` link conflict in Cargo.
 
 ## Documentation
 
