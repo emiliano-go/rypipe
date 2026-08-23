@@ -68,7 +68,20 @@ name = "rypipe on PyPI"
 "Examples" = "examples.md"
 
 [[project.nav]]
-"Advanced" = "advanced.md"
+"Advanced" = [
+    "advanced/index.md",
+    { "Pushdown fusion" = "advanced/fusion.md" },
+    { "Execution modes" = "advanced/execution-modes.md" },
+    { "Memory and chunking" = "advanced/memory-and-chunking.md" },
+    { "Parallelism" = "advanced/parallelism.md" },
+    { "Dictionary encoding" = "advanced/dictionary-encoding.md" },
+    { "Schema and types" = "advanced/schema-and-types.md" },
+    { "I/O tuning" = "advanced/io-tuning.md" },
+    { "Adapter design" = "advanced/adapter-design.md" },
+    { "Profiling" = "advanced/profiling.md" },
+    { "Anti-patterns" = "advanced/anti-patterns.md" },
+    { "Case study: crxml" = "advanced/case-study-crxml.md" },
+]
 
 [[project.nav]]
 "crxml Adapter" = "crxml-adapter.md"

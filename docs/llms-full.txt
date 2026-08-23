@@ -1,26 +1,530 @@
 # rypipe Documentation
 > Full documentation for rypipe: format-agnostic columnar ingestion engine with Rust core and Python bindings
 > Source: https://rypipe.emiliano-go.com
-> Pages: 9
+> Pages: 20
 
 ========================================================================
-PAGE: https://rypipe.emiliano-go.com/advanced/
+PAGE: https://rypipe.emiliano-go.com/advanced/adapter-design/
 ========================================================================
 
-# Advanced rypipe deep-dive
+# Adapter design
 
-This guide is for adapter authors and power users who want to squeeze more throughput or lower memory out of rypipe pipelines. It assumes you already know the Python and Rust API basics.
+A high-performance adapter does as little work as possible per record. This page covers the `Splitter` and `RecordParser` design patterns that keep rypipe fast.
 
-## How pushdown fusion works
+## `Splitter` design
+
+The splitter finds safe chunk boundaries for parallel parsing.
+
+```rust
+pub trait Splitter: Send + Sync {
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize>;
+    fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize;
+}
+```
+
+Rules:
+
+- The first point must be `0`; the last must be `bytes.len()`.
+- Adjacent equal points produce empty ranges that the engine ignores.
+- Each chunk must start at a valid row boundary.
+
+A good splitter is cheap. It scans for boundaries with byte searches rather than parsing the whole chunk. For line-oriented formats, `memchr::memchr` finds newlines. For XML, `memchr::memmem` finds row tags.
+
+## Finding split points with `memchr`
+
+`memchr` is SIMD-accelerated on most platforms. A single `memmem` scan is much faster than iterating byte-by-byte.
+
+Example from crxml:
+
+```rust
+use memchr;
+
+let row_tag_count = memchr::memmem::find_iter(&sample[..sample_end], &self.row_tag).count();
+```
+
+For CSV, you also need to track quote state so a newline inside a quoted field does not become a false boundary.
+
+## Handling comments, CDATA, and quoted fields
+
+False split points corrupt chunks. A robust splitter skips regions that look like row boundaries but are not:
+
+- XML comments: `<!-- ... -->`
+- XML CDATA: `<![CDATA[ ... ]]>`
+- CSV quoted fields: `"..."`
+- JSON strings: `"..."`
+
+In crxml, the splitter skips comments and CDATA while scanning for `<Row` tags. It also validates that a candidate tag is followed by whitespace, `>`, or `/` to avoid prefix collisions such as `<RowItem`.
+
+## `RecordParser` tips
+
+```rust
+pub trait RecordParser: Send + Sync {
+    fn validate(&self, bytes: &[u8]) -> Result<()>;
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()>;
+}
+```
+
+Best practices:
+
+- Validate UTF-8 once per chunk with `simdutf8` in `validate`.
+- In `parse_chunk`, walk events or lines and emit fields.
+- Call `sink.wants(name)` before expensive extraction to skip dropped fields.
+- Do not call `end_row()` for partial trailing rows; the engine discards them.
+
+## Borrowing strings
+
+If the input chunk is valid UTF-8, hand borrowed `&str` slices to the engine:
+
+```rust
+let text = std::str::from_utf8(bytes)?;
+for line in text.lines() {
+    sink.begin_row();
+    sink.put_field("value", Value::Str(line));
+    sink.end_row();
+}
+```
+
+The engine copies the string into its arena only when necessary. Borrowing avoids per-field allocations in the parser.
+
+## Sparse rows
+
+If a field is missing, skip it entirely:
+
+```rust
+if let Some(value) = maybe_value {
+    sink.put_field("status", Value::Str(value));
+}
+```
+
+Do not emit `Value::Null` for every missing field. The engine null-fills missing columns at `end_row()`; emitting explicit nulls wastes work.
+
+## Respecting `sink.wants`
+
+`ColumnarSink::wants` lets the parser skip fields that will be dropped:
+
+```rust
+if sink.wants("internal_id") {
+    sink.put_field("internal_id", Value::Str(extract_id(...)));
+}
+```
+
+For expensive extractions (deep XML paths, regex captures), this is a major win. Always check `wants` before doing work that the engine will discard.
+
+## `parse_tail` fallback
+
+Chunks can start or end inside a row. A robust adapter has a fallback path that rescans from the nearest safe row start. crxml uses `parse_tail` to handle orphan close-tags at chunk boundaries without a serial pre-pass.
+
+## Summary
+
+- Split cheaply with `memchr`; defer full decoding.
+- Skip comments, CDATA, quotes, and strings to avoid false boundaries.
+- Borrow UTF-8 slices into the engine.
+- Emit sparse rows and respect `sink.wants`.
+- Handle trailing partial rows cleanly.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/anti-patterns/
+========================================================================
+
+# Anti-patterns
+
+These patterns are common, legal, and expensive. Avoid them when throughput or memory matters.
+
+## Iterating a table source row-by-row
+
+```python
+for row in pipeline:
+    ...
+```
+
+This works, but it reconstructs Python dicts from the Arrow table. If the source is table-shaped and you need row access, consider using `to_arrow()` and `pyarrow` vectorized operations instead.
+
+## Chaining Python callables
+
+```python
+result = (
+    source
+    | (lambda table: transform(table))
+    | (lambda table: another_transform(table))
+).to_arrow()
+```
+
+Each callable materializes a full Python object (usually a `pyarrow.Table` or list of dicts) and breaks fusion. Prefer fused stages or move the logic into Rust.
+
+## Repeated `to_pandas` / `to_arrow`
+
+```python
+t1 = pipeline.to_pandas()
+t2 = pipeline.to_arrow()
+t3 = pipeline.to_pandas()
+```
+
+Each call re-runs the pipeline. Cache the table once and reuse it:
+
+```python
+table = pipeline.to_arrow()
+t1 = table.to_pandas()
+t2 = table
+```
+
+## Ignoring `plan_overrides`
+
+```python
+class MySource(Source):
+    def _read_arrow(self, *, plan_overrides=None, **kwargs):
+        return my_rust_read(self.path, **kwargs)  # plan_overrides lost!
+```
+
+If an adapter ignores `plan_overrides`, fused stages silently fall back to Python execution. Always forward `plan_overrides` to the Rust reader.
+
+## Wrong engine choice
+
+```python
+source.read_stream(chunks=64)  # tiny file, over-parallelized
+```
+
+For small files, columnar mode is usually fastest. For huge files, stream mode keeps memory flat. Parallel mode only wins for large, CPU-bound, cached files.
+
+## Using `auto_dict` in parallel mode for throughput
+
+```python
+source.read_par(auto_dict=True, chunks=32)
+```
+
+`auto_dict` forces the merge path in parallel mode. If throughput is the goal, use explicit `dictionary_columns` for only the columns that need it, or switch to columnar mode.
+
+## Not declaring types for numeric filters
+
+```python
+FilterRows(field="amount", op=">", value="100.0")
+```
+
+Without `field_types={"amount": "float64"}`, the engine may store `amount` as a string and skip the vectorized compare filter. Declare the type so the filter runs in Arrow.
+
+## Summary
+
+- Cache tables; do not re-run pipelines.
+- Forward `plan_overrides` in adapters.
+- Keep Python callables out of the hot path.
+- Match the engine mode to the file size and workload.
+- Declare types for numeric filters.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/case-study-crxml/
+========================================================================
+
+# Case study: crxml
+
+`crxml` is a high-throughput adapter for Crystal Reports XML exports. It is a concrete example of how the techniques from the other advanced pages combine to reach ~2.4 GB/s on a single workstation.
+
+## What it parses
+
+Crystal Reports exports tabular data inside XML elements such as:
+
+```xml
+<Field Name="amount"><Value>123.45</Value></Field>
+<Text Name="status"><TextValue>active</TextValue></Text>
+```
+
+`crxml` reads these exports and turns them into Arrow tables or DataFrames. The speed is parser-bound; the `rypipe-core` engine keeps up without being the bottleneck.
+
+## Architecture
+
+```text
+Crystal Reports XML file
+    |
+    v
+CrystalXmlSplitter  -- finds row-tag boundaries
+    |
+    v
+CrystalXmlDecoder   -- extracts fields from each row
+    |
+    v
+rypipe-core engine  -- typed builders, filters, projection, Arrow export
+    |
+    v
+pyarrow.Table / pandas.DataFrame
+```
+
+The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapter` that calls the Rust core and registers itself with `rypipe`.
+
+## Techniques from this section
+
+| Page | Technique used in crxml |
+|------|-------------------------|
+| [Adapter design](./adapter-design.md) | `memchr::memmem` splitter; skip comments/CDATA; validate tag boundaries. |
+| [Adapter design](./adapter-design.md) | Borrowed-slice `quick_xml` reader; XML events point into the input buffer. |
+| [Schema and types](./schema-and-types.md) | `field_types` casts strings to numbers during parse. |
+| [Dictionary encoding](./dictionary-encoding.md) | `dictionary_columns` for low-cardinality string fields. |
+| [Parallelism](./parallelism.md) | Parallel fast path when `auto_dict` and compare filters are off. |
+| [Execution modes](./execution-modes.md) | `columnar`, `parallel`, and `stream` modes exposed through `rypipe`. |
+| [I/O tuning](./io-tuning.md) | `mmap` with `prefault` for cached files; bounded streaming for huge files. |
+
+## The splitter
+
+`CrystalXmlSplitter` uses `memchr::memmem` to scan for the row tag. It is SIMD-accelerated on most platforms. It skips `<!-- ... -->` and `<![CDATA[ ... ]]>` regions so a `<Row` string inside them is not mistaken for a real row start. It also validates that a candidate tag is followed by whitespace, `>`, or `/` to avoid prefix collisions such as `<RowItem`.
+
+## The decoder
+
+`CrystalXmlDecoder` uses `quick_xml` in borrowed-slice mode. Events reference the input bytes directly instead of copying into a scratch buffer. For each row element it:
+
+1. Emits row attributes as fields.
+2. Walks child elements.
+3. Recognizes `<Field>`, `<Text>`, and `<Section>` patterns.
+4. Calls `sink.put_field(key, Value::Str(value))` so the engine builds typed columns.
+
+The decoder also has a `parse_tail` fallback that rescans orphan close-tags at chunk boundaries, so chunked parsing stays correct without a serial pre-pass.
+
+## Why it is fast
+
+| Technique | Benefit |
+|-----------|---------|
+| Borrowed-slice `quick_xml` reader | XML events point into the input buffer; no per-event copy. |
+| `memchr::memmem` row-tag scan | SIMD-accelerated boundary search for parallel chunks. |
+| Skip-region handling | Comments/CDATA do not create false split points. |
+| SIMD UTF-8 validation | `simdutf8` validates each chunk in bulk. |
+| `rypipe-core` typed builders | Strings are copied into Arrow arrays only once, during parse. |
+| Parallel fast path | When `auto_dict` and compare filters are off, chunks export independently. |
+
+## Lessons for adapter authors
+
+1. Specialize the parser. Generic line splitting is fine for engine benchmarks, but real throughput comes from a format-aware parser.
+2. Find split points cheaply. A single `memmem` scan beats scanning byte-by-byte.
+3. Handle boundary cases. Chunks can start or end inside a row; have a fallback path that rescans from the nearest safe row start.
+4. Borrow strings into the engine. Pass `Value::Str(&str)` slices whenever the input is valid UTF-8.
+5. Register with `rypipe`. A thin adapter class lets users call `rypipe.read()` while you keep the fast Rust core.
+
+## Source
+
+The full implementation is in the [crxml repository](https://github.com/emiliano-go/crxml), especially:
+
+- `src/crxml_core/src/xml/splitter.rs`
+- `src/crxml_core/src/xml/decoder.rs`
+- `src/crxml/rypipe_adapter.py`
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/dictionary-encoding/
+========================================================================
+
+# Dictionary encoding
+
+Arrow dictionaries store string values as integer indices into a separate value table. In `rypipe`, this can reduce memory 5-20x for low-cardinality string columns such as status codes, country codes, or enums. This page explains how dictionaries work in the engine, when they help, and when they force the merge path and hurt throughput.
+
+## How Arrow dictionaries work in rypipe
+
+`rypipe-core` stores string columns in a `StrColumn`: a contiguous byte arena plus `i32` offsets and a validity bitmap. When a column is dictionary-encoded, the engine instead builds:
+
+- a `codes: Vec<Option<i32>>` array of indices;
+- a `dict: Vec<String>` ordered list of distinct values;
+- an `index: HashMap<String, i32>` lookup from value to index.
+
+On Arrow export, these become a `DictionaryArray` with `Int32` indices and a `StringArray` dictionary. The layout is exactly what Arrow compute kernels expect, so downstream filters and group-by operations can use the encoded form directly.
+
+## Explicit `dictionary_columns`
+
+The safest way to use dictionary encoding is to declare it explicitly:
+
+```python
+source = MyAdapter(
+    "data.log",
+    schema=["id", "ts", "amount", "status"],
+    field_types={"id": "int64", "amount": "float64"},
+    dictionary_columns=["status"],
+)
+```
+
+This tells the engine to build a dictionary column for `status` from the first row. There is no inference pass and no runtime heuristic cost.
+
+In Rust:
+
+```rust
+let plan = ExecutionPlan::new()
+    .dictionary("status");
+```
+
+## `auto_dict` heuristics
+
+`auto_dict=True` asks the engine to guess which string columns should be dictionary-encoded. The heuristic has a small runtime cost: it tracks the number of distinct values and the total row count for each string column. When the ratio of distinct values to rows falls below a threshold, the column is upgraded to dictionary encoding at finish time.
+
+Use `auto_dict=True` when:
+
+- you do not know the schema or cardinality in advance;
+- the file is small enough that the tracking cost is negligible;
+- downstream operations benefit from dictionary form.
+
+Use `auto_dict=False` when:
+
+- throughput is the top priority;
+- columns are high cardinality or already numeric;
+- you are running parallel mode (see below).
+
+## When dictionaries help memory
+
+Dictionary encoding helps most when:
+
+- the column has low cardinality (many repeated values);
+- the strings are long relative to the index size;
+- the column is used in filters, joins, or group-by operations that can work on integer codes.
+
+Examples:
+
+- HTTP status codes: ~10 distinct values, very short strings.
+- Country codes: ~200 distinct values, short strings.
+- Product categories: tens to thousands of distinct values, often repeated.
+
+For very short strings (one or two characters), the memory savings are smaller because the string data is already small.
+
+## When dictionaries force the merge path
+
+In parallel mode, dictionary encoding forces the merge path. Each chunk builds its own local dictionary. Before export, the engine must merge all chunk dictionaries into a single global dictionary and remap codes. This has two consequences:
+
+1. **Serial merge**: the merge step is not parallel, so it can become a bottleneck for many small chunks.
+2. **Higher peak RSS**: all chunk builders must coexist until the merge finishes, and the global dictionary may be larger than any local one.
+
+If you need both dictionaries and maximum throughput, consider:
+
+- using columnar mode instead of parallel mode;
+- declaring `dictionary_columns` explicitly so only those columns pay the merge cost;
+- filtering after export instead of forcing a merge with compare filters.
+
+## Fast path vs merge path
+
+`ParallelExecutor` has two internal paths:
+
+- **Fast path**: when `auto_dict` is false and there is no `Compare` filter, each chunk is exported as its own `RecordBatch` in parallel. No serial merge.
+- **Merge path**: when `auto_dict` or a `Compare` filter is enabled, chunk builders are merged sequentially before export. Peak RSS is higher.
+
+If you need both a `Compare` filter and maximum throughput, consider filtering after export in Python/Arrow instead.
+
+## Summary
+
+- Use `dictionary_columns` for known low-cardinality strings; it is predictable and avoids heuristic cost.
+- Use `auto_dict=True` only when cardinality is unknown and the file is small or not parallel.
+- Remember that dictionaries force the parallel merge path; weigh memory savings against throughput loss.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/execution-modes/
+========================================================================
+
+# Execution modes
+
+`rypipe` adapters can expose up to three execution strategies. Choosing the right one is usually the biggest single decision for memory and throughput.
+
+| Mode | Best for | Memory | Parallelism | Output |
+|------|----------|--------|-------------|--------|
+| `stream` | Huge files, unknown schema, row-at-a-time consumers | bounded by batch size | single-threaded parse | iterator / batched record batches |
+| `columnar` | Medium files that fit in RAM, table output | holds full table | single-threaded parse, vectorized builders | one `RecordBatch` |
+| `parallel` | Large files that fit in RAM, many cores | holds full table | chunked multi-threaded parse | one `RecordBatch` or `Vec<RecordBatch>` |
+
+`auto` lets the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows; otherwise stream. Adapters should document their own heuristic because format split boundaries affect chunk safety.
+
+## Stream mode
+
+Stream mode uses `BoundedExecutor`. It keeps a memory budget and parses the file in batches:
+
+1. Opens the file via `InputBuffer`.
+2. Estimates `bytes_per_row` from the splitter.
+3. Computes `rows_per_batch` from the budget.
+4. Splits the file into at most 64 batches.
+5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
+6. Returns a `Vec<RecordBatch>`; the caller concatenates or iterates.
+
+Because the input buffer is dropped before the parse phase begins for bounded mode, mmap-backed pages are released before downstream work starts. This keeps peak memory close to the budget even for files much larger than RAM.
+
+Use stream mode when:
+
+- the file does not fit in RAM;
+- the consumer is row-oriented or streaming (e.g., writing one row at a time);
+- latency per batch matters more than total throughput;
+- parallel merge overhead would dominate (very simple parsers).
+
+## Columnar mode
+
+Columnar mode parses the whole file in one thread and builds one `TableBuilder`. It is the simplest path and avoids all chunking and synchronization overhead. The full table stays in memory until export.
+
+Use columnar mode when:
+
+- the file fits comfortably in RAM;
+- the parser is fast enough that parallel overhead would not pay off;
+- you need one contiguous `RecordBatch` without a merge step;
+- `auto_dict` or compare filters force a merge anyway, so parallelism adds overhead.
+
+Columnar mode is often fastest for small files because there is no per-chunk setup and no rayon scheduling.
+
+## Parallel mode
+
+Parallel mode uses `ParallelExecutor`:
+
+1. Calls `Splitter::find_split_points`.
+2. Converts points to non-empty `Range<usize>` chunks.
+3. Uses `rayon::par_iter` to parse each chunk independently into a `TableBuilder`.
+4. Fast path: if `auto_dict` is false and there is no `Compare` filter, each builder is exported as its own `RecordBatch` in parallel. No serial merge happens.
+5. Merge path: if `auto_dict` or a `Compare` filter is present, chunk builders are merged sequentially before export.
+
+Use parallel mode when:
+
+- the file fits in RAM or in the OS page cache;
+- the parser is CPU-bound (heavy XML, complex field extraction, many columns);
+- you can tolerate higher peak memory for shorter wall-clock time;
+- `auto_dict` and compare filters are off, so the fast path applies.
+
+## Auto engine selection
+
+The Python `Adapter` layer usually exposes `engine="auto"`. The heuristic is format-specific, but a common default is:
+
+```python
+if file_size < 8 * 1024 * 1024:
+    engine = "columnar"
+elif memory_available > 4 * file_size:
+    engine = "parallel"
+else:
+    engine = "stream"
+```
+
+Adapters should expose the engine choice explicitly because the best default depends on split safety, row size variance, and downstream use. A format with expensive per-chunk setup (for example, one that must scan for a global header) may prefer columnar for much larger files than a simple newline-delimited format.
+
+## Trade-offs
+
+| Concern | Prefer | Avoid | Why |
+|---------|--------|-------|-----|
+| Lowest memory | stream | parallel | Bounded batches keep peak RSS flat. |
+| Lowest latency to first batch | stream | parallel | First batch is emitted before the whole file is read. |
+| Highest throughput on large files | parallel | columnar | Many cores parse simultaneously. |
+| Highest throughput on small files | columnar | parallel | Chunk overhead dominates. |
+| Deterministic column order | any with `schema_order` | inference | Chunk merges rely on a common schema. |
+| Low cardinality string compression | columnar or parallel with `dictionary_columns` | parallel with `auto_dict` | Auto-dict forces the merge path. |
+
+## GIL behavior
+
+All parse paths release the GIL during the heavy Rust work. The Arrow C Data Interface export re-acquires the GIL briefly. For `read_path_par`, the entire parallel parse runs outside the GIL.
+
+This means parallel mode can saturate CPU from Python without `multiprocessing`, provided the adapter is implemented in Rust and exports Arrow.
+
+## Summary
+
+- Use `stream` for huge files or row consumers.
+- Use `columnar` for small-to-medium files and when merge is unavoidable.
+- Use `parallel` for large cached files with a CPU-bound parser and no merge-forcing options.
+- Expose `engine` explicitly and document the adapter-specific heuristic.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/fusion/
+========================================================================
+
+# Pushdown fusion
 
 `rypipe` splits ingestion into two layers:
 
 1. **Adapter layer**: reads bytes, splits them into records, and emits `Value` rows.
 2. **Engine layer**: builds typed Arrow arrays, applies filters, and exports record batches.
 
-When you write a pipeline like this:
+Pushdown fusion is the process by which the Python `Pipeline` rewrites a chain of lightweight stages into a single `ExecutionPlan`. The engine then applies rename, drop, filter, and cast while it parses each row, instead of materializing a full table and running Python transforms afterward.
+
+## A fused pipeline
 
 ```python
+from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+
 source = MyAdapter("data.log")
 result = (
     source
@@ -31,35 +535,274 @@ result = (
 ).to_arrow()
 ```
 
-the Python `Pipeline` rewrites the stage list into a single `ExecutionPlan`. The engine then applies rename, drop, constant-filter, and cast *while it parses each row*. Rows that fail the filter are never materialized; dropped columns are never allocated; and casts happen once inside Rust instead of twice in Python and Rust.
+When the pipeline reaches `to_arrow()`, the stage list is collapsed into one plan. The Rust parser:
 
-Fusable stages are:
+- renames `old_name` to `new_name` as fields arrive;
+- skips `internal_id` entirely (it is not allocated);
+- drops rows whose `status` is not `active` before they leave the builder;
+- casts `amount` to `float64` once, during parse.
 
-- `RenameFields`
-- `DropFields`
-- `CastTypes`
-- `FilterRows` with a constant predicate (`field`, `op`, `value`)
+Rows that fail the filter are never materialized; dropped columns are never allocated; and casts happen once inside Rust instead of twice in Python and Rust.
 
-Non-fusable stages (for example a Python callable or a stateful window) still work, but they run over the Arrow table after the engine finishes. The pipeline automatically falls back to a row stream when it cannot short-circuit to a table.
+## The `ExecutionPlan` fields
 
-## Engine execution modes
+```rust
+pub struct ExecutionPlan {
+    pub field_map: HashMap<String, String>,       // rename
+    pub drop_fields: HashSet<String>,             // drop
+    pub field_types: HashMap<String, FieldType>,  // cast
+    pub dictionary_columns: HashSet<String>,      // explicit dict encoding
+    pub filter: Option<FilterPredicate>,          // per-row or post-reduce
+    pub schema_order: Vec<String>,                // output column order
+    pub auto_dict: bool,                          // auto-dict upgrade
+}
+```
 
-Adapters can expose up to three execution strategies. Choose the one that matches your workload:
+The plan is built by `_build_plan_kwargs()` on the Python side and consumed by `TableBuilder` on the Rust side.
 
-| Mode | Best for | Memory | Parallelism |
-|------|----------|--------|-------------|
-| `stream` | Huge files, unknown schema, row-at-a-time consumers | bounded by batch size | single-threaded parse |
-| `columnar` | Medium files that fit in RAM, table output | holds full table | single-threaded parse, vectorized builders |
-| `parallel` | Large files that fit in RAM, many cores | holds full table | chunked multi-threaded parse |
+## Field resolution order
 
-`auto` should let the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows; otherwise stream. Adapters should document their own heuristic because format split boundaries affect chunk safety.
+Inside `TableBuilder`, every emitted field goes through this pipeline:
 
-## Memory budgets and chunking
+1. `field_map` renames the raw field name.
+2. `drop_fields` checks the resolved name; if dropped, the field is ignored.
+3. `field_types` / `dictionary_columns` chooses the storage type.
+4. `filter` rejects rows during `end_row` (for `Equal`/`NotEqual`) or after assembly (for `Compare`).
 
-The engine respects a memory budget for bounded/streaming paths. Two knobs control it:
+This order matters. A filter runs on the resolved name, so it must be written in post-rename terms. A cast type is attached to the resolved name as well.
+
+## What is fusable
+
+Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPlan`:
+
+| Stage | Plan field | Notes |
+|-------|------------|-------|
+| `RenameFields` | `field_map` | Multiple renames merge into one map. |
+| `DropFields` | `drop_fields` | Merges as a set union. |
+| `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
+| `FilterRows` constant | `filter` | `Equal`/`NotEqual` on a constant string; evaluated during parse. |
+
+`FilterRows` is fusable only when it uses a constant predicate: `field`, `op`, and `value` are all literals. `op` can be `==` or `!=` for in-parser filtering, or comparison operators (`<`, `<=`, `>`, `>=`) for post-assembly filtering with Arrow compute kernels.
+
+## What is not fusable
+
+Non-fusable stages still work, but they run over the Arrow table after the engine finishes:
+
+- Python callables (`lambda` or any callable stage).
+- Stateful transforms such as window or aggregate stages.
+- `FilterRows` with computed or non-constant values.
+- Custom stages that do not implement `_plan_kwargs()`.
+
+When a non-fusable stage is present, the pipeline automatically falls back to a row stream or table transform path. The fusable prefix still runs in Rust; only the suffix runs in Python.
+
+## Inspecting `plan_overrides` in an adapter
+
+Adapters that subclass `rypipe.Source` receive fused plan kwargs through `_read_arrow`:
+
+```python
+class MySource(Source):
+    def _read_arrow(self, *, plan_overrides=None, **kwargs):
+        plan_overrides = plan_overrides or {}
+        print(plan_overrides)
+        # {
+        #   "field_mapping": {"old_name": "new_name"},
+        #   "drop_fields": ["internal_id"],
+        #   "filter": {"field": "status", "op": "==", "value": "active"},
+        #   "field_types": {"amount": "float64"},
+        # }
+        return my_rust_read(path=self.path, **plan_overrides, **kwargs)
+```
+
+The Rust side merges these kwargs into an `ExecutionPlan` with `execution_plan_from_kwargs` from `rypipe-python`, or constructs the plan manually:
+
+```rust
+use rypipe_core::{ExecutionPlan, FieldType};
+
+let plan = ExecutionPlan::new()
+    .rename("old_name", "new_name")
+    .drop("internal_id")
+    .type_as("amount", FieldType::Float64)
+    .filter_eq("status", "active");
+```
+
+If an adapter ignores `plan_overrides`, fused stages silently fall back to Python execution over a full table. That is one of the most expensive anti-patterns.
+
+## Order of operations across the pipeline
+
+Fusable stages commute in the plan, but the engine applies them in a fixed order:
+
+```
+raw field name
+    |
+    v
+rename (field_map)
+    |
+    v
+drop check (drop_fields)
+    |
+    v
+type selection (field_types / dictionary_columns)
+    |
+    v
+per-row filter (Equal / NotEqual)
+    |
+    v
+builder append
+    |
+    v
+post-assembly filter (Compare)
+    |
+    v
+finish: sort by schema_order, auto-dict, Arrow export
+```
+
+Because drop happens before type selection, you cannot cast a dropped field. Because per-row filter happens before the row is committed, rejected rows consume no Arrow storage.
+
+## When fusion does not help
+
+Fusion is not free if the adapter cannot act on the plan. An adapter that always parses every field into Python objects and then builds Arrow will not benefit; the engine must receive fields through `put_field` and honor `wants()`. If the adapter is a thin wrapper around a library that returns full Python dicts, fusion only removes a small amount of Python overhead.
+
+Fusion also cannot help when the workload is dominated by I/O. If the file is on a slow network share, reducing CPU work may not change wall-clock time. Profile first.
+
+## Summary
+
+- Fuse `RenameFields`, `DropFields`, `CastTypes`, and constant `FilterRows` by implementing `_read_arrow(plan_overrides=...)`.
+- Inspect `plan_overrides` to confirm that stages reach the Rust parser.
+- Non-fusable stages run after the engine; keep them out of the hot path when throughput matters.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/
+========================================================================
+
+# Advanced rypipe
+
+This section is for adapter authors and power users who want to understand why rypipe is fast and how to keep it fast. It assumes you have read the Python API, Rust API, and Architecture pages.
+
+Each page takes one optimization topic and explains the mechanism, the tuning knobs, and the trade-offs.
+
+## Roadmap
+
+| Page | What you will learn |
+|------|---------------------|
+| [Fusion](./fusion.md) | How `RenameFields`, `DropFields`, `CastTypes`, and constant `FilterRows` are rewritten into a single `ExecutionPlan`; what is fusable and what falls back to Python. |
+| [Execution modes](./execution-modes.md) | `stream`, `columnar`, `parallel`, and `auto`; when each wins on memory, latency, and throughput. |
+| [Memory and chunking](./memory-and-chunking.md) | How `BoundedExecutor` enforces a memory budget; sizing chunks for files larger or smaller than RAM. |
+| [Parallelism](./parallelism.md) | `rayon` internals; the `num_chunks` formula; why too many chunks hurt; measuring speedup. |
+| [Dictionary encoding](./dictionary-encoding.md) | Arrow dictionaries in rypipe; `auto_dict` heuristics; the merge path vs the fast path; explicit `dictionary_columns`. |
+| [Schema and types](./schema-and-types.md) | Using `schema_order` and `field_types` to skip inference passes, stabilize column order, and enable numeric compare filters. |
+| [I/O tuning](./io-tuning.md) | `mmap` vs buffered reads; `prefault`; OS page cache; storage class considerations. |
+| [Adapter design](./adapter-design.md) | Writing a fast `Splitter` and `RecordParser`; `memchr`; comments, CDATA, and quoted fields; borrowing strings; sparse rows; `sink.wants`. |
+| [Profiling](./profiling.md) | Profiling with `perf`, `cargo flamegraph`, and the `bench_throughput` example; measuring RSS; separating Python and Rust time. |
+| [Anti-patterns](./anti-patterns.md) | Common mistakes that silently remove fusion, increase memory, or waste CPU. |
+| [Case study: crxml](./case-study-crxml.md) | How crxml reaches ~2.4 GB/s by combining the techniques from the other pages. |
+
+## Quick checklist
+
+- [ ] Provide `schema_order` and `field_types` when the schema is known.
+- [ ] Use `dictionary_columns` for low-cardinality strings; be careful with `auto_dict` in parallel mode.
+- [ ] Implement `_read_arrow(plan_overrides=...)` so fused stages stay in Rust.
+- [ ] Pick `columnar` for tables that fit in RAM, `parallel` for large cached files, and `stream` for huge or row-oriented consumers.
+- [ ] Tune `chunks = 4 * physical_cores` and measure with your data.
+- [ ] Export Arrow from Rust and sink directly to Parquet when possible.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/io-tuning/
+========================================================================
+
+# I/O tuning
+
+Parsing cannot outrun the I/O subsystem. `rypipe` supports memory-mapped and buffered input, plus prefault options. Choosing the right combination depends on file size, RAM, and storage class.
+
+## `mmap` vs buffered reads
+
+`use_mmap=True` (the default) maps the file into virtual memory. The kernel loads pages on demand and caches them in the OS page cache.
+
+| Mode | Best for | Behavior |
+|------|----------|----------|
+| `use_mmap=True` | Files that fit in RAM or are expected to be cached | Kernel manages paging; parser sees a byte slice. |
+| `use_mmap=False` | Large cold files or portability constraints | Reads the entire file into a `Vec<u8>`. |
+
+For files that fit in RAM, mmap is usually fastest because it avoids an explicit copy into user space. For cold files larger than RAM, buffered reads may give smoother throughput because the parser avoids page-fault stalls.
+
+## Prefault
+
+`prefault=True` uses `MADV_WILLNEED` to fault the whole file up front. This is fastest when the file fits in RAM and you want to hide latency behind sequential reads. It can be harmful for files larger than RAM because it forces the kernel to read pages that may be evicted before use.
+
+`prefault=False` uses `MADV_SEQUENTIAL` so the kernel can drop pages behind the reader. This is better for RSS-sensitive workloads and for streaming large files.
+
+| Combination | Best for |
+|-------------|----------|
+| `use_mmap=True, prefault=True` | Speed when the file fits in RAM. |
+| `use_mmap=True, prefault=False` | Large files where RSS matters. |
+| `use_mmap=False` | Portability; reads into a `Vec<u8>`. |
+
+## OS page cache
+
+The page cache is the biggest factor for repeated reads. If a file has been read recently, it is probably in cache, and mmap or buffered reads will be fast regardless of the underlying storage.
+
+For one-off reads of large files, storage bandwidth is the limit. A modern NVMe SSD can sustain 3-7 GB/s sequential reads; a SATA SSD is closer to 500 MB/s; network storage varies widely.
+
+## SSD vs NVMe vs network storage
+
+| Storage | Typical sequential read | Implications |
+|---------|------------------------|--------------|
+| NVMe SSD | 3-7 GB/s | Parser can be the bottleneck; parallel mode helps. |
+| SATA SSD | 400-600 MB/s | May be I/O-bound for simple formats; still fast enough for most XML/JSON. |
+| Network (NFS/S3) | 50-500 MB/s | Latency and throughput vary; streaming may be safer than mmap. |
+| Cold object storage | <100 MB/s | Consider downloading first or using buffered reads. |
+
+On network storage, mmap can trigger many small page faults over a high-latency link. Buffered reads with a large readahead are usually smoother.
+
+## Drop before parse
+
+In bounded stream mode, the input buffer is dropped before the parse phase begins. This releases mapped pages before downstream work starts. Combined with `prefault=False`, this keeps peak memory close to the parse budget even when the file is much larger than RAM.
+
+## Summary
+
+- Use `mmap` + `prefault=True` for cached or RAM-resident files.
+- Use `mmap` + `prefault=False` for large streaming files.
+- Use buffered reads for network or portable deployments.
+- Match the parser throughput to storage bandwidth; do not over-parallelize an I/O-bound workload.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/memory-and-chunking/
+========================================================================
+
+# Memory and chunking
+
+`rypipe` tries to parse as fast as the hardware allows while staying inside a memory budget. Two knobs control that trade-off:
 
 - `memory`: maximum bytes the parser should hold in flight. A string like `"512MiB"` is parsed into bytes.
-- `chunks`: number of chunks for parallel mode. More chunks improve load balancing but increase rayon overhead.
+- `chunks`: number of chunks for parallel mode. More chunks improve load balancing but increase scheduling overhead.
+
+This page explains how `BoundedExecutor` enforces the budget and how to size chunks for files larger or smaller than RAM.
+
+## How `BoundedExecutor` works
+
+`BoundedExecutor::run` keeps peak memory near the configured budget:
+
+1. Opens the file via `InputBuffer`.
+2. Estimates `bytes_per_row` from `Splitter::estimate_bytes_per_row`.
+3. Computes `rows_per_batch` from the budget.
+4. Splits the file into at most 64 batches.
+5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
+6. Returns a `Vec<RecordBatch>`; the caller concatenates.
+
+The budget covers builder storage: string arenas, numeric buffers, and validity bitmaps. It does not include the input buffer, Arrow export buffers, or downstream pandas conversion. Set the budget lower than total RAM.
+
+## Sizing the memory budget
+
+A reasonable starting point for a workstation is 500 MiB. For a server with many concurrent parsers, divide available RAM by the expected concurrency. For embedded or container workloads, use 128 MiB or less.
+
+The budget is a target, not a hard limit. Spikes can happen when:
+
+- a batch contains an unusually wide row;
+- a string column receives a very large value;
+- the `bytes_per_row` estimate was wrong because of high variance.
+
+If you see RSS overshoots, lower the budget and add more batches.
+
+## Sizing chunks for parallel mode
 
 Rule of thumb for parallel mode:
 
@@ -69,61 +812,353 @@ chunks = 4 * physical_cores
 
 Finer chunks even out variable record parse times. Beyond 4-8x core count, synchronization overhead usually wins. Measure with your data; text-heavy formats benefit from fewer chunks because per-chunk setup dominates.
 
-## Schema hints
+For a CPU-bound parser on many cores, start with 4x physical cores and increase until throughput flattens. For a memory-bandwidth-bound parser, fewer chunks may be better because each chunk touches the same memory hierarchy.
 
-Providing a `schema` list avoids the discovery pass that some formats need to infer column names. It also stabilizes column order across chunks, which matters for parallel merges. Pass field types with `field_types` so the engine builds the correct Arrow array from the first row instead of inferring and recasting later.
+## Impact of row size variance
+
+`BoundedExecutor` uses `bytes_per_row` to convert a byte budget into a row count. If rows vary in size, the row count can be wrong in either direction:
+
+- Underestimate: a batch exceeds the budget and RSS spikes.
+- Overestimate: batches are tiny and overhead rises.
+
+High variance is common in:
+
+- XML with mixed text and attribute payloads;
+- JSON with nested arrays or large string fields;
+- log files with variable field counts.
+
+For these formats, prefer a smaller memory budget and more batches, or use stream mode with a conservative row estimate.
+
+## Files larger than RAM
+
+Stream mode is designed for this case. The input buffer is dropped before parsing, so mapped pages are released before downstream work starts. Each batch is parsed, exported, and discarded independently.
+
+Tips:
+
+- Use `prefault=False` so the kernel can drop pages behind the reader.
+- Set `memory` to a fraction of RAM (for example, 25%).
+- Avoid `auto_dict` and compare filters; they force a full table merge.
+- Sink directly to Parquet or another stream-friendly format instead of building a pandas DataFrame.
+
+## Files smaller than RAM
+
+For small files, columnar mode is usually fastest. There is no chunk setup, no rayon scheduling, and no merge step. The entire file is parsed in one pass and exported once.
+
+If the file is small but the parser is slow (for example, complex XML), parallel mode may still win despite overhead. Benchmark both.
+
+## Memory model
+
+- `InputBuffer::Mmap` maps the file and applies `MADV_WILLNEED` (prefault) or `MADV_SEQUENTIAL` (RSS-sensitive) advice on Unix. The mapping is dropped before Arrow export, so no borrowed bytes outlive it.
+- `InputBuffer::Owned` simply reads the file into a `Vec<u8>`.
+- `StrColumn` owns its bytes; Arrow arrays are built from owned buffers.
+- Numeric columns use dense `Vec<Option<T>>`.
+
+## Summary
+
+- Use `memory` to cap builder storage; leave headroom for export and downstream work.
+- Start with `chunks = 4 * physical_cores` and tune by measurement.
+- Reduce batch size when row size variance is high.
+- Use stream mode for files larger than RAM; use columnar mode for small files.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/parallelism/
+========================================================================
+
+# Parallelism
+
+Parallel mode uses `rayon` to parse chunks concurrently. Understanding how `rayon` schedules work and how `num_chunks` maps to hardware helps avoid the common mistake of over-parallelizing.
+
+## The `num_chunks` formula
+
+A safe starting point is:
+
+```
+num_chunks = 4 * physical_cores
+```
+
+For a CPU-bound parser, this provides enough tasks to keep all cores busy even when chunks finish at different speeds. For a memory-bandwidth-bound parser, fewer chunks may be better because each chunk contends for the same DRAM channels and caches.
+
+The built-in `bench_throughput` example is a simple TSV adapter. On a 12-core/24-thread Ryzen 9 5900X, parallel mode is slightly slower than single-threaded parse because the parser is so fast that chunk overhead dominates. Real adapters with heavier parsing usually see a win.
+
+## How `rayon` schedules chunks
+
+`ParallelExecutor` calls `rayon::par_iter` over the chunk ranges. `rayon` maintains a thread pool sized to the number of logical cores and uses work-stealing to balance load. Each chunk is parsed by one thread into its own `TableBuilder`.
+
+Key properties:
+
+- Tasks are not pinned to cores. The OS migrates them based on load.
+- Work-stealing helps when chunks have variable cost.
+- The global thread pool is shared with other `rayon` users in the same process.
+
+## Hyperthreading
+
+`rayon` uses logical cores by default. On a CPU with SMT (hyperthreading), two logical cores share execution units, L1, and L2. For memory-bandwidth-bound parsers, logical cores may not add much throughput. For CPU-bound parsers, they often add 10-30%.
+
+If you want to exclude hyperthreads, set the `RAYON_NUM_THREADS` environment variable to the physical core count before starting Python:
+
+```bash
+export RAYON_NUM_THREADS=12  # physical cores only
+python script.py
+```
+
+## NUMA and cache effects
+
+On multi-socket or large NUMA machines, memory bandwidth and latency depend on which socket owns the buffer. `rayon` does not bind tasks to NUMA nodes, so a chunk parsed on socket 1 may read input allocated on socket 0.
+
+For maximum throughput on NUMA hardware:
+
+- allocate the input buffer on the same node that will do most of the parsing;
+- pin the Python process to one socket if the file fits in one node's RAM;
+- expect lower scaling when the file is larger than a single node's memory.
+
+L3 cache size also matters. If the working set for one chunk fits in L3, scaling is good. If chunks are larger than L3, all cores contend for DRAM and speedup flattens.
+
+## Why too many chunks hurt
+
+More chunks are not always better. Each chunk pays fixed costs:
+
+- `Splitter` validation and boundary search;
+- `RecordParser` setup (readers, buffers, state);
+- `TableBuilder` allocation and finish;
+- Arrow export and, on the merge path, builder merging.
+
+When the number of chunks grows, these fixed costs multiply. At some point the cost of starting a chunk exceeds the parsing work inside it. The result is lower throughput and higher memory use.
+
+Too many chunks also increase peak RSS because each chunk holds its own builder until all chunks finish. On the merge path, all builders must coexist before the serial merge begins.
+
+## Measuring speedup
+
+Run the same parse at several chunk counts and plot throughput:
+
+```bash
+python benchmarks/bench_throughput.py --chunks 1 --output c1.json
+python benchmarks/bench_throughput.py --chunks 4 --output c4.json
+python benchmarks/bench_throughput.py --chunks 8 --output c8.json
+python benchmarks/bench_throughput.py --chunks 16 --output c16.json
+python benchmarks/bench_throughput.py --chunks 32 --output c32.json
+```
+
+Look for the elbow where adding chunks stops helping. Also measure RSS at each point; sometimes the fastest setting is not the most memory-efficient.
+
+## Summary
+
+- Start with `chunks = 4 * physical_cores`.
+- Reduce chunks for simple, memory-bandwidth-bound parsers.
+- Consider `RAYON_NUM_THREADS` to test physical-core-only behavior.
+- Measure throughput and RSS; do not assume more parallelism is faster.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/profiling/
+========================================================================
+
+# Profiling
+
+Optimization without measurement is guessing. This page describes how to profile rypipe pipelines and interpret the results.
+
+## The `bench_throughput` example
+
+`crates/rypipe-core/examples/bench_throughput.rs` is a self-contained benchmark. It uses a tiny inline TSV-like adapter so the result measures the engine, not an external parser.
+
+Run it:
+
+```bash
+cargo run --release -p rypipe-core --example bench_throughput
+```
+
+Or use the Python wrapper that writes JSON results:
+
+```bash
+python benchmarks/bench_throughput.py --output .benchmarks/rypipe.json
+```
+
+The output reports rows, time, rows per second, MB/s, and RSS. Use these to compare configurations.
+
+## Release builds
+
+Always profile a release build. Debug builds are 10-50x slower and the profile will be dominated by unrelated overhead.
+
+```bash
+cargo build --release -p rypipe-core
+```
+
+For symbols without full debug overhead, use the `profiling` profile if it exists:
+
+```bash
+cargo build --profile profiling -p rypipe-core
+```
+
+## Profiling with `perf`
+
+On Linux:
+
+```bash
+perf record -g cargo run --release -p rypipe-core --example bench_throughput
+perf report -g 'graph,0.5,caller'
+```
+
+Look for time spent in:
+
+- `find_split_points`: splitter is expensive.
+- `parse_chunk`: parser is the bottleneck.
+- `StrColumn::push` or builder append: string allocation/copy dominates.
+- Arrow export or compute kernels: export is expensive.
+- Python GIL-related functions: Python boundary is the bottleneck.
+
+## Flamegraphs
+
+`cargo flamegraph` produces an SVG flamegraph:
+
+```bash
+cargo install flamegraph
+cargo flamegraph --release -p rypipe-core --example bench_throughput
+```
+
+Open `flamegraph.svg` in a browser. Wide bars are hot functions. Look for unexpected wide bars such as JSON serialization, Python dict construction, or allocations.
+
+## Measuring RSS
+
+Use `/usr/bin/time -v` on Linux:
+
+```bash
+/usr/bin/time -v cargo run --release -p rypipe-core --example bench_throughput
+```
+
+Look at `Maximum resident set size (kbytes)`. Compare this across engine modes and chunk counts.
+
+In Python, you can sample RSS during a run with `psutil`:
+
+```python
+import psutil, time, os
+
+proc = psutil.Process(os.getpid())
+peak = 0
+while running:
+    peak = max(peak, proc.memory_info().rss)
+    time.sleep(0.01)
+print(f"peak RSS: {peak / 1024 / 1024:.1f} MiB")
+```
+
+## Separating Python and Rust time
+
+If the pipeline includes Python stages, wrap the Rust parse in `py.allow_threads` (PyO3) so the GIL is released. Profile the Python side separately with `cProfile`:
+
+```bash
+python -m cProfile -o profile.stats script.py
+python -c "import pstats; pstats.Stats('profile.stats').sort_stats('cumtime').print_stats(20)"
+```
+
+If most time is in `_rypipe` native code, optimize Rust. If most time is in Python callables, move work into fused stages or Rust.
+
+## What to vary
+
+When benchmarking, change one variable at a time:
+
+- `chunks`: 1, 2, 4, 8, 16, 32.
+- `memory`: 64 MiB, 256 MiB, 512 MiB, 1 GiB.
+- `use_mmap` and `prefault`: all four combinations.
+- `auto_dict`: on vs off.
+- `field_types`: typed parse vs string inference.
+
+Plot throughput vs RSS to find the Pareto frontier.
+
+## Summary
+
+- Use `bench_throughput` as a baseline.
+- Profile release builds with `perf` or `cargo flamegraph`.
+- Measure RSS separately; throughput is not the only metric.
+- Separate Python time from Rust time before optimizing.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/schema-and-types/
+========================================================================
+
+# Schema and types
+
+`rypipe` can infer column names and types, but inference passes cost time and memory. Providing `schema_order` and `field_types` up front avoids those passes, stabilizes column order, and enables numeric compare filters.
+
+## Avoiding inference passes
+
+Some formats need a discovery pass to infer column names. For example, an XML adapter may scan the file to find all field names before parsing. This doubles I/O work and delays the first row.
+
+Provide `schema_order` when the columns are known:
 
 ```python
 source = MyAdapter(
     "data.log",
-    schema=["id", "ts", "amount"],
-    field_types={"id": "int64", "ts": "string", "amount": "float64"},
-    dictionary_columns=["status"],
+    schema_order=["id", "ts", "amount", "status"],
 )
 ```
 
-## Dictionary encoding
+With `schema_order`, the engine does not need to discover column names. It also sorts columns to this order at finish time, making output deterministic.
 
-Set `dictionary_columns` explicitly for low-cardinality string columns. This stores values as integer indices and can reduce memory 5-20x for status codes, country codes, or enums. `auto_dict=True` asks the engine to guess, but the heuristic has a small runtime cost; explicit is faster and predictable.
+## Stable column order across chunks
 
-## mmap vs buffered reads
+In parallel mode, each chunk may encounter columns in a different order. Without a shared `schema_order`, the engine must reconcile column order at merge time. This adds a small per-chunk cost and can produce unexpected ordering when chunks disagree.
 
-`use_mmap=True` (the default) maps the file into virtual memory. It is usually fastest for files that fit in RAM or when the OS can cache the file. For cold files larger than RAM, buffered reads may give smoother throughput because the parser avoids page-fault stalls. Benchmark both if your workload is I/O bound.
+`schema_order` fixes the output order regardless of the order in which fields arrive.
 
-## Designing a fast adapter
+## Casting during parse
 
-A high-performance adapter does as little work as possible per record:
+`field_types` tells the engine which storage type to build for each column:
 
-1. **Split cheaply**: find record boundaries with byte scans; defer full decoding.
-2. **Borrow strings**: hand borrowed `&str` slices to the engine when the input is valid UTF-8. The engine copies only when it must cast or encode.
-3. **Emit sparse rows**: if a field is missing, skip it entirely instead of emitting `Value::Null` for every row.
-4. **Respect plan kwargs**: pass `field_mapping`, `drop_fields`, `filter`, and `field_types` into the Rust parser so fusion actually happens.
-5. **Avoid Python in the hot path**: build the Arrow table in Rust and export it once via the C Data Interface.
+```python
+source = MyAdapter(
+    "data.log",
+    field_types={
+        "id": "int64",
+        "ts": "string",
+        "amount": "float64",
+        "is_active": "bool",
+    },
+)
+```
 
-## Profiling a pipeline
+The engine builds the correct Arrow array from the first row. It does not store intermediate strings and recast later. This saves memory and CPU.
 
-Use the throughput benchmark in `crates/rypipe-core/examples/bench_throughput.rs` as a template. General workflow:
+Supported types include:
 
-1. Run a release build.
-2. Vary `chunks`, `memory`, and `batch_size` and plot throughput vs latency.
-3. Use `perf` or `cargo flamegraph` to see whether time is in splitting, decoding, Arrow builders, or the GIL boundary.
-4. If Python sinks dominate, sink directly to Arrow/Parquet instead of iterating rows.
+| Type | Rust `FieldType` | Notes |
+|------|------------------|-------|
+| `string` / `str` | `FieldType::String` | Default for text data. |
+| `int64` / `int` | `FieldType::Int64` | Parses integer strings during parse. |
+| `float64` / `float` | `FieldType::Float64` | Parses float strings during parse. |
+| `bool` / `boolean` | `FieldType::Boolean` | Parses common bool representations. |
 
-## Anti-patterns
+In Rust:
 
-- Iterating a pipeline with `for row in pipeline` after fusing a table-shaped source. It works, but it reconstructs dicts from the Arrow table.
-- Chaining many non-fusable Python callables. Each one materializes a full batch list.
-- Calling `to_pandas()` and then `to_arrow()` repeatedly. Cache the table once and reuse it.
-- Ignoring `plan_overrides` in `_read_arrow`. If you ignore them, stages silently fall back to Python execution.
+```rust
+use rypipe_core::{ExecutionPlan, FieldType};
 
-## Summary checklist
+let plan = ExecutionPlan::new()
+    .type_as("amount", FieldType::Float64)
+    .type_as("quantity", FieldType::Int64);
+```
 
-- [ ] Provide `schema` and `field_types` when known.
-- [ ] Use `dictionary_columns` for low-cardinality strings.
-- [ ] Prefer `columnar` for tables that fit in RAM, `parallel` for large cached files, and `stream` for huge or row-oriented consumers.
-- [ ] Tune `chunks = 4 * cores` and measure.
-- [ ] Implement `_read_arrow(plan_overrides=...)` to keep stages fused.
-- [ ] Export Arrow from Rust and sink directly to Parquet when possible.
+## Numeric compare filters
+
+Casting during parse is especially important for filters. When a column is stored as `Int64` or `Float64`, the engine can use Arrow compute kernels for `Compare` filters (`<`, `<=`, `>`, `>=`). These kernels are vectorized and avoid Python-level comparisons.
+
+If the column is left as a string, the engine must either skip the filter or fall back to Python. Declare the type explicitly to keep numeric comparisons in Rust.
+
+## Combining schema hints with fusion
+
+`schema_order` and `field_types` are part of the `ExecutionPlan`. They merge cleanly with `RenameFields`, `DropFields`, and `FilterRows`:
+
+```python
+result = (
+    MyAdapter("data.log", schema_order=["id", "amount"], field_types={"amount": "float64"})
+    | RenameFields({"old_name": "amount"})
+    | FilterRows(field="amount", op=">", value="100.0")
+).to_arrow()
+```
+
+The filter runs on the renamed, typed column. Without `field_types`, the filter would fall back to Python or be skipped.
+
+## Summary
+
+- Provide `schema_order` to skip inference and stabilize output columns.
+- Provide `field_types` to cast during parse and enable numeric Arrow filters.
+- Combine both with fused stages for the fastest path through the engine.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/architecture/
@@ -1549,7 +2584,7 @@ rypipe-core = "0.1"
 
 # Only if you build Python bindings for the adapter:
 rypipe-python = "0.1"
-pyo3 = { version = "0.24", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 ```
 
 ## Implement `Splitter`
@@ -1691,12 +2726,12 @@ for the plan and export helpers:
 use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
 
 #[pyfunction]
-fn read_csv(
-    py: Python<'_>,
+fn read_csv<'py>(
+    py: Python<'py>,
     path: String,
     field_mapping: Option<HashMap<String, String>>,
     // ... other kwargs
-) -> PyResult<PyObject> {
+) -> PyResult<Bound<'py, PyAny>> {
     let plan = execution_plan_from_kwargs(...)?;
     let batches = py.allow_threads(|| {
         // ... use Pipeline::read_path_par or BoundedExecutor
@@ -1784,3 +2819,4 @@ self-contained splitter/parser samples.
 - [Rust API](./rust-api.md): `Pipeline`, `ExecutionPlan`, and `Value`.
 - [Architecture](./architecture.md): how splitters, parsers, and the engine interact.
 - [Python API](./python-api.md): registering adapters with the `rypipe` package.
+- [crxml adapter](./crxml-adapter.md): a production adapter that reaches 2.4 GB/s on Crystal Reports XML.

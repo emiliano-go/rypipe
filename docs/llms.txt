@@ -17,7 +17,18 @@
 - [crxml adapter](https://rypipe.emiliano-go.com/crxml-adapter/): Real-world adapter example; 2.4 GB/s Crystal Reports XML parser built on rypipe-core
 
 ## Advanced
-- [Advanced](https://rypipe.emiliano-go.com/advanced/): Deep-dive on fusion, execution modes, memory budgets, and performance tuning
+- [Advanced overview](https://rypipe.emiliano-go.com/advanced/): Roadmap and checklist for the advanced section
+- [Pushdown fusion](https://rypipe.emiliano-go.com/advanced/fusion/): How RenameFields/DropFields/CastTypes/FilterRows collapse into an ExecutionPlan
+- [Execution modes](https://rypipe.emiliano-go.com/advanced/execution-modes/): stream, columnar, parallel, and auto engine selection
+- [Memory and chunking](https://rypipe.emiliano-go.com/advanced/memory-and-chunking/): Memory budgets, BoundedExecutor, and sizing chunks
+- [Parallelism](https://rypipe.emiliano-go.com/advanced/parallelism/): rayon internals, num_chunks, and measuring speedup
+- [Dictionary encoding](https://rypipe.emiliano-go.com/advanced/dictionary-encoding/): Arrow dictionaries, auto_dict, and the merge path
+- [Schema and types](https://rypipe.emiliano-go.com/advanced/schema-and-types/): schema_order, field_types, and numeric compare filters
+- [I/O tuning](https://rypipe.emiliano-go.com/advanced/io-tuning/): mmap vs buffered reads, prefault, and storage classes
+- [Adapter design](https://rypipe.emiliano-go.com/advanced/adapter-design/): Splitter, RecordParser, memchr, and sink.wants
+- [Profiling](https://rypipe.emiliano-go.com/advanced/profiling/): perf, flamegraph, bench_throughput, and RSS measurement
+- [Anti-patterns](https://rypipe.emiliano-go.com/advanced/anti-patterns/): Common mistakes that hurt throughput and memory
+- [Case study: crxml](https://rypipe.emiliano-go.com/advanced/case-study-crxml/): How crxml reaches ~2.4 GB/s
 
 ## Internals
 - [Architecture](https://rypipe.emiliano-go.com/architecture/): Splitting, row extraction, typed builders, and engine design
