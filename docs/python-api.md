@@ -37,6 +37,21 @@ class MySource(Source):
         ...
 ```
 
+### `rypipe.Adapter`
+
+Even simpler: subclass `Adapter` and implement only ``read(path, **kwargs)``.
+Plan kwargs are merged and passed through automatically.
+
+```python
+from rypipe import Adapter
+
+class CsvAdapter(Adapter):
+    def read(self, path, **kwargs):
+        return _rypipe_csv.read_csv(path, **kwargs)
+
+source = CsvAdapter("data.csv")
+```
+
 A `Source` exposes:
 
 - Row iteration: `for row in source`

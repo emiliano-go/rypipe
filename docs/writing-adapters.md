@@ -195,33 +195,30 @@ class CsvAdapter:
 rypipe.register_adapter("csv", CsvAdapter(), extensions=[".csv"])
 ```
 
-## Python `Source` subclass (pipeline API)
+## Python `Adapter` subclass (pipeline API)
 
-If your adapter returns a `pyarrow.Table`, you can subclass `rypipe.Source`
-instead of writing a custom pipeline layer. Users then get the crxml-style
-pipeline API for free::
+If your adapter returns a `pyarrow.Table`, the easiest way to expose a source
+is to subclass `rypipe.Adapter` and implement ``read(self, path, **kwargs)``.
+Plan kwargs are merged and passed through automatically::
 
 ```python
-from pathlib import Path
-import pyarrow as pa
 import rypipe
-from rypipe import Source
+from rypipe import Adapter
 import _rypipe_csv
 
-class CsvSource(Source):
+class CsvAdapter(Adapter):
     def __init__(self, path, *, delimiter=",", **kwargs):
-        # Validate path and store plan kwargs.
         super().__init__(path, **kwargs)
         self._delimiter = delimiter
 
-    def _read_arrow(self, plan_overrides=None):
-        plan = self._build_plan_kwargs()
-        if plan_overrides:
-            plan.update(plan_overrides)
+    def read(self, path, **kwargs):
         return _rypipe_csv.read_csv(
-            str(self._path), delimiter=self._delimiter, **plan
+            path, delimiter=self._delimiter, **kwargs
         )
 ```
+
+For adapters that need full control, subclass `rypipe.Source` directly and
+override `_read_arrow` and `_build_plan_kwargs`.
 
 Users can now write::
 

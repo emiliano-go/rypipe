@@ -31,7 +31,7 @@ from typing import Any, Iterable
 
 import _rypipe
 
-from .source import Source
+from .source import Adapter, Source
 from .pipeline import Pipeline
 from .stages import RenameFields, CastTypes, FilterRows, DropFields
 from .sinks import (
@@ -45,6 +45,7 @@ from .sinks import (
 )
 
 __all__ = [
+    "Adapter",
     "Source",
     "Pipeline",
     "read",
