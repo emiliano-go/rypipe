@@ -195,6 +195,55 @@ class CsvAdapter:
 rypipe.register_adapter("csv", CsvAdapter(), extensions=[".csv"])
 ```
 
+## Python `Source` subclass (pipeline API)
+
+If your adapter returns a `pyarrow.Table`, you can subclass `rypipe.Source`
+instead of writing a custom pipeline layer. Users then get the crxml-style
+pipeline API for free::
+
+```python
+from pathlib import Path
+import pyarrow as pa
+import rypipe
+from rypipe import Source
+import _rypipe_csv
+
+class CsvSource(Source):
+    def __init__(self, path, *, delimiter=",", **kwargs):
+        # Validate path and store plan kwargs.
+        super().__init__(path, **kwargs)
+        self._delimiter = delimiter
+
+    def _read_arrow(self, plan_overrides=None):
+        plan = self._build_plan_kwargs()
+        if plan_overrides:
+            plan.update(plan_overrides)
+        return _rypipe_csv.read_csv(
+            str(self._path), delimiter=self._delimiter, **plan
+        )
+```
+
+Users can now write::
+
+```python
+from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+
+src = CsvSource("data.csv")
+df = (
+    src
+    | RenameFields({"old_name": "new_name"})
+    | DropFields(["internal_id"])
+    | FilterRows(field="status", op="==", value="active")
+    | CastTypes({"amount": float})
+).to_dataframe()
+```
+
+`RenameFields`, `DropFields`, `CastTypes`, and constant `FilterRows` expose
+`_plan_kwargs()` so the pipeline fusion layer pushes them into `_read_arrow`.
+Your Rust `read_csv` receives the merged kwargs and applies them in the parse
+loop. Non-fusable stages (custom callables, compare filters, stateful transforms)
+run over the returned table automatically.
+
 ## Testing an adapter
 
 Recommended tests:
