@@ -1,8 +1,8 @@
 # Writing a format adapter
 
 A `rypipe` adapter is just two small types: a `Splitter` and a `RecordParser`.
-Once you have those, the existing engine (`TableBuilder`, `ParallelExecutor`,
-`BoundedExecutor`) handles the rest.
+Once you have those, the `Pipeline` API wires them into single-file,
+parallel, and bounded-memory execution with one line of code.
 
 ## Adapter crate layout
 
@@ -108,22 +108,48 @@ Key points:
 - Do not call `end_row()` for partial trailing rows; the engine will discard
   them.
 
-## Wire it into the engine
+## Run it with `Pipeline`
+
+`Pipeline` is the recommended entry point. It handles file opening, plan
+application, and all execution modes.
 
 ```rust
-use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan, parallel::ParallelExecutor};
+use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
 use rypipe_csv::{CsvDecoder, CsvSplitter};
 
-let input = InputBuffer::open("data.csv".as_ref(), false, false)?;
-let splitter = CsvSplitter;
-let decoder = CsvDecoder { header: vec!["a".into(), "b".into()] };
-let batches = ParallelExecutor::parse(
-    input.as_slice(),
-    &splitter,
-    decoder,
-    ExecutionPlan::new(),
-    4,
+let pipeline = Pipeline::new(CsvSplitter, CsvDecoder {
+    header: vec!["a".into(), "b".into()],
+});
+
+// Single-file parse.
+let batch = pipeline.read_path("data.csv", false, false)?;
+
+// Parallel parse.
+let batches = pipeline.read_path_par("data.csv", 4, false, false)?;
+
+// Bounded-memory streaming.
+let batches = pipeline.read_path_stream(
+    "huge.csv",
+    rypipe_core::MemoryBudget::new(128 * 1024 * 1024),
+    false,
 )?;
+```
+
+## Pushdown plans with the builder API
+
+```rust
+use rypipe_core::{CompareOp, ExecutionPlan, FieldType};
+
+let plan = ExecutionPlan::new()
+    .rename("raw_amount", "amount")
+    .drop("internal_id")
+    .type_as("amount", FieldType::Float64)
+    .type_as("quantity", FieldType::Int64)
+    .dictionary("status")
+    .filter_eq("status", "active")
+    .schema_order(["quantity", "amount", "status"]);
+
+let batch = pipeline.with_plan(plan).read_path("data.csv", false, false)?;
 ```
 
 ## Adding Python bindings
@@ -131,10 +157,12 @@ let batches = ParallelExecutor::parse(
 If you want a standalone `_rypipe_csv` extension, create a PyO3 crate that:
 
 1. Builds an `ExecutionPlan` from kwargs (reuse `rypipe_python::plan_kwargs`).
-2. Calls `ParallelExecutor::parse` or `BoundedExecutor::run`.
+2. Calls `Pipeline::read_path_par` or `Pipeline::read_path_stream`.
 3. Exports via `rypipe_python::export::record_batches_to_pyarrow_table`.
 
 Or add the new adapter behind a format selector in `rypipe-python` itself.
+The `_rypipe.read(path, format="...", format_options={...})` entry point is
+format-agnostic; adding a new Rust parser only requires a new match arm.
 
 ## Testing an adapter
 
@@ -147,5 +175,6 @@ Recommended tests:
 - Splitter invariants (monotonic points, no inverted ranges, coverage).
 - Multi-chunk equivalence: parse whole file vs. split + merge.
 - Partial trailing row discarded cleanly.
+- `Pipeline::read_path`, `read_path_par`, and `read_path_stream` agree.
 
 See `rypipe-xml/tests/integration_test.rs` for a concrete example.
