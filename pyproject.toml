@@ -7,7 +7,8 @@ name = "rypipe"
 version = "0.1.0"
 description = "Format-agnostic columnar ingestion engine: Rust core with Python bindings. Adapters for XML, JSON, CSV, etc. are separate packages."
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "Emiliano Gandini", email = "emiliano.gandini@protonmail.com"}
 ]
@@ -35,6 +36,9 @@ python-source = "."
 python-packages = ["_rypipe", "rypipe"]
 features = ["pyo3/extension-module"]
 profile = "release"
+# maturin declares License-File in sdist PKG-INFO but does not add the file
+# to the tarball; PyPI rejects the upload unless LICENSE ships explicitly.
+include = [{path = "LICENSE", format = "sdist"}]
 
 [tool.pytest.ini_options]
 testpaths = ["crates/rypipe-python/tests"]
