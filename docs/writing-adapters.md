@@ -27,7 +27,7 @@ rypipe-core = "0.1"
 
 # Only if you build Python bindings for the adapter:
 rypipe-python = "0.1"
-pyo3 = { version = "0.24", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 ```
 
 ## Implement `Splitter`
@@ -169,12 +169,12 @@ for the plan and export helpers:
 use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
 
 #[pyfunction]
-fn read_csv(
-    py: Python<'_>,
+fn read_csv<'py>(
+    py: Python<'py>,
     path: String,
     field_mapping: Option<HashMap<String, String>>,
     // ... other kwargs
-) -> PyResult<PyObject> {
+) -> PyResult<Bound<'py, PyAny>> {
     let plan = execution_plan_from_kwargs(...)?;
     let batches = py.allow_threads(|| {
         // ... use Pipeline::read_path_par or BoundedExecutor
@@ -262,3 +262,4 @@ self-contained splitter/parser samples.
 - [Rust API](./rust-api.md): `Pipeline`, `ExecutionPlan`, and `Value`.
 - [Architecture](./architecture.md): how splitters, parsers, and the engine interact.
 - [Python API](./python-api.md): registering adapters with the `rypipe` package.
+- [crxml adapter](./crxml-adapter.md): a production adapter that reaches 2.4 GB/s on Crystal Reports XML.
