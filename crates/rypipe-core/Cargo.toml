@@ -1,10 +1,15 @@
 [package]
 name = "rypipe-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Format-agnostic columnar engine with Arrow export"
 repository = "https://github.com/emiliano-go/rypipe"
+homepage = "https://rypipe.emiliano-go.com"
+documentation = "https://docs.rs/rypipe-core"
+readme = "README.md"
+keywords = ["arrow", "columnar", "parser", "ingestion", "etl"]
+categories = ["parser-implementations", "encoding", "data-structures"]
 authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
 
 [features]
