@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "rypipe"
 version = "0.1.0"
-description = "Generic columnar engine for XML, JSON, CSV and more — Rust core with Python bindings"
+description = "Generic columnar engine for XML, JSON, CSV and more: Rust core with Python bindings"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [

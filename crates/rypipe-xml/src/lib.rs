@@ -1,4 +1,4 @@
-//! `rypipe-xml` — Crystal Reports XML adapter for `rypipe-core`.
+//! `rypipe-xml`: Crystal Reports XML adapter for `rypipe-core`.
 //!
 //! Provides a [`CrystalXmlDecoder`] that emits field events for Crystal Reports
 //! XML rows and a [`CrystalXmlSplitter`] that finds row-boundary split points
