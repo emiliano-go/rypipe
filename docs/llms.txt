@@ -1,6 +1,6 @@
 # rypipe Documentation
 
-> Format-agnostic columnar engine for XML, JSON, CSV, HTML, and more. Parse row-oriented byte streams into Apache Arrow record batches with a Rust core, Python bindings, parallel scheduling, memory-bounded execution, and query pushdown.
+> Format-agnostic columnar engine. Parse row-oriented byte streams into Apache Arrow record batches with a Rust core, Python bindings, parallel scheduling, memory-bounded execution, and query pushdown.
 
 ## Overview
 - [rypipe](https://rypipe.emiliano-go.com/): Format-agnostic columnar engine that turns byte streams into Arrow record batches

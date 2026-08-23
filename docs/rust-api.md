@@ -1,14 +1,16 @@
 # Rust API
 
 `rypipe-core` is a pure-Rust crate. This guide shows how to use it directly and
-how its pieces compose.
+how its pieces compose. Format-specific adapters (for XML, CSV, JSON, etc.) are
+separate crates that implement `Splitter` and `RecordParser`.
 
 ## Dependencies
 
 ```toml
 [dependencies]
 rypipe-core = { path = "../rypipe/crates/rypipe-core" }
-rypipe-xml = { path = "../rypipe/crates/rypipe-xml" }
+# adapter crate of your choice, e.g.:
+# my-csv-adapter = "0.1"
 ```
 
 ## Recommended entry point: `Pipeline`
@@ -18,34 +20,32 @@ boilerplate of opening files and choosing an execution mode.
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+// Import the adapter for your format from its own crate:
+use my_csv_adapter::{CsvSplitter, CsvDecoder};
 
 fn main() -> rypipe_core::Result<()> {
-    let pipeline = Pipeline::new(
-        CrystalXmlSplitter::with_row_tag(b"Row"),
-        CrystalXmlDecoder::with_row_tag(b"Row"),
-    )
-    .with_plan(
-        ExecutionPlan::new()
-            .rename("old_name", "new_name")
-            .drop("junk")
-            .type_as("amount", FieldType::Float64)
-            .dictionary("status")
-            .filter_eq("status", "active")
-            .schema_order(["id", "status", "amount"])
-            .with_auto_dict(true),
-    );
+    let pipeline = Pipeline::new(CsvSplitter::new(), CsvDecoder::new())
+        .with_plan(
+            ExecutionPlan::new()
+                .rename("old_name", "new_name")
+                .drop("junk")
+                .type_as("amount", FieldType::Float64)
+                .dictionary("status")
+                .filter_eq("status", "active")
+                .schema_order(["id", "status", "amount"])
+                .with_auto_dict(true),
+        );
 
     // Single-file parse.
-    let batch = pipeline.read_path("data.xml", false, false)?;
+    let batch = pipeline.read_path("data.csv", false, false)?;
     println!("rows={} cols={}", batch.num_rows(), batch.num_columns());
 
     // Parallel parse.
-    let batches = pipeline.read_path_par("data.xml", 8, false, false)?;
+    let batches = pipeline.read_path_par("data.csv", 8, false, false)?;
 
     // Bounded-memory streaming.
     let batches = pipeline.read_path_stream(
-        "huge.xml",
+        "huge.csv",
         rypipe_core::MemoryBudget::new(500_000_000),
         false,
     )?;
@@ -54,28 +54,19 @@ fn main() -> rypipe_core::Result<()> {
 }
 ```
 
-`rypipe-xml` also provides a shortcut constructor:
-
-```rust
-use rypipe_xml::xml_pipeline;
-
-let pipeline = xml_pipeline("Row");
-let batch = pipeline.read_path("data.xml", false, false)?;
-```
-
-## A minimal XML example (low level)
+## A minimal example (low level)
 
 If you prefer to control every step, use `TableBuilder` directly:
 
 ```rust
 use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
-use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+use my_csv_adapter::{CsvSplitter, CsvDecoder}; // separate adapter crate
 
 fn main() -> rypipe_core::Result<()> {
-    let input = InputBuffer::open("data.xml".as_ref(), false, false)?;
+    let input = InputBuffer::open("data.csv".as_ref(), false, false)?;
     let mut builder = TableBuilder::with_plan(1024, ExecutionPlan::new());
 
-    let decoder = CrystalXmlDecoder::with_row_tag(b"Row");
+    let decoder = CsvDecoder::new();
     decoder.validate(input.as_slice())?;
     decoder.parse_chunk(input.as_slice(), &mut builder)?;
 
@@ -132,18 +123,18 @@ sink.put_field("flag", Value::Bool(true));
 sink.put_field("missing", Value::Null);
 ```
 
-For XML everything is a string, but JSON or CSV adapters can emit native typed
-values and skip string parsing.
+For stringly formats everything is a string, but JSON or CSV adapters can emit
+native typed values and skip string parsing.
 
 ## Parallel parse (low level)
 
 ```rust
 use rypipe_core::{parallel::ParallelExecutor, ExecutionPlan};
-use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+use my_csv_adapter::{CsvSplitter, CsvDecoder}; // separate adapter crate
 
-let bytes = std::fs::read("data.xml")?;
-let splitter = CrystalXmlSplitter::with_row_tag(b"Row");
-let decoder = CrystalXmlDecoder::with_row_tag(b"Row");
+let bytes = std::fs::read("data.csv")?;
+let splitter = CsvSplitter::new();
+let decoder = CsvDecoder::new();
 let plan = ExecutionPlan::new();
 
 let batches = ParallelExecutor::parse(&bytes, &splitter, decoder, plan, 8)?;
@@ -160,13 +151,13 @@ use rypipe_core::{
     bounded::{BoundedExecutor, MemoryBudget},
     ExecutionPlan,
 };
-use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+use my_csv_adapter::{CsvSplitter, CsvDecoder}; // separate adapter crate
 use std::path::Path;
 
-let splitter = CrystalXmlSplitter::with_row_tag(b"Row");
-let decoder = CrystalXmlDecoder::with_row_tag(b"Row");
+let splitter = CsvSplitter::new();
+let decoder = CsvDecoder::new();
 let batches = BoundedExecutor::new(MemoryBudget::new(500_000_000))
-    .run(Path::new("huge.xml"), &splitter, decoder, ExecutionPlan::new(), false)?;
+    .run(Path::new("huge.csv"), &splitter, decoder, ExecutionPlan::new(), false)?;
 ```
 
 ## Apply a post-reduce Compare filter
@@ -184,23 +175,18 @@ let filtered = apply_compare_filter(batch, &predicate)?;
 
 ## Export helpers
 
-`rypipe-python` provides:
+`rypipe-python` provides Rust helper functions for adapter crates:
 
 ```rust
-use rypipe_python::export::record_batches_to_pyarrow_table;
+use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
 
 // Inside a PyO3 function:
+let plan = execution_plan_from_kwargs(...)?;
 let table = record_batches_to_pyarrow_table(py, &batches)?;
 ```
 
 For a pure-Rust program you do not need this; `arrow::record_batch::RecordBatch`
 is already sufficient.
-
-## See also
-
-- [Writing a format adapter](./writing-adapters.md): implement `Splitter` and `RecordParser`.
-- [Architecture](./architecture.md): how the pieces fit together.
-- [Python API](./python-api.md): the Python bindings over the same engine.
 
 ## Writing a custom sink
 
@@ -224,3 +210,9 @@ impl ColumnarSink for RowCounter {
     }
 }
 ```
+
+## See also
+
+- [Writing a format adapter](./writing-adapters.md): implement `Splitter` and `RecordParser` in a separate package.
+- [Architecture](./architecture.md): how the pieces fit together.
+- [Python API](./python-api.md): the Python bindings over the same engine.

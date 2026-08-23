@@ -5,12 +5,15 @@ Apache Arrow record batches. It separates **format-specific** parsing from
 **format-agnostic** execution, so the same engine can parse XML, JSON, CSV,
 HTML, or any other row-oriented format once you provide a small adapter.
 
+`rypipe` itself does **not** ship parsers for any format. Adapters live in
+separate packages. Install the engine plus the adapters you need.
+
 ## What rypipe is
 
-- A Rust workspace with three crates:
+- A Rust workspace with two crates:
   - [`rypipe-core`](./architecture.md#rypipe-core): the generic engine.
-  - [`rypipe-xml`](./architecture.md#rypipe-xml): Crystal Reports XML adapter.
-  - [`rypipe-python`](./architecture.md#rypipe-python): PyO3 bindings.
+  - [`rypipe-python`](./architecture.md#rypipe-python): PyO3 bindings and helper
+    functions for adapter packages.
 - Zero-copy friendly: decoders emit borrowed strings; the engine copies only
   when necessary.
 - GIL-free parsing: all heavy work runs outside Python's GIL.
@@ -21,23 +24,23 @@ HTML, or any other row-oriented format once you provide a small adapter.
 - Not a full query engine. It handles projection, renaming, dropping, casting,
   filtering, and dictionary encoding, not joins, aggregations, or SQL.
 - Not a one-size-fits-all parser. Each format needs a `RecordParser` + `Splitter`
-  adapter.
+  adapter from a separate package.
 
 ## Quick start
 
 ### From Python
 
 ```bash
-export PYO3_PYTHON=/path/to/python3.12
-maturin develop --release
+pip install rypipe my-adapter
 ```
 
 ```python
 import rypipe
+import my_adapter
 
+# Format is inferred from the extension; mode defaults to parallel.
 table = rypipe.read(
-    "data.xml",
-    row_tag="Row",
+    "data.myfmt",
     fields={"amount": "float64"},
     filter={"field": "status", "op": "==", "value": "active"},
 )
@@ -48,21 +51,21 @@ print(table.num_rows, table.num_columns)
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-use rypipe_xml::xml_pipeline;
+use my_adapter::{MySplitter, MyDecoder}; // separate adapter crate
 
-let batch = xml_pipeline("Row")
+let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
     .with_plan(
         ExecutionPlan::new()
             .type_as("amount", FieldType::Float64)
             .filter_eq("status", "active"),
     )
-    .read_path("data.xml", false, false)?;
+    .read_path("data.myfmt", false, false)?;
 ```
 
 ## Guides
 
 - [Architecture](./architecture.md): how the pieces fit together.
-- [Python API](./python-api.md): `_rypipe` functions and options.
+- [Python API](./python-api.md): the `rypipe` package and `_rypipe` helpers.
 - [Rust API](./rust-api.md): using `rypipe-core` and writing custom adapters.
 - [Writing a format adapter](./writing-adapters.md): adding CSV, JSON, etc.
 - [Performance](./performance.md): benchmarks and tuning knobs.
@@ -77,8 +80,7 @@ rypipe/
 ├── LICENSE
 ├── crates/
 │   ├── rypipe-core/           # generic engine
-│   ├── rypipe-xml/            # Crystal XML adapter
-│   └── rypipe-python/         # PyO3 bindings
+│   └── rypipe-python/         # PyO3 bindings and helper functions
 └── docs/
     └── (this directory)
 ```

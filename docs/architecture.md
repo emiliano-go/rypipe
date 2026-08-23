@@ -62,32 +62,32 @@ format-specific logic.
 | `merge` | `TableBuilder::extend`, `engines_to_record_batches`. |
 | `arrow_export` | Build Arrow arrays, apply `Compare` filters via `arrow::compute`. |
 | `decoder` | `Splitter`, `RecordParser`, `ColumnarSink` traits. |
+| `pipeline` | `Pipeline` helper that wires a `Splitter` + `RecordParser` to the engine. |
 | `parallel` | `ParallelExecutor` over a `Splitter` + `RecordParser`. |
 | `bounded` | `BoundedExecutor` + `MemoryBudget` for streaming large files. |
 | `input` | `InputBuffer` abstraction: mmap or owned `Vec<u8>`. |
 | `error` | Unified `Error` / `Result` type. |
 
-### `rypipe-xml`
+### Adapter packages (not shipped with rypipe)
 
-The first format adapter. It provides:
+Format-specific adapters are separate packages. An adapter provides:
 
-- `CrystalXmlDecoder` (implements `RecordParser`): emits field events for
-  Crystal Reports XML rows (`<Row>`, `<Field>`, `<Text>`, `<Section>`,
-  attributes, `FormattedValue` / `Value` / `TextValue`).
-- `CrystalXmlSplitter` (implements `Splitter`): finds safe row boundaries
-  while skipping comments and CDATA.
+- A `RecordParser` implementation that turns bytes into field events.
+- A `Splitter` implementation that finds safe chunk boundaries.
+
+For example, an XML adapter lives in its own package and provides an
+`XmlSplitter` and an `XmlDecoder` that implement these traits.
 
 ### `rypipe-python`
 
-PyO3 bindings that expose the same entry points crxml historically used:
+PyO3 bindings and Python package glue for the engine. It provides:
 
-- `read_to_columnar`
-- `read_to_columnar_multi`
-- `read_to_columnar_par`
-- `read_to_columnar_bounded`
-
-It also exposes reusable Rust helpers (`export::record_batches_to_pyarrow_table`)
-so downstream crates like crxml can reuse the Python/Arrow boundary.
+- The `rypipe` Python package: an adapter registry (`register_adapter`,
+  `read`, `read_par`, `read_stream`) and the shared exception types.
+- The `_rypipe` native extension: typed exceptions (`ParseError`, `XmlError`,
+  `PlanError`, `MergeError`) and Rust helper functions
+  (`execution_plan_from_kwargs`, `record_batches_to_pyarrow_table`) that adapter
+  crates use to build their own Python APIs.
 
 ## The decoder API
 
@@ -271,7 +271,7 @@ to `XmlError`, `PlanError`, and `MergeError` Python exceptions.
 
 ## Why this shape?
 
-The original crxml engine was fast but tightly coupled to Crystal Reports XML.
+The original crxml engine was fast but tightly coupled to one XML dialect.
 Extracting it into rypipe keeps those performance characteristics (arena
 string storage, SIMD UTF-8 validation, zero-copy event parsing, GIL release,
 parallel chunking, memory bounding) while making them available to other
@@ -282,4 +282,4 @@ the fields?"; the engine handles the rest.
 
 - [Rust API](./rust-api.md): `Pipeline`, `ExecutionPlan`, and custom adapters.
 - [Writing a format adapter](./writing-adapters.md): step-by-step adapter guide.
-- [Python API](./python-api.md): `rypipe.read` and `_rypipe.read`.
+- [Python API](./python-api.md): `rypipe.read` and the adapter registry.
