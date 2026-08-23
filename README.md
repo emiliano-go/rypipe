@@ -25,8 +25,11 @@
   <a href="https://github.com/emiliano-go/rypipe/actions/workflows/test.yml">
     <img src="https://img.shields.io/github/actions/workflow/status/emiliano-go/rypipe/test.yml?branch=master&style=for-the-badge&logo=github&label=Tests" alt="Tests">
   </a>
-  <a href="https://github.com/emiliano-go/rypipe/tree/master/docs">
-    <img src="https://img.shields.io/badge/Docs-docs%2F-8A2BE2?style=for-the-badge&logo=readthedocs" alt="Docs">
+  <a href="https://rypipe.emiliano-go.com/">
+    <img src="https://img.shields.io/badge/Docs-rypipe.emiliano--go.com-8A2BE2?style=for-the-badge&logo=readthedocs" alt="Docs">
+  </a>
+  <a href="https://pypi.org/project/rypipe/">
+    <img src="https://img.shields.io/badge/PyPI-rypipe-006DAD?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI">
   </a>
 </p>
 
