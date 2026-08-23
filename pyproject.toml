@@ -17,7 +17,7 @@ dependencies = ["pyarrow>=15"]
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]
 polars = ["polars>=0.20"]
-all = ["rypipe[pyarrow,pandas,polars]"]
+all = ["rypipe[pandas,polars]"]
 dev = [
     "pytest>=7",
     "maturin>=1.4,<2.0",

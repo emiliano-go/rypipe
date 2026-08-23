@@ -6,9 +6,16 @@ on:
   pull_request:
     branches: [main, master]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
   CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  # Optional-dependency tests must run, not skip, on CI.
+  RYPIPE_REQUIRE_OPTIONAL_DEPS: 1
 
 jobs:
   rust:
@@ -22,6 +29,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --check
@@ -46,6 +56,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
       - name: Run throughput benchmark
         run: cargo run --release -p rypipe-core --example bench_throughput
 
@@ -55,8 +68,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # The extension is abi3-py310, so one build covers every 3.10+
+        # interpreter. Linux runs the full version sweep; macOS and Windows
+        # cover the supported edges.
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: macos-latest
+            python-version: "3.10"
+          - os: macos-latest
+            python-version: "3.14"
+          - os: windows-latest
+            python-version: "3.10"
+          - os: windows-latest
+            python-version: "3.14"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -68,6 +101,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.python-version }}
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -77,12 +115,15 @@ jobs:
         run: echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
 
       - name: Install Python build tools
-        run: pip install maturin pytest pyarrow
+        run: pip install maturin pytest pyarrow pandas polars
 
       - name: Build Python extension
         run: maturin build --release --manifest-path crates/rypipe-python/Cargo.toml
 
       - name: Install wheel and run Python tests
+        # Run from the repo root without the root on sys.path, so the tests
+        # exercise the installed wheel rather than the source tree (which has
+        # no built extension module in it).
         run: |
           pip install target/wheels/*.whl
           pytest crates/rypipe-python/tests/

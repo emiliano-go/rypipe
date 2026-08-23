@@ -8,7 +8,7 @@
 
 <p align="center">
   Parse row-oriented byte streams into Apache Arrow record batches with parallel
-  scheduling, memory-bounded execution, query pushdown, and a crxml-style
+  scheduling, memory-bounded execution, query pushdown, and a chainable
   pipeline API. Format adapters live in separate packages.
 </p>
 
@@ -47,6 +47,10 @@ implementing two small traits: `Splitter` and `RecordParser`.
 other format. Those live in separate adapter packages. Install the engine plus
 the adapters you need.
 
+> **Note:** the engine model is taken from
+> [emiliano-go/crxml](https://github.com/emiliano-go/crxml), abstracted away
+> from any single format.
+
 ## Features
 
 - **Zero-copy friendly**: decoders emit borrowed strings; the engine copies only
@@ -73,6 +77,20 @@ the adapters you need.
 pip install rypipe my-adapter
 ```
 
+Wheels are built against CPython's stable ABI (`abi3`, 3.10+), so one wheel per
+platform covers every supported interpreter, including versions released after
+a given rypipe release. Prebuilt wheels ship for manylinux (glibc 2.17+),
+musllinux, macOS (x86_64 and arm64), and Windows x64; anything else builds from
+the sdist and needs a Rust toolchain.
+
+Optional DataFrame sinks pull their own dependencies:
+
+```bash
+pip install "rypipe[pandas]"   # to_pandas / to_dataframe
+pip install "rypipe[polars]"   # to_polars
+pip install "rypipe[all]"      # both
+```
+
 ```python
 import rypipe
 import my_adapter
@@ -90,7 +108,7 @@ print(table.num_rows, table.num_columns)
 table = rypipe.read_stream("huge.myfmt", memory="256MiB")
 ```
 
-### Pipeline API (crxml-style)
+### Pipeline API
 
 Adapters that expose a `rypipe.Adapter` subclass give you a chainable pipeline
 with automatic fusion of rename, drop, cast, and filter stages into the Rust
@@ -142,9 +160,19 @@ maturin develop --release
 ## Testing
 
 ```bash
-cargo test --workspace
+# Rust
+cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Python (against an installed build)
+pip install -e ".[dev]"
+pytest crates/rypipe-python/tests/
 ```
+
+Tests covering optional dependencies (`pandas`, `polars`) skip when those
+packages are absent. Set `RYPIPE_REQUIRE_OPTIONAL_DEPS=1` to turn a missing
+optional dependency into a hard failure instead — CI sets it so that optional
+coverage cannot silently disappear from a green run.
 
 ## Benchmark
 
@@ -167,11 +195,11 @@ Full docs and integration guides are in the `docs/` directory:
 
 ## Why rypipe
 
-`rypipe` was extracted from a high-performance XML parser. The goal was to keep
-that parser's speed while making the same engine available for JSON, CSV, HTML,
-and other formats through a small adapter interface. Format-specific code now
-lives in separate packages; the rypipe repository contains only the engine and
-its Python bindings.
+The engine started out welded to a single format. Abstracting it keeps that
+speed while making the same execution model available for JSON, CSV, HTML, and
+other formats through a small adapter interface. Format-specific code now lives
+in separate packages; this repository contains only the engine and its Python
+bindings.
 
 ## License
 

@@ -19,6 +19,7 @@ from rypipe import (
     to_arrow,
     to_csv,
     to_dataframe,
+    to_polars,
 )
 
 
@@ -203,12 +204,42 @@ def test_pipeline_chain_fusion(sample_table):
     assert rows[0]["full_name"] == "Alice"
 
 
-def test_pipeline_to_dataframe(sample_table):
-    pytest.importorskip("pandas")
+def test_pipeline_to_dataframe(sample_table, pandas):
     src = _MockSource(sample_table)
     pipe = src | RenameFields({"name": "full_name"})
     df = to_dataframe(pipe)
     assert list(df.columns) == ["full_name", "age", "city"]
+
+
+def test_source_to_polars(sample_table, polars):
+    src = _MockSource(sample_table)
+    df = src.to_polars()
+    assert df.columns == ["name", "age", "city"]
+    assert df.height == 3
+    assert df["name"].to_list() == ["Alice", "Bob", "Carol"]
+
+
+def test_pipeline_to_polars(sample_table, polars):
+    src = _MockSource(sample_table)
+    pipe = src | RenameFields({"name": "full_name"}) | DropFields(["city"])
+    df = to_polars(pipe)
+    assert df.columns == ["full_name", "age"]
+    assert df.height == 3
+
+
+def test_pipeline_to_polars_after_filter(sample_table, polars):
+    src = _MockSource(sample_table)
+    pipe = src | FilterRows(field="city", op="==", value="LA")
+    df = to_polars(pipe)
+    assert df.height == 1
+    assert df["name"].to_list() == ["Bob"]
+
+
+def test_to_polars_from_records(polars):
+    # Plain iterables take the pa.Table.from_pylist path in to_arrow.
+    df = to_polars([{"a": 1, "b": "x"}, {"a": 2, "b": "y"}])
+    assert df.columns == ["a", "b"]
+    assert df["a"].to_list() == [1, 2]
 
 
 def test_pipeline_to_arrow(sample_table):

@@ -406,8 +406,8 @@ to `XmlError`, `PlanError`, and `MergeError` Python exceptions.
 
 ## Why this shape?
 
-The original crxml engine was fast but tightly coupled to one XML dialect.
-Extracting it into rypipe keeps those performance characteristics (arena
+The engine was originally fast but tightly coupled to one XML dialect.
+Abstracting it into rypipe keeps those performance characteristics (arena
 string storage, SIMD UTF-8 validation, zero-copy event parsing, GIL release,
 parallel chunking, memory bounding) while making them available to other
 formats. A new adapter only needs to answer "where are the rows?" and "what are
@@ -941,9 +941,9 @@ A `Source` exposes:
 
 ### Pipeline stages
 
-`rypipe` ships the same fusable stages crxml used. Stages that rename, drop,
-cast, or filter constants are pushed into the Rust parse loop when the source
-supports plan kwargs.
+`rypipe` ships fusable pipeline stages. Stages that rename, drop, cast, or
+filter constants are pushed into the Rust parse loop when the source supports
+plan kwargs.
 
 ```python
 from rypipe import RenameFields, DropFields, CastTypes, FilterRows
