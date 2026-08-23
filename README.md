@@ -91,9 +91,9 @@ table = rypipe.read_stream("huge.myfmt", memory="256MiB")
 
 ### Pipeline API (crxml-style)
 
-Adapters that expose a `rypipe.Source` subclass give you a chainable pipeline
+Adapters that expose a `rypipe.Adapter` subclass give you a chainable pipeline
 with automatic fusion of rename, drop, cast, and filter stages into the Rust
-parse loop::
+parse loop. Subclasses only implement ``read(path, **kwargs)``::
 
 ```python
 from rypipe import RenameFields, DropFields, CastTypes, FilterRows
