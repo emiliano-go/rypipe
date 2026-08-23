@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rypipe-core", "crates/rypipe-xml", "crates/rypipe-python"]
+members = ["crates/rypipe-core", "crates/rypipe-python"]
 resolver = "2"
 
 [workspace.package]
@@ -11,7 +11,6 @@ authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
 
 [workspace.dependencies]
 rypipe-core = { path = "crates/rypipe-core" }
-rypipe-xml = { path = "crates/rypipe-xml" }
 rypipe-python = { path = "crates/rypipe-python" }
 
 [profile.release]
