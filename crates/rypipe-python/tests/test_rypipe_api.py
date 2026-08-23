@@ -1,111 +1,68 @@
 """Tests for the public ``rypipe`` Python API.
 
-These tests exercise the developer-friendly wrapper over the low-level
-``_rypipe`` extension.
+``rypipe`` is a pure engine package with no built-in format adapters. These
+tests exercise the adapter registry, plan construction, and helper utilities
+using a mock adapter.
 """
 
-import tempfile
-from pathlib import Path
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
 
 import rypipe
 
-XML_SIMPLE = b"""<Rows>
-<Row A="1" B="hello"/>
-<Row A="2" B="world"/>
-<Row A="3" B="hello"/>
-</Rows>"""
 
+def test_register_adapter_and_read():
+    mock_table = pa.table({"a": [1, 2, 3]})
+    adapter = MagicMock()
+    adapter.read = MagicMock(return_value=mock_table)
 
-def _tmp_xml(data: bytes) -> Path:
-    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
-        f.write(data)
-        return Path(f.name)
+    rypipe.register_adapter("mock", adapter, extensions=[".mock"])
+    result = rypipe.read("data.mock", option="value")
 
-
-def test_read_auto_format():
-    path = _tmp_xml(XML_SIMPLE)
-    table = rypipe.read(str(path))
-    assert isinstance(table, pa.Table)
-    assert table.num_rows == 3
-    assert set(table.column_names) == {"A", "B"}
+    adapter.read.assert_called_once_with("data.mock", option="value")
+    assert result is mock_table
 
 
 def test_read_explicit_format():
-    path = _tmp_xml(XML_SIMPLE)
-    table = rypipe.read(str(path), format="xml")
-    assert table.num_rows == 3
+    mock_table = pa.table({"b": ["x", "y"]})
+    adapter = MagicMock()
+    adapter.read = MagicMock(return_value=mock_table)
+
+    rypipe.register_adapter("mock2", adapter)
+    result = rypipe.read("data.unknown", format="mock2")
+
+    adapter.read.assert_called_once_with("data.unknown")
+    assert result is mock_table
 
 
-def test_read_rename_and_drop():
-    path = _tmp_xml(XML_SIMPLE)
-    table = rypipe.read(
-        str(path),
-        rename={"A": "Alpha"},
-        drop=["B"],
-    )
-    assert table.column_names == ["Alpha"]
+def test_read_explicit_adapter_object():
+    mock_table = pa.table({"c": [True]})
+    adapter = MagicMock()
+    adapter.read = MagicMock(return_value=mock_table)
 
+    result = rypipe.read("data.anything", adapter=adapter, foo=42)
 
-def test_read_field_types_and_filter():
-    xml = b"""<Rows>
-    <Row A="10" B="5"/>
-    <Row A="20" B="25"/>
-    <Row A="30" B="30"/>
-    </Rows>"""
-    path = _tmp_xml(xml)
-    table = rypipe.read(
-        str(path),
-        fields={"A": "int64", "B": "int64"},
-        filter={"op": ">", "field_a": "A", "field_b": "B"},
-    )
-    assert table.num_rows == 1
-    assert table.column("A").to_pylist() == [10]
-
-
-def test_read_per_row_filter():
-    path = _tmp_xml(XML_SIMPLE)
-    table = rypipe.read(
-        str(path),
-        filter={"op": "==", "field": "B", "value": "hello"},
-    )
-    assert table.num_rows == 2
-
-
-def test_read_par():
-    path = _tmp_xml(XML_SIMPLE)
-    table = rypipe.read_par(str(path), chunks=2)
-    assert table.num_rows == 3
-
-
-def test_read_stream():
-    path = _tmp_xml(XML_SIMPLE)
-    table = rypipe.read_stream(str(path), memory="1MiB")
-    assert table.num_rows == 3
-
-
-def test_read_custom_row_tag():
-    xml = b"""<Items><Item X="a"/><Item X="b"/></Items>"""
-    path = _tmp_xml(xml)
-    table = rypipe.read(str(path), format="xml", row_tag="Item")
-    assert table.num_rows == 2
-    assert table.column("X").to_pylist() == ["a", "b"]
-
-
-def test_read_unsupported_format():
-    path = _tmp_xml(XML_SIMPLE)
-    with pytest.raises(rypipe.PlanError):
-        rypipe.read(str(path), format="not-a-format")
+    adapter.read.assert_called_once_with("data.anything", foo=42)
+    assert result is mock_table
 
 
 def test_read_unknown_extension():
-    with tempfile.NamedTemporaryFile(suffix=".unknown", delete=False) as f:
-        f.write(XML_SIMPLE)
-        path = Path(f.name)
     with pytest.raises(rypipe.RypipeError):
-        rypipe.read(str(path))
+        rypipe.read("data.unknown")
+
+
+def test_read_unregistered_format():
+    with pytest.raises(rypipe.RypipeError):
+        rypipe.read("data.xml", format="xml")
+
+
+def test_exceptions():
+    assert issubclass(rypipe.ParseError, Exception)
+    assert issubclass(rypipe.XmlError, rypipe.ParseError)
+    assert issubclass(rypipe.PlanError, Exception)
+    assert issubclass(rypipe.MergeError, Exception)
 
 
 def test_parse_memory():
