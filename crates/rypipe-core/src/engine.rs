@@ -105,9 +105,7 @@ impl TableBuilder {
             return;
         }
         let order = &self.plan.schema_order;
-        let rank = |name: &String| {
-            order.iter().position(|n| n == name).unwrap_or(usize::MAX)
-        };
+        let rank = |name: &String| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
         self.column_order.sort_by_key(rank);
     }
 
@@ -325,7 +323,12 @@ mod tests {
         merged.extend(e1).unwrap();
         assert_eq!(merged.num_rows(), 1);
         for (name, col) in &merged.columns {
-            assert_eq!(col.len(), merged.num_rows(), "column {} length mismatch", name);
+            assert_eq!(
+                col.len(),
+                merged.num_rows(),
+                "column {} length mismatch",
+                name
+            );
         }
     }
 
@@ -362,7 +365,10 @@ mod tests {
         assert_eq!(engine.num_rows(), 1);
         assert!(engine.columns.contains_key("Y"));
         assert!(!engine.columns.contains_key("X"));
-        assert_eq!(engine.columns.get("Y").unwrap().as_str_vec(), vec![Some("hello".into())]);
+        assert_eq!(
+            engine.columns.get("Y").unwrap().as_str_vec(),
+            vec![Some("hello".into())]
+        );
     }
 
     #[test]
@@ -461,9 +467,18 @@ mod tests {
         merged.extend(e1).unwrap();
         merged.extend(e2).unwrap();
 
-        assert_eq!(merged.columns["A"].as_str_vec(), vec![Some("1".into()), Some("3".into()), None]);
-        assert_eq!(merged.columns["B"].as_str_vec(), vec![Some("2".into()), None, Some("4".into())]);
-        assert_eq!(merged.columns["C"].as_str_vec(), vec![None, None, Some("5".into())]);
+        assert_eq!(
+            merged.columns["A"].as_str_vec(),
+            vec![Some("1".into()), Some("3".into()), None]
+        );
+        assert_eq!(
+            merged.columns["B"].as_str_vec(),
+            vec![Some("2".into()), None, Some("4".into())]
+        );
+        assert_eq!(
+            merged.columns["C"].as_str_vec(),
+            vec![None, None, Some("5".into())]
+        );
     }
 
     #[test]
@@ -486,7 +501,10 @@ mod tests {
         plan.dictionary_columns.insert("P".to_string());
         let e2 = parse_bytes(b"P=x\n", plan);
         let result = e1.extend(e2);
-        assert!(result.is_err(), "String/Dictionary mismatch must return Err");
+        assert!(
+            result.is_err(),
+            "String/Dictionary mismatch must return Err"
+        );
     }
 
     #[test]
@@ -501,11 +519,15 @@ mod tests {
         });
         let mut engine = parse_bytes(b"A=3 B=1\nA=2 B=2\nA=5 B=4\n", plan);
         let batch = engine.finish().unwrap();
-        let filtered = apply_compare_filter(batch, &FilterPredicate::Compare {
-            field_a: "A".to_string(),
-            op: CompareOp::Gt,
-            field_b: "B".to_string(),
-        }).unwrap();
+        let filtered = apply_compare_filter(
+            batch,
+            &FilterPredicate::Compare {
+                field_a: "A".to_string(),
+                op: CompareOp::Gt,
+                field_b: "B".to_string(),
+            },
+        )
+        .unwrap();
         assert_eq!(filtered.num_rows(), 2);
         let a = filtered.column_by_name("A").unwrap().as_string::<i32>();
         assert_eq!(a.value(0), "3");

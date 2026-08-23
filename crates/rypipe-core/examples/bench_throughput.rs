@@ -69,8 +69,8 @@ impl RecordParser for TsvParser {
     }
 
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
         for line in text.lines() {
             if line.is_empty() {
                 continue;
@@ -94,7 +94,10 @@ fn run(name: &str, f: impl FnOnce() -> Result<usize>) {
     let rows = f().expect("benchmark failed");
     let elapsed = start.elapsed();
     let secs = elapsed.as_secs_f64();
-    println!("{name:24} {secs:8.3}s  {rows:10} rows  {:8.0} rows/s", rows as f64 / secs);
+    println!(
+        "{name:24} {secs:8.3}s  {rows:10} rows  {:8.0} rows/s",
+        rows as f64 / secs
+    );
 }
 
 fn main() -> Result<()> {
@@ -130,7 +133,8 @@ fn main() -> Result<()> {
     });
 
     run("bounded (64 MiB)", || {
-        let batches = pipeline.read_path_stream(&path, MemoryBudget::new(64 * 1024 * 1024), false)?;
+        let batches =
+            pipeline.read_path_stream(&path, MemoryBudget::new(64 * 1024 * 1024), false)?;
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())
     });
 

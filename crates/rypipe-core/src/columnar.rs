@@ -286,9 +286,11 @@ impl ColumnBuilder {
                     .collect();
                 a_codes.extend(b_codes.iter().map(|c| c.map(|idx| remap[idx as usize])));
             }
-            _ => return Err(crate::Error::Merge(
-                "extend_owned: column type mismatch across chunks".to_string(),
-            )),
+            _ => {
+                return Err(crate::Error::Merge(
+                    "extend_owned: column type mismatch across chunks".to_string(),
+                ))
+            }
         }
         Ok(())
     }
@@ -353,8 +355,11 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => Arc::new(v.iter().copied().collect::<BooleanArray>()),
             ColumnBuilder::Dictionary { codes, dict, .. } => {
                 let keys: Int32Array = codes.iter().copied().collect();
-                let values: ArrayRef =
-                    Arc::new(dict.iter().map(|s| Some(s.as_str())).collect::<StringArray>());
+                let values: ArrayRef = Arc::new(
+                    dict.iter()
+                        .map(|s| Some(s.as_str()))
+                        .collect::<StringArray>(),
+                );
                 let arr = DictionaryArray::<Int32Type>::try_new(keys, values)?;
                 Arc::new(arr)
             }
@@ -418,7 +423,10 @@ mod tests {
         b.push_value(Value::Int64(42));
         b.push_value(Value::Bool(true));
         b.push_value(Value::Null);
-        assert_eq!(b.as_str_vec(), vec![Some("42".into()), Some("true".into()), None]);
+        assert_eq!(
+            b.as_str_vec(),
+            vec![Some("42".into()), Some("true".into()), None]
+        );
     }
 
     #[test]
@@ -427,7 +435,7 @@ mod tests {
         let mut i = ColumnBuilder::with_capacity(4, &FieldType::Int64);
         i.push_value(Value::Int64(7));
         i.push_value(Value::Float64(3.9)); // truncated to 3
-        i.push_value(Value::Bool(true));   // unsupported -> null
+        i.push_value(Value::Bool(true)); // unsupported -> null
         i.push_value(Value::Null);
         if let ColumnBuilder::Int64(v) = &i {
             assert_eq!(v, &vec![Some(7), Some(3), None, None]);
