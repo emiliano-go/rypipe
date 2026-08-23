@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <strong>Format-agnostic columnar engine for XML, JSON, CSV, HTML, and more.</strong>
+  <strong>Format-agnostic columnar ingestion engine for XML, JSON, CSV, HTML, and more.</strong>
 </p>
 
 <p align="center">
   Parse row-oriented byte streams into Apache Arrow record batches with a Rust
   core, Python bindings, parallel scheduling, memory-bounded execution, and
-  query pushdown.
+  query pushdown. Format adapters are separate packages.
 </p>
 
 <p align="center">
@@ -37,14 +37,15 @@
 
 ## What is rypipe
 
-`rypipe` separates format-specific parsing (splitting, row extraction) from
-format-agnostic execution (typed column builders, filtering, projection,
-dictionary encoding, parallel scheduling, memory-bounded execution, and Arrow
-export). Add a new format by implementing two small traits: `Splitter` and
-`RecordParser`.
+`rypipe` is a pure ingestion-to-Arrow engine. It separates format-specific
+parsing (splitting, row extraction) from format-agnostic execution (typed
+column builders, filtering, projection, dictionary encoding, parallel
+scheduling, memory-bounded execution, and Arrow export). Add a new format by
+implementing two small traits: `Splitter` and `RecordParser`.
 
-The first adapter, `rypipe-xml`, implements the Crystal Reports XML grammar
-extracted from [crxml](https://github.com/emiliano-go/crxml).
+`rypipe` itself does **not** ship parsers for XML, JSON, CSV, HTML, or any
+other format. Those live in separate adapter packages. Install the engine plus
+the adapters you need.
 
 ## Features
 
@@ -63,46 +64,45 @@ extracted from [crxml](https://github.com/emiliano-go/crxml).
 | Crate | Purpose |
 |-------|---------|
 | `rypipe-core` | Pure Rust engine: `Value`, `ExecutionPlan`, `TableBuilder`, `ColumnarSink`, `RecordParser`, `Splitter`, `Pipeline`, parallel/bounded drivers, Arrow export |
-| `rypipe-xml` | Crystal Reports XML adapter: `CrystalXmlDecoder`, `CrystalXmlSplitter`, `xml_pipeline` |
-| `rypipe-python` | PyO3 bindings; exposes the `rypipe` package and the reusable `_rypipe` extension |
+| `rypipe-python` | PyO3 bindings and helper functions for adapter packages; exposes the `rypipe` package |
 
 ## Python quick start
 
 ```bash
-export PYO3_PYTHON=/path/to/python3.12
-maturin develop --release
+pip install rypipe my-adapter
 ```
 
 ```python
 import rypipe
+import my_adapter
 
-# Format is inferred from the extension; mode defaults to parallel.
 table = rypipe.read(
-    "report.xml",
-    row_tag="Row",
+    "data.myfmt",
     fields={"amount": "float64", "qty": "int64"},
     filter={"field": "status", "op": "==", "value": "active"},
 )
 print(table.num_rows, table.num_columns)
+```
 
+```python
 # Bounded-memory streaming.
-table = rypipe.read_stream("huge.xml", memory="256MiB", row_tag="Row")
+table = rypipe.read_stream("huge.myfmt", memory="256MiB")
 ```
 
 ## Rust quick start
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-use rypipe_xml::xml_pipeline;
+use my_adapter::{MySplitter, MyDecoder}; // separate adapter crate
 
-let batch = xml_pipeline("Row")
+let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
     .with_plan(
         ExecutionPlan::new()
             .type_as("amount", FieldType::Float64)
             .type_as("qty", FieldType::Int64)
             .filter_eq("status", "active"),
     )
-    .read_path("report.xml", false, false)?;
+    .read_path("data.myfmt", false, false)?;
 ```
 
 ## Building
@@ -122,6 +122,14 @@ cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+## Benchmark
+
+Run the engine throughput benchmark:
+
+```bash
+cargo run --release -p rypipe-core --example bench_throughput
+```
+
 ## Documentation
 
 Full docs and integration guides are in the `docs/` directory:
@@ -135,10 +143,11 @@ Full docs and integration guides are in the `docs/` directory:
 
 ## Why rypipe
 
-`rypipe` was extracted from [crxml](https://github.com/emiliano-go/crxml), a
-high-performance Crystal Reports XML parser. The goal was to keep crxml's
-speed while making the same engine available for JSON, CSV, HTML, and other
-formats through a small adapter interface.
+`rypipe` was extracted from a high-performance XML parser. The goal was to keep
+that parser's speed while making the same engine available for JSON, CSV, HTML,
+and other formats through a small adapter interface. Format-specific code now
+lives in separate packages; the rypipe repository contains only the engine and
+its Python bindings.
 
 ## License
 
