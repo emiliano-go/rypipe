@@ -411,7 +411,7 @@ fn read(
 
     match format.as_str() {
         "xml" => read_xml(
-            py, p, format_options, &mode, num_chunks, memory, plan, use_mmap, prefault,
+            py, p, format_options, mode, num_chunks, memory, plan, use_mmap, prefault,
         ),
         other => Err(PlanError::new_err(format!(
             "unsupported format {other:?}; supported formats: 'xml'"
@@ -419,6 +419,7 @@ fn read(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_xml(
     py: Python<'_>,
     path: &Path,
