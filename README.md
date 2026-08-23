@@ -131,7 +131,6 @@ Full docs and integration guides are in the `docs/` directory:
 - [Python API](docs/python-api.md)
 - [Rust API](docs/rust-api.md)
 - [Writing a format adapter](docs/writing-adapters.md)
-- [Integrating with crxml](docs/integrating-crxml.md)
 - [Performance](docs/performance.md)
 
 ## Why rypipe

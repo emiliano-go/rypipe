@@ -153,10 +153,9 @@ Supported comparison ops: `>`, `<`, `>=`, `<=`, `==`, `!=`.
 
 ## Reusing the Rust helpers from another extension
 
-If you are building a separate PyO3 crate (like crxml), you can depend on
-`rypipe-python` for the plan/Export helpers, or just call `rypipe-core` and
-`rypipe-xml` directly and copy the small export logic. See
-[Integrating with crxml](./integrating-crxml.md).
+If you are building a separate PyO3 crate, you can depend on `rypipe-python`
+for the plan and export helpers, or just call `rypipe-core` and `rypipe-xml`
+directly and copy the small export logic.
 
 ## See also
 

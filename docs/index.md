@@ -65,7 +65,6 @@ let batch = xml_pipeline("Row")
 - [Python API](./python-api.md): `_rypipe` functions and options.
 - [Rust API](./rust-api.md): using `rypipe-core` and writing custom adapters.
 - [Writing a format adapter](./writing-adapters.md): adding CSV, JSON, etc.
-- [Integrating with crxml](./integrating-crxml.md): how crxml consumes rypipe.
 - [Performance](./performance.md): benchmarks and tuning knobs.
 
 ## Repository layout
