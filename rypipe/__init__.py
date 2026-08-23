@@ -2,7 +2,7 @@
 
 `rypipe` itself does not ship parsers for XML, CSV, JSON, HTML, or any other
 format. It provides the ingestion-to-Arrow engine, an adapter registry, and a
-pipeline API that lets adapters expose crxml-style sources::
+pipeline API that lets adapters expose chainable sources::
 
     import rypipe
     from rypipe import RenameFields, DropFields, FilterRows, CastTypes

@@ -171,7 +171,7 @@ pytest crates/rypipe-python/tests/
 
 Tests covering optional dependencies (`pandas`, `polars`) skip when those
 packages are absent. Set `RYPIPE_REQUIRE_OPTIONAL_DEPS=1` to turn a missing
-optional dependency into a hard failure instead — CI sets it so that optional
+optional dependency into a hard failure instead. CI sets it so that optional
 coverage cannot silently disappear from a green run.
 
 ## Benchmark
