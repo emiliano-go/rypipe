@@ -19,13 +19,13 @@ Crystal Reports exports tabular data inside XML elements such as:
 Crystal Reports XML file
     |
     v
-CrystalXmlSplitter  -- finds row-tag boundaries
+CrystalXmlSplitter : finds row-tag boundaries
     |
     v
-CrystalXmlDecoder   -- extracts fields from each row
+CrystalXmlDecoder : extracts fields from each row
     |
     v
-rypipe-core engine  -- typed builders, filters, projection, Arrow export
+rypipe-core engine : typed builders, filters, projection, Arrow export
     |
     v
 pyarrow.Table / pandas.DataFrame
