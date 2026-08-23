@@ -11,7 +11,6 @@
 
 ## Extending
 - [Writing Adapters](https://rypipe.emiliano-go.com/writing-adapters/): Add a new format by implementing `Splitter` and `RecordParser`
-- [Integrating crxml](https://rypipe.emiliano-go.com/integrating-crxml/): How crxml consumes `rypipe-core` and `rypipe-xml`
 
 ## Internals
 - [Architecture](https://rypipe.emiliano-go.com/architecture/): Splitting, row extraction, typed builders, and engine design
