@@ -26,20 +26,30 @@ jobs:
 
       - name: Check workspace
         run: cargo check --workspace
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
 
       - name: Test workspace
         run: cargo test --workspace
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
 
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
 
       - name: Install Python build tools
         run: pip install maturin pyarrow
 
       - name: Build Python extension
         run: maturin build --release --manifest-path crates/rypipe-python/Cargo.toml
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
 
       - name: Run Python smoke tests
         run: |
           pip install pytest target/wheels/*.whl
           pytest crates/rypipe-python/tests/
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
