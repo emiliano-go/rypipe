@@ -56,6 +56,7 @@ the adapters you need.
 - **Memory bounded**: stream files larger than RAM with a configurable budget.
 - **Typed columns**: cast strings to `int64`, `float64`, or `bool` during parse.
 - **Pushdown filters**: rename, drop, type, and filter rows while parsing.
+- **Pipeline API**: chainable rename/drop/cast/filter stages with automatic fusion.
 - **Dictionary encoding**: explicit or automatic low-cardinality encoding.
 - **Arrow native**: produces `RecordBatch` and exports via the C Data Interface.
 
