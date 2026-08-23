@@ -59,9 +59,9 @@ extracted from [crxml](https://github.com/emiliano-go/crxml).
 
 | Crate | Purpose |
 |-------|---------|
-| `rypipe-core` | Pure Rust engine: `Value`, `ExecutionPlan`, `TableBuilder`, `ColumnarSink`, `RecordParser`, `Splitter`, parallel/bounded drivers, Arrow export |
-| `rypipe-xml` | Crystal Reports XML adapter: `CrystalXmlDecoder`, `CrystalXmlSplitter` |
-| `rypipe-python` | PyO3 bindings exposing `read_to_columnar*` entry points and reusable export helpers |
+| `rypipe-core` | Pure Rust engine: `Value`, `ExecutionPlan`, `TableBuilder`, `ColumnarSink`, `RecordParser`, `Splitter`, `Pipeline`, parallel/bounded drivers, Arrow export |
+| `rypipe-xml` | Crystal Reports XML adapter: `CrystalXmlDecoder`, `CrystalXmlSplitter`, `xml_pipeline` |
+| `rypipe-python` | PyO3 bindings; exposes the `rypipe` package and the reusable `_rypipe` extension |
 
 ## Python quick start
 
@@ -71,27 +71,35 @@ maturin develop --release
 ```
 
 ```python
-import _rypipe as rp
+import rypipe
 
-table = rp.read_to_columnar_par(
+# Format is inferred from the extension; mode defaults to parallel.
+table = rypipe.read(
     "report.xml",
     row_tag="Row",
-    field_types={"amount": "float64", "qty": "int64"},
+    fields={"amount": "float64", "qty": "int64"},
     filter={"field": "status", "op": "==", "value": "active"},
 )
 print(table.num_rows, table.num_columns)
+
+# Bounded-memory streaming.
+table = rypipe.read_stream("huge.xml", memory="256MiB", row_tag="Row")
 ```
 
 ## Rust quick start
 
 ```rust
-use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
-use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
+use rypipe_xml::xml_pipeline;
 
-let input = InputBuffer::open("report.xml".as_ref(), false, false)?;
-let mut builder = TableBuilder::with_plan(1024, ExecutionPlan::new());
-CrystalXmlDecoder::with_row_tag(b"Row").parse_chunk(input.as_slice(), &mut builder)?;
-let batch = builder.finish()?;
+let batch = xml_pipeline("Row")
+    .with_plan(
+        ExecutionPlan::new()
+            .type_as("amount", FieldType::Float64)
+            .type_as("qty", FieldType::Int64)
+            .filter_eq("status", "active"),
+    )
+    .read_path("report.xml", false, false)?;
 ```
 
 ## Building
