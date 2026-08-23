@@ -1,7 +1,129 @@
 # rypipe Documentation
 > Full documentation for rypipe: format-agnostic columnar ingestion engine with Rust core and Python bindings
 > Source: https://rypipe.emiliano-go.com
-> Pages: 6
+> Pages: 8
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/advanced/
+========================================================================
+
+# Advanced rypipe deep-dive
+
+This guide is for adapter authors and power users who want to squeeze more throughput or lower memory out of rypipe pipelines. It assumes you already know the Python and Rust API basics.
+
+## How pushdown fusion works
+
+`rypipe` splits ingestion into two layers:
+
+1. **Adapter layer**: reads bytes, splits them into records, and emits `Value` rows.
+2. **Engine layer**: builds typed Arrow arrays, applies filters, and exports record batches.
+
+When you write a pipeline like this:
+
+```python
+source = MyAdapter("data.log")
+result = (
+    source
+    | RenameFields({"old_name": "new_name"})
+    | DropFields(["internal_id"])
+    | FilterRows(field="status", op="==", value="active")
+    | CastTypes({"amount": "float64"})
+).to_arrow()
+```
+
+the Python `Pipeline` rewrites the stage list into a single `ExecutionPlan`. The engine then applies rename, drop, constant-filter, and cast *while it parses each row*. Rows that fail the filter are never materialized; dropped columns are never allocated; and casts happen once inside Rust instead of twice in Python and Rust.
+
+Fusable stages are:
+
+- `RenameFields`
+- `DropFields`
+- `CastTypes`
+- `FilterRows` with a constant predicate (`field`, `op`, `value`)
+
+Non-fusable stages (for example a Python callable or a stateful window) still work, but they run over the Arrow table after the engine finishes. The pipeline automatically falls back to a row stream when it cannot short-circuit to a table.
+
+## Engine execution modes
+
+Adapters can expose up to three execution strategies. Choose the one that matches your workload:
+
+| Mode | Best for | Memory | Parallelism |
+|------|----------|--------|-------------|
+| `stream` | Huge files, unknown schema, row-at-a-time consumers | bounded by batch size | single-threaded parse |
+| `columnar` | Medium files that fit in RAM, table output | holds full table | single-threaded parse, vectorized builders |
+| `parallel` | Large files that fit in RAM, many cores | holds full table | chunked multi-threaded parse |
+
+`auto` should let the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows; otherwise stream. Adapters should document their own heuristic because format split boundaries affect chunk safety.
+
+## Memory budgets and chunking
+
+The engine respects a memory budget for bounded/streaming paths. Two knobs control it:
+
+- `memory`: maximum bytes the parser should hold in flight. A string like `"512MiB"` is parsed into bytes.
+- `chunks`: number of chunks for parallel mode. More chunks improve load balancing but increase rayon overhead.
+
+Rule of thumb for parallel mode:
+
+```
+chunks = 4 * physical_cores
+```
+
+Finer chunks even out variable record parse times. Beyond 4-8x core count, synchronization overhead usually wins. Measure with your data; text-heavy formats benefit from fewer chunks because per-chunk setup dominates.
+
+## Schema hints
+
+Providing a `schema` list avoids the discovery pass that some formats need to infer column names. It also stabilizes column order across chunks, which matters for parallel merges. Pass field types with `field_types` so the engine builds the correct Arrow array from the first row instead of inferring and recasting later.
+
+```python
+source = MyAdapter(
+    "data.log",
+    schema=["id", "ts", "amount"],
+    field_types={"id": "int64", "ts": "string", "amount": "float64"},
+    dictionary_columns=["status"],
+)
+```
+
+## Dictionary encoding
+
+Set `dictionary_columns` explicitly for low-cardinality string columns. This stores values as integer indices and can reduce memory 5-20x for status codes, country codes, or enums. `auto_dict=True` asks the engine to guess, but the heuristic has a small runtime cost; explicit is faster and predictable.
+
+## mmap vs buffered reads
+
+`use_mmap=True` (the default) maps the file into virtual memory. It is usually fastest for files that fit in RAM or when the OS can cache the file. For cold files larger than RAM, buffered reads may give smoother throughput because the parser avoids page-fault stalls. Benchmark both if your workload is I/O bound.
+
+## Designing a fast adapter
+
+A high-performance adapter does as little work as possible per record:
+
+1. **Split cheaply**: find record boundaries with byte scans; defer full decoding.
+2. **Borrow strings**: hand borrowed `&str` slices to the engine when the input is valid UTF-8. The engine copies only when it must cast or encode.
+3. **Emit sparse rows**: if a field is missing, skip it entirely instead of emitting `Value::Null` for every row.
+4. **Respect plan kwargs**: pass `field_mapping`, `drop_fields`, `filter`, and `field_types` into the Rust parser so fusion actually happens.
+5. **Avoid Python in the hot path**: build the Arrow table in Rust and export it once via the C Data Interface.
+
+## Profiling a pipeline
+
+Use the throughput benchmark in `crates/rypipe-core/examples/bench_throughput.rs` as a template. General workflow:
+
+1. Run a release build.
+2. Vary `chunks`, `memory`, and `batch_size` and plot throughput vs latency.
+3. Use `perf` or `cargo flamegraph` to see whether time is in splitting, decoding, Arrow builders, or the GIL boundary.
+4. If Python sinks dominate, sink directly to Arrow/Parquet instead of iterating rows.
+
+## Anti-patterns
+
+- Iterating a pipeline with `for row in pipeline` after fusing a table-shaped source. It works, but it reconstructs dicts from the Arrow table.
+- Chaining many non-fusable Python callables. Each one materializes a full batch list.
+- Calling `to_pandas()` and then `to_arrow()` repeatedly. Cache the table once and reuse it.
+- Ignoring `plan_overrides` in `_read_arrow`. If you ignore them, stages silently fall back to Python execution.
+
+## Summary checklist
+
+- [ ] Provide `schema` and `field_types` when known.
+- [ ] Use `dictionary_columns` for low-cardinality strings.
+- [ ] Prefer `columnar` for tables that fit in RAM, `parallel` for large cached files, and `stream` for huge or row-oriented consumers.
+- [ ] Tune `chunks = 4 * cores` and measure.
+- [ ] Implement `_read_arrow(plan_overrides=...)` to keep stages fused.
+- [ ] Export Arrow from Rust and sink directly to Parquet when possible.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/architecture/
@@ -296,6 +418,216 @@ the fields?"; the engine handles the rest.
 - [Rust API](./rust-api.md): `Pipeline`, `ExecutionPlan`, and custom adapters.
 - [Writing a format adapter](./writing-adapters.md): step-by-step adapter guide.
 - [Python API](./python-api.md): `rypipe.read` and the adapter registry.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/examples/
+========================================================================
+
+# rypipe examples
+
+This page shows common patterns in Python and Rust. All Python examples assume a registered adapter is installed (for example `pip install crxml` for XML). `rypipe` itself does not ship format parsers.
+
+## Python API examples
+
+### Read a file through a registered adapter
+
+```python
+import rypipe
+
+table = rypipe.read("data.xml", format="crxml", row_tag="Row")
+print(table.num_rows, table.num_columns)
+```
+
+### Chain a pipeline
+
+```python
+import rypipe
+from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+
+df = (
+    rypipe.read("data.xml", format="crxml", row_tag="Row")
+    | RenameFields({"old_name": "new_name"})
+    | DropFields(["internal_id"])
+    | FilterRows(field="status", op="==", value="active")
+    | CastTypes({"amount": "float64"})
+).to_dataframe()
+```
+
+### Build an adapter subclass
+
+```python
+import rypipe
+import pyarrow as pa
+
+class DummyAdapter(rypipe.Adapter):
+    def read(self, path, **kwargs):
+        # A real adapter would call a Rust parser here.
+        return pa.table({
+            "id": [1, 2, 3],
+            "name": ["alice", "bob", "carol"],
+        })
+
+# Register once per session
+rypipe.register_adapter("dummy", DummyAdapter, extensions=[".dummy"])
+
+table = rypipe.read("example.dummy")
+```
+
+### Work with a Source object directly
+
+```python
+from crxml import CrystalXMLSource
+
+source = CrystalXMLSource("report.xml", row_tag="Row")
+
+# Iterate rows without loading the whole table
+for row in source:
+    print(row["id"])
+
+# Or export to Arrow and reuse it
+arrow = source.to_arrow()
+df = source.to_dataframe()
+source.to_parquet("report.parquet")
+```
+
+### Memory-bounded stream
+
+```python
+import rypipe
+
+# Adapter decides how to honor the memory budget.
+stream = rypipe.read_stream("huge.xml", format="crxml", memory="256MiB")
+for batch in stream.to_batches(max_chunksize=4096):
+    process(batch.to_pylist())
+```
+
+### Parallel parse
+
+```python
+import rypipe
+
+table = rypipe.read_par("large.xml", format="crxml", chunks=16)
+```
+
+### Sink to Parquet
+
+```python
+import rypipe
+from rypipe import to_parquet
+
+pipeline = (
+    rypipe.read("data.xml", format="crxml", row_tag="Row")
+    | FilterRows(field="status", op="==", value="active")
+)
+to_parquet(pipeline, "active.parquet")
+```
+
+## Rust API examples
+
+All Rust examples use the `rypipe-core` crate.
+
+### Define a custom record parser
+
+```rust
+use rypipe_core::{RecordParser, Value, Error};
+
+#[derive(Clone, Default)]
+struct LogParser;
+
+impl RecordParser for LogParser {
+    fn parse_record(&self, bytes: &[u8]) -> Result<Vec<Value>, Error> {
+        // Split a line like "key=value,key2=value2" into fields.
+        let mut values = Vec::new();
+        for part in bytes.split(|b| *b == b',') {
+            let kv: Vec<_> = part.splitn(2, |b| *b == b'=').collect();
+            if kv.len() == 2 {
+                values.push(Value::String(std::str::from_utf8(kv[1])?.into()));
+            }
+        }
+        Ok(values)
+    }
+}
+```
+
+### Run a single-threaded columnar parse
+
+```rust
+use rypipe_core::{ExecutionPlan, TableBuilder};
+use std::path::Path;
+
+fn parse_file(path: &Path) -> arrow::record_batch::RecordBatch {
+    let plan = ExecutionPlan::default()
+        .with_field_types([("amount".into(), "float64".into())])
+        .with_drop_fields(["internal_id".into()]);
+
+    let bytes = std::fs::read(path).unwrap();
+    let parser = LogParser;
+    let records = split_records(&bytes); // adapter-specific splitting
+    let builder = TableBuilder::new(plan);
+    for record in records {
+        builder.push(&parser.parse_record(record).unwrap()).unwrap();
+    }
+    builder.finish().unwrap()
+}
+```
+
+### Parallel chunked parse
+
+```rust
+use rypipe_core::{Pipeline, ParallelConfig};
+use std::path::Path;
+
+fn parse_parallel(path: &Path, chunks: usize) -> arrow::record_batch::RecordBatch {
+    let config = ParallelConfig::default()
+        .chunks(chunks)
+        .memory_budget(512 * 1024 * 1024);
+
+    Pipeline::new(path, LogParser, config)
+        .run()
+        .unwrap()
+}
+```
+
+### Export a RecordBatch to PyArrow
+
+```rust
+use rypipe_python::{record_batch_to_pyarrow, py_err_from_rypipe};
+use pyo3::prelude::*;
+
+#[pyfunction]
+fn read_log(py: Python, path: &str) -> PyResult<PyObject> {
+    let batch = parse_file(path.into());
+    record_batch_to_pyarrow(py, &batch).map_err(py_err_from_rypipe)
+}
+```
+
+## Adapter package layout
+
+A minimal adapter package looks like this:
+
+```
+rypipe-foo/
+├── Cargo.toml          # depends on rypipe-core + rypipe-python
+├── pyproject.toml      # maturin build
+├── src/
+│   └── lib.rs          # Rust parser + PyO3 module
+└── rypipe_foo/
+    └── __init__.py     # Python adapter + rypipe.register_adapter
+```
+
+The Python side:
+
+```python
+import rypipe
+
+class FooAdapter(rypipe.Adapter):
+    def read(self, path, **kwargs):
+        return _rypipe_foo.read_foo(path, **kwargs)
+
+rypipe.register_adapter("foo", FooAdapter, extensions=[".foo"])
+```
+
+See [Writing adapters](writing-adapters.md) for the full trait reference.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/
