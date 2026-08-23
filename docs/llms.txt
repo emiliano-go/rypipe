@@ -12,6 +12,12 @@
 ## Extending
 - [Writing Adapters](https://rypipe.emiliano-go.com/writing-adapters/): Add a format by implementing `Splitter`/`RecordParser` or subclassing `rypipe.Adapter`
 
+## Examples
+- [Examples](https://rypipe.emiliano-go.com/examples/): Python and Rust API recipes for reading, pipelines, adapters, and sinks
+
+## Advanced
+- [Advanced](https://rypipe.emiliano-go.com/advanced/): Deep-dive on fusion, execution modes, memory budgets, and performance tuning
+
 ## Internals
 - [Architecture](https://rypipe.emiliano-go.com/architecture/): Splitting, row extraction, typed builders, and engine design
 - [Performance](https://rypipe.emiliano-go.com/performance/): Parallel scheduling, memory budgets, and optimization notes
