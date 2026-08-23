@@ -28,9 +28,12 @@ jobs:
           - target: x86_64
             platform: manylinux
             manylinux: "2014"
+          # Zig's bundled clang cross-compiles against old glibc, keeping the
+          # 2.17 floor without an emulated manylinux2014_aarch64 container.
           - target: aarch64
             platform: manylinux
             manylinux: "2014"
+            zig: true
           - target: x86_64
             platform: musllinux
             manylinux: musllinux_1_2
@@ -45,7 +48,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release --out dist
+          args: --release --out dist ${{ matrix.zig && '--zig' || '' }}
           sccache: "true"
 
       - name: Upload wheel
