@@ -17,7 +17,7 @@ default = []
 mmap = ["dep:memmap2"]
 
 [dependencies]
-arrow = { version = "=55.2.0", default-features = false }
+arrow = { version = "=59.2.0", default-features = false }
 rayon = "1"
 memchr = "2"
 simdutf8 = "0.1"

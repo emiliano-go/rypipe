@@ -9,7 +9,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 /// Export a single Arrow `RecordBatch` to a `pyarrow.RecordBatch`.
-pub fn record_batch_to_pyarrow(py: Python<'_>, batch: &RecordBatch) -> PyResult<PyObject> {
+pub fn record_batch_to_pyarrow<'py>(
+    py: Python<'py>,
+    batch: &RecordBatch,
+) -> PyResult<Bound<'py, PyAny>> {
     batch.to_pyarrow(py)
 }
 
@@ -19,14 +22,14 @@ pub fn record_batch_to_pyarrow(py: Python<'_>, batch: &RecordBatch) -> PyResult<
 /// * If all batch schemas match, concatenate without promotion.
 /// * If schemas differ (e.g. auto-dict promotion), use
 ///   `promote_options="default"`.
-pub fn record_batches_to_pyarrow_table(
-    py: Python<'_>,
+pub fn record_batches_to_pyarrow_table<'py>(
+    py: Python<'py>,
     batches: &[RecordBatch],
-) -> PyResult<PyObject> {
+) -> PyResult<Bound<'py, PyAny>> {
     let pa = PyModule::import(py, "pyarrow")?;
 
     if batches.is_empty() {
-        return Ok(pa.call_method1("table", (PyDict::new(py),))?.into());
+        return pa.call_method1("table", (PyDict::new(py),));
     }
 
     // Convert each batch into a one-batch pyarrow.Table. We keep them as
@@ -42,7 +45,7 @@ pub fn record_batches_to_pyarrow_table(
     }
 
     if batches.len() == 1 {
-        return Ok(tables.get_item(0)?.into());
+        return tables.get_item(0);
     }
 
     let schemas_match = batches
@@ -51,12 +54,10 @@ pub fn record_batches_to_pyarrow_table(
         .all(|b| b.schema() == batches[0].schema());
 
     if schemas_match {
-        Ok(pa.call_method1("concat_tables", (tables,))?.into())
+        Ok(pa.call_method1("concat_tables", (tables,))?)
     } else {
         let kwargs = PyDict::new(py);
         kwargs.set_item("promote_options", "default")?;
-        Ok(pa
-            .call_method("concat_tables", (tables,), Some(&kwargs))?
-            .into())
+        Ok(pa.call_method("concat_tables", (tables,), Some(&kwargs))?)
     }
 }
