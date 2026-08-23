@@ -1,5 +1,5 @@
 # rypipe Documentation
-> Full documentation for rypipe: format-agnostic columnar engine for XML, JSON, CSV, HTML, and more
+> Full documentation for rypipe: format-agnostic columnar ingestion engine with Rust core and Python bindings
 > Source: https://rypipe.emiliano-go.com
 > Pages: 6
 

@@ -42,7 +42,7 @@ def main() -> int:
 
     sections = [
         "# rypipe Documentation",
-        "> Full documentation for rypipe: format-agnostic columnar engine for XML, JSON, CSV, HTML, and more",
+        "> Full documentation for rypipe: format-agnostic columnar ingestion engine with Rust core and Python bindings",
         f"> Source: {SITE_URL}",
         f"> Pages: {len(md_files)}",
         "",
