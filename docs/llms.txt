@@ -14,6 +14,7 @@
 
 ## Examples
 - [Examples](https://rypipe.emiliano-go.com/examples/): Python and Rust API recipes for reading, pipelines, adapters, and sinks
+- [crxml adapter](https://rypipe.emiliano-go.com/crxml-adapter/): Real-world adapter example; 2.4 GB/s Crystal Reports XML parser built on rypipe-core
 
 ## Advanced
 - [Advanced](https://rypipe.emiliano-go.com/advanced/): Deep-dive on fusion, execution modes, memory budgets, and performance tuning
