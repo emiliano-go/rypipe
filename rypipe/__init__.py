@@ -1,16 +1,25 @@
 """rypipe: pure format-agnostic columnar engine for Python.
 
 `rypipe` itself does not ship parsers for XML, CSV, JSON, HTML, or any other
-format. It provides the ingestion-to-Arrow engine and a small adapter registry.
-Install a separate adapter package (e.g. `rypipe-xml`) and import it; the
-adapter registers itself with `rypipe` so the high-level `read` API works.
-
-Example::
+format. It provides the ingestion-to-Arrow engine, an adapter registry, and a
+pipeline API that lets adapters expose crxml-style sources::
 
     import rypipe
-    import rypipe_xml  # registers the "xml" adapter
+    from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+    import my_adapter
 
-    table = rypipe.read("report.xml", row_tag="Row")
+    source = my_adapter.MySource("data.myfmt")
+    df = (
+        source
+        | RenameFields({"old": "new"})
+        | DropFields(["temp"])
+        | FilterRows(field="status", op="==", value="active")
+        | CastTypes({"amount": float})
+    ).to_dataframe()
+
+Adapters register themselves so the high-level ``read`` API also works::
+
+    table = rypipe.read("data.myfmt", fields={"amount": "float64"})
 """
 
 from __future__ import annotations
@@ -22,11 +31,37 @@ from typing import Any, Iterable
 
 import _rypipe
 
+from .source import Source
+from .pipeline import Pipeline
+from .stages import RenameFields, CastTypes, FilterRows, DropFields
+from .sinks import (
+    collect,
+    to_arrow,
+    to_csv,
+    to_dataframe,
+    to_pandas,
+    to_parquet,
+    to_polars,
+)
+
 __all__ = [
+    "Source",
+    "Pipeline",
     "read",
     "read_par",
     "read_stream",
     "register_adapter",
+    "RenameFields",
+    "DropFields",
+    "CastTypes",
+    "FilterRows",
+    "collect",
+    "to_arrow",
+    "to_csv",
+    "to_dataframe",
+    "to_pandas",
+    "to_parquet",
+    "to_polars",
     "ParseError",
     "XmlError",
     "PlanError",
@@ -51,7 +86,9 @@ class RypipeError(RuntimeError):
     """Base exception for invalid rypipe API usage."""
 
 
-_FORMAT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?\s*$", re.I)
+_FORMAT_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?\s*$", re.I
+)
 
 
 def _parse_memory(value: int | str) -> int:
@@ -61,7 +98,9 @@ def _parse_memory(value: int | str) -> int:
 
     match = _FORMAT_RE.match(value)
     if not match:
-        raise RypipeError(f"invalid memory value {value!r}; use e.g. '128MiB' or 64000000")
+        raise RypipeError(
+            f"invalid memory value {value!r}; use e.g. '128MiB' or 64000000"
+        )
 
     amount = float(match.group(1))
     unit = (match.group(2) or "B").upper()

@@ -12,10 +12,9 @@ authors = [
     {name = "Emiliano Gandini", email = "emiliano.gandini@protonmail.com"}
 ]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["pyarrow>=15"]
 
 [project.optional-dependencies]
-pyarrow = ["pyarrow>=15"]
 pandas = ["pandas>=1.5"]
 polars = ["polars>=0.20"]
 all = ["rypipe[pyarrow,pandas,polars]"]
