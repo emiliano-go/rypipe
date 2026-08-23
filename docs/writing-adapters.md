@@ -178,3 +178,9 @@ Recommended tests:
 - `Pipeline::read_path`, `read_path_par`, and `read_path_stream` agree.
 
 See `rypipe-xml/tests/integration_test.rs` for a concrete example.
+
+## See also
+
+- [Rust API](./rust-api.md): `Pipeline`, `ExecutionPlan`, and `Value`.
+- [Architecture](./architecture.md): how splitters, parsers, and the engine interact.
+- [Python API](./python-api.md): exposing adapters through `_rypipe.read`.

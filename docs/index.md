@@ -33,12 +33,12 @@ maturin develop --release
 ```
 
 ```python
-import _rypipe as rp
+import rypipe
 
-table = rp.read_to_columnar_par(
+table = rypipe.read(
     "data.xml",
     row_tag="Row",
-    field_types={"amount": "float64"},
+    fields={"amount": "float64"},
     filter={"field": "status", "op": "==", "value": "active"},
 )
 print(table.num_rows, table.num_columns)
@@ -47,13 +47,16 @@ print(table.num_rows, table.num_columns)
 ### From Rust
 
 ```rust
-use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
-use rypipe_xml::{CrystalXmlDecoder, CrystalXmlSplitter};
+use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
+use rypipe_xml::xml_pipeline;
 
-let input = InputBuffer::open("data.xml".as_ref(), false, false)?;
-let mut builder = TableBuilder::with_plan(1024, ExecutionPlan::new());
-CrystalXmlDecoder::with_row_tag(b"Row").parse_chunk(input.as_slice(), &mut builder)?;
-let batch = builder.finish()?;
+let batch = xml_pipeline("Row")
+    .with_plan(
+        ExecutionPlan::new()
+            .type_as("amount", FieldType::Float64)
+            .filter_eq("status", "active"),
+    )
+    .read_path("data.xml", false, false)?;
 ```
 
 ## Guides
