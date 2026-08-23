@@ -145,3 +145,9 @@ python -m pytest tests/
 The differential tests (`test_differential.py`) compare the columnar/multi/par/
 bounded paths against an independent ElementTree oracle, confirming that the
 rypipe-backed engine produces the same results as the original crxml engine.
+
+## See also
+
+- [Architecture](./architecture.md): how rypipe is structured.
+- [Rust API](./rust-api.md): using `Pipeline` or low-level executors.
+- [Python API](./python-api.md): the public Python bindings.

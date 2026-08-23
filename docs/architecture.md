@@ -277,3 +277,9 @@ string storage, SIMD UTF-8 validation, zero-copy event parsing, GIL release,
 parallel chunking, memory bounding) while making them available to other
 formats. A new adapter only needs to answer "where are the rows?" and "what are
 the fields?"; the engine handles the rest.
+
+## See also
+
+- [Rust API](./rust-api.md): `Pipeline`, `ExecutionPlan`, and custom adapters.
+- [Writing a format adapter](./writing-adapters.md): step-by-step adapter guide.
+- [Python API](./python-api.md): `rypipe.read` and `_rypipe.read`.

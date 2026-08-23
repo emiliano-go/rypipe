@@ -157,3 +157,9 @@ If you are building a separate PyO3 crate (like crxml), you can depend on
 `rypipe-python` for the plan/Export helpers, or just call `rypipe-core` and
 `rypipe-xml` directly and copy the small export logic. See
 [Integrating with crxml](./integrating-crxml.md).
+
+## See also
+
+- [Rust API](./rust-api.md): the Rust engine and `Pipeline` API.
+- [Writing a format adapter](./writing-adapters.md): adding formats to `_rypipe.read`.
+- [Architecture](./architecture.md): design overview.
