@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <strong>Format-agnostic columnar ingestion engine for XML, JSON, CSV, HTML, and more.</strong>
+  <strong>Format-agnostic columnar ingestion engine with Rust core and Python bindings.</strong>
 </p>
 
 <p align="center">
-  Parse row-oriented byte streams into Apache Arrow record batches with a Rust
-  core, Python bindings, parallel scheduling, memory-bounded execution, and
-  query pushdown. Format adapters are separate packages.
+  Parse row-oriented byte streams into Apache Arrow record batches with parallel
+  scheduling, memory-bounded execution, query pushdown, and a crxml-style
+  pipeline API. Format adapters live in separate packages.
 </p>
 
 <p align="center">
