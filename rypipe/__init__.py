@@ -1,7 +1,16 @@
-"""rypipe: format-agnostic columnar engine for Python.
+"""rypipe: pure format-agnostic columnar engine for Python.
 
-This package wraps the Rust extension `_rypipe` with a developer-friendly API
-for reading row-oriented files into Apache Arrow tables.
+`rypipe` itself does not ship parsers for XML, CSV, JSON, HTML, or any other
+format. It provides the ingestion-to-Arrow engine and a small adapter registry.
+Install a separate adapter package (e.g. `rypipe-xml`) and import it; the
+adapter registers itself with `rypipe` so the high-level `read` API works.
+
+Example::
+
+    import rypipe
+    import rypipe_xml  # registers the "xml" adapter
+
+    table = rypipe.read("report.xml", row_tag="Row")
 """
 
 from __future__ import annotations
@@ -17,19 +26,25 @@ __all__ = [
     "read",
     "read_par",
     "read_stream",
+    "register_adapter",
+    "ParseError",
     "XmlError",
     "PlanError",
     "MergeError",
+    "RypipeError",
 ]
 
+ParseError = _rypipe.ParseError
 XmlError = _rypipe.XmlError
 PlanError = _rypipe.PlanError
 MergeError = _rypipe.MergeError
 
-# Map common extensions to the format strings known by `_rypipe.read`.
-_EXTENSION_MAP: dict[str, str] = {
-    ".xml": "xml",
-}
+# Map common extensions to adapter names. Adapters must register themselves
+# under these names for auto-detection to work.
+_EXTENSION_MAP: dict[str, str] = {}
+
+# Registered adapters: name -> module/object with a compatible read() method.
+_ADAPTERS: dict[str, Any] = {}
 
 
 class RypipeError(RuntimeError):
@@ -65,127 +80,84 @@ def _parse_memory(value: int | str) -> int:
 
 
 def _guess_format(path: str | os.PathLike[str]) -> str:
-    """Guess the file format from its extension."""
+    """Guess the adapter name from the file extension."""
     suffix = Path(path).suffix.lower()
     fmt = _EXTENSION_MAP.get(suffix)
     if fmt is None:
         raise RypipeError(
-            f"cannot infer format from extension {suffix!r}; "
-            "pass `format=` explicitly"
+            f"cannot infer adapter from extension {suffix!r}; "
+            "pass `format=` or `adapter=` explicitly, or install an adapter package"
         )
     return fmt
 
 
-def _format_options(
-    fmt: str,
-    kwargs: dict[str, Any],
-) -> dict[str, Any]:
-    """Extract parser-specific options from the remaining kwargs."""
-    options: dict[str, Any] = {}
-    if fmt == "xml":
-        if "row_tag" in kwargs:
-            options["row_tag"] = kwargs.pop("row_tag")
-    return options
+def register_adapter(
+    name: str,
+    adapter: Any,
+    extensions: Iterable[str] | None = None,
+) -> None:
+    """Register a format adapter with rypipe.
 
+    Adapter packages should call this on import. `adapter` must expose a
+    `read(path, **kwargs)` method that returns a `pyarrow.Table`.
 
-def _build_plan_kwargs(
-    rename: dict[str, str] | None,
-    drop: Iterable[str] | None,
-    fields: dict[str, str] | None,
-    dictionary: Iterable[str] | None,
-    schema: Iterable[str] | None,
-    auto_dict: bool,
-) -> dict[str, Any]:
-    """Map public kwargs to the `_rypipe.read` plan kwargs."""
-    return {
-        "field_mapping": rename,
-        "drop_fields": list(drop) if drop is not None else None,
-        "field_types": fields,
-        "dictionary_columns": list(dictionary) if dictionary is not None else None,
-        "schema": list(schema) if schema is not None else None,
-        "auto_dict": auto_dict,
-    }
+    Parameters
+    ----------
+    name:
+        Adapter name used for `format=` lookups.
+    adapter:
+        Object (typically a module) with a `read(path, **kwargs)` method.
+    extensions:
+        Optional file extensions that map to this adapter (e.g. [".xml"]).
+    """
+    _ADAPTERS[name] = adapter
+    if extensions is not None:
+        for ext in extensions:
+            _EXTENSION_MAP[ext.lower()] = name
 
 
 def read(
     path: str | os.PathLike[str],
     *,
     format: str | None = None,
-    mode: str = "par",
-    chunks: int = 4,
-    memory: int | str = "64MiB",
-    rename: dict[str, str] | None = None,
-    drop: Iterable[str] | None = None,
-    fields: dict[str, str] | None = None,
-    dictionary: Iterable[str] | None = None,
-    schema: Iterable[str] | None = None,
-    filter: dict[str, Any] | None = None,
-    auto_dict: bool = False,
-    use_mmap: bool = False,
-    prefault: bool = False,
-    **format_options: Any,
+    adapter: Any | None = None,
+    **kwargs: Any,
 ) -> Any:
-    """Read a row-oriented file into a PyArrow table.
+    """Read a row-oriented file into a PyArrow table using a registered adapter.
 
     Parameters
     ----------
     path:
         Path to the input file.
     format:
-        Parser format (e.g. "xml"). When omitted, inferred from the file
-        extension.
-    mode:
-        Execution mode: "sync", "multi", "par" (default), or "stream".
-    chunks:
-        Number of chunks for "multi" and "par" modes.
-    memory:
-        Memory budget for "stream" mode; accepts bytes (int) or a human string
-        like "128MiB".
-    rename:
-        Map raw field names to output column names.
-    drop:
-        Field/column names to drop.
-    fields:
-        Type overrides per output column name; values are "string", "int64",
-        "float64", "bool", or "dictionary".
-    dictionary:
-        Column names to dictionary-encode explicitly.
-    schema:
-        Desired output column order.
-    filter:
-        Row filter dict. Per-row: ``{"field": "x", "op": "==", "value": "v"}``.
-        Compare: ``{"field_a": "a", "op": ">", "field_b": "b"}``.
-    auto_dict:
-        Automatically upgrade low-cardinality string columns to dictionary
-        encoding.
-    use_mmap:
-        Memory-map the input when possible.
-    prefault:
-        Pre-fault mapped pages.
-    **format_options:
-        Parser-specific options such as ``row_tag="Row"`` for XML.
+        Registered adapter name. When omitted, inferred from the file extension.
+    adapter:
+        An adapter object with a `read(path, **kwargs)` method. Overrides
+        `format` when provided.
+    **kwargs:
+        Options passed through to the adapter (e.g. `row_tag="Row"` for XML).
 
     Returns
     -------
     pyarrow.Table
         The parsed table.
-    """
-    fmt = format if format is not None else _guess_format(path)
-    options = _format_options(fmt, dict(format_options))
-    plan_kwargs = _build_plan_kwargs(rename, drop, fields, dictionary, schema, auto_dict)
 
-    return _rypipe.read(
-        str(path),
-        fmt,
-        format_options=options or None,
-        mode=mode,
-        num_chunks=chunks,
-        memory=_parse_memory(memory),
-        filter=filter,
-        use_mmap=use_mmap,
-        prefault=prefault,
-        **plan_kwargs,
-    )
+    Raises
+    ------
+    RypipeError
+        If no adapter is registered for the requested format.
+    """
+    if adapter is not None:
+        return adapter.read(str(path), **kwargs)
+
+    fmt = format if format is not None else _guess_format(path)
+    adapter = _ADAPTERS.get(fmt)
+    if adapter is None:
+        raise RypipeError(
+            f"no adapter registered for {fmt!r}; "
+            f"install the corresponding adapter package (e.g. pip install rypipe-{fmt})"
+        )
+    return adapter.read(str(path), **kwargs)
 
 
 def read_par(
@@ -194,8 +166,12 @@ def read_par(
     chunks: int = 4,
     **kwargs: Any,
 ) -> Any:
-    """Read a file in parallel; convenience wrapper around ``read(..., mode="par")``."""
-    return read(path, mode="par", chunks=chunks, **kwargs)
+    """Read a file in parallel using a registered adapter.
+
+    This is a convenience wrapper that passes `chunks` through to the adapter's
+    `read` method. The adapter decides how to interpret it.
+    """
+    return read(path, chunks=chunks, **kwargs)
 
 
 def read_stream(
@@ -204,5 +180,9 @@ def read_stream(
     memory: int | str = "64MiB",
     **kwargs: Any,
 ) -> Any:
-    """Read a file with bounded memory; wrapper around ``read(..., mode="stream")``."""
-    return read(path, mode="stream", memory=memory, **kwargs)
+    """Read a file with bounded memory using a registered adapter.
+
+    This is a convenience wrapper that passes `memory` through to the adapter's
+    `read` method. The adapter decides how to interpret it.
+    """
+    return read(path, memory=memory, **kwargs)
