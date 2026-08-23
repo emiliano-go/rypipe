@@ -13,14 +13,17 @@ pub mod error;
 pub mod input;
 pub mod merge;
 pub mod parallel;
+pub mod pipeline;
 pub mod plan;
 pub mod value;
 
 pub use arrow_export::apply_compare_filter;
+pub use bounded::MemoryBudget;
 pub use decoder::{ColumnarSink, RecordParser, Splitter};
 pub use engine::TableBuilder;
 pub use error::{Error, Result};
 pub use input::InputBuffer;
 pub use merge::engines_to_record_batches;
+pub use pipeline::Pipeline;
 pub use plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate};
 pub use value::Value;
