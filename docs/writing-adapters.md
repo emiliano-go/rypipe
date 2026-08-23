@@ -1,14 +1,20 @@
 # Writing a format adapter
 
 A `rypipe` adapter is just two small types: a `Splitter` and a `RecordParser`.
-Once you have those, the `Pipeline` API wires them into single-file,
-parallel, and bounded-memory execution with one line of code.
+Once you have those, the `Pipeline` API wires them into one-file, parallel, and
+bounded-memory execution with one line of code.
+
+Adapters are **separate packages**, not part of `rypipe`. This keeps `rypipe`
+pure: it is only the ingestion-to-Arrow engine. Your adapter crate depends on
+`rypipe-core` and, if you want Python bindings, on `rypipe-python` for the
+plan/export helpers.
 
 ## Adapter crate layout
 
 ```
-crates/rypipe-csv/
+rypipe-csv/
 ├── Cargo.toml
+├── pyproject.toml            # optional, for a Python package
 └── src/
     ├── lib.rs
     ├── splitter.rs
@@ -17,8 +23,11 @@ crates/rypipe-csv/
 
 ```toml
 [dependencies]
-rypipe-core = { path = "../rypipe-core" }
-memchr = "2"
+rypipe-core = "0.1"
+
+# Only if you build Python bindings for the adapter:
+rypipe-python = "0.1"
+pyo3 = { version = "0.24", features = ["extension-module"] }
 ```
 
 ## Implement `Splitter`
@@ -115,7 +124,6 @@ application, and all execution modes.
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-use rypipe_csv::{CsvDecoder, CsvSplitter};
 
 let pipeline = Pipeline::new(CsvSplitter, CsvDecoder {
     header: vec!["a".into(), "b".into()],
@@ -154,15 +162,38 @@ let batch = pipeline.with_plan(plan).read_path("data.csv", false, false)?;
 
 ## Adding Python bindings
 
-If you want a standalone `_rypipe_csv` extension, create a PyO3 crate that:
+Your adapter package can expose its own Python module. Reuse `rypipe-python`
+for the plan and export helpers:
 
-1. Builds an `ExecutionPlan` from kwargs (reuse `rypipe_python::plan_kwargs`).
-2. Calls `Pipeline::read_path_par` or `Pipeline::read_path_stream`.
-3. Exports via `rypipe_python::export::record_batches_to_pyarrow_table`.
+```rust
+use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
 
-Or add the new adapter behind a format selector in `rypipe-python` itself.
-The `_rypipe.read(path, format="...", format_options={...})` entry point is
-format-agnostic; adding a new Rust parser only requires a new match arm.
+#[pyfunction]
+fn read_csv(
+    py: Python<'_>,
+    path: String,
+    field_mapping: Option<HashMap<String, String>>,
+    // ... other kwargs
+) -> PyResult<PyObject> {
+    let plan = execution_plan_from_kwargs(...)?;
+    let batches = py.allow_threads(|| {
+        // ... use Pipeline::read_path_par or BoundedExecutor
+    })?;
+    record_batches_to_pyarrow_table(py, &batches)
+}
+```
+
+Then register the adapter with `rypipe` from Python:
+
+```python
+import rypipe
+
+class CsvAdapter:
+    def read(self, path, **kwargs):
+        return _rypipe_csv.read_csv(path, **kwargs)
+
+rypipe.register_adapter("csv", CsvAdapter(), extensions=[".csv"])
+```
 
 ## Testing an adapter
 
@@ -177,10 +208,11 @@ Recommended tests:
 - Partial trailing row discarded cleanly.
 - `Pipeline::read_path`, `read_path_par`, and `read_path_stream` agree.
 
-See `rypipe-xml/tests/integration_test.rs` for a concrete example.
+See the `rypipe-core` tests and the `bench_throughput` example for small
+self-contained splitter/parser samples.
 
 ## See also
 
 - [Rust API](./rust-api.md): `Pipeline`, `ExecutionPlan`, and `Value`.
 - [Architecture](./architecture.md): how splitters, parsers, and the engine interact.
-- [Python API](./python-api.md): exposing adapters through `_rypipe.read`.
+- [Python API](./python-api.md): registering adapters with the `rypipe` package.

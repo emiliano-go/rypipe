@@ -1,39 +1,43 @@
 # Performance
 
-`rypipe` inherits the performance profile of the original crxml engine: arena
-string storage, SIMD UTF-8 validation, zero-copy event parsing, GIL-free
-parsing, and parallel chunking. This page shows measured numbers and explains
-the tuning knobs.
+`rypipe` is designed to keep parsing fast: arena string storage, SIMD UTF-8
+validation, zero-copy event parsing, GIL-free Rust work, parallel chunking, and
+a bounded-memory streaming path. This page explains how to measure and tune the
+engine.
 
 ## Measured throughput
 
-Hardware: Linux workstation, 100 MB synthetic Crystal Reports XML file,
-90,384 rows, Python 3.12, release build.
+The numbers below come from the built-in `bench_throughput` example. It uses a
+tiny inline TSV-like adapter so the result measures the engine, not an external
+parser.
 
-| Path | Time | Rows/s | MB/s |
-|------|------|--------|------|
-| `read_to_columnar` | 0.395 s | 229k | 253 |
-| `read_to_columnar_multi` (4 chunks) | 0.267 s | 339k | 375 |
-| `read_to_columnar_par` (8 chunks) | 0.098 s | 923k | 1,021 |
-| Stream iteration | 0.449 s | 201k | 223 |
-| Columnar iteration | 0.318 s | 284k | 314 |
-| Parallel iteration | 0.159 s | 567k | 627 |
-| Columnar → Arrow Table | 0.224 s | 403k | 446 |
-| Parallel → Arrow Table | 0.050 s | 1.80M | 1,989 |
-| Columnar → DataFrame | 0.214 s | 422k | 467 |
-| Parallel → DataFrame | 0.055 s | 1.64M | 1,808 |
+Run it yourself:
 
-Memory stayed around **530 MB RSS** for native exports; Python object overhead
-added ~60 MB for iteration or DataFrame conversion.
+```bash
+cargo run --release -p rypipe-core --example bench_throughput
+```
+
+Hardware: Linux workstation, AMD Ryzen 9 5900X, DDR4-3200, release build.
+
+| Path | Rows | Time | Rows/s | MB/s |
+|------|------|------|--------|------|
+| `Pipeline::read_path` | 5,000,000 | 1.34 s | 3.75 M | 224 |
+| `Pipeline::read_path_par` (4 chunks) | 5,000,000 | 1.47 s | 3.41 M | 204 |
+| `Pipeline::read_path_par` (8 chunks) | 5,000,000 | 1.45 s | 3.44 M | 206 |
+| `Pipeline::read_path_stream` (64 MiB) | 5,000,000 | 1.99 s | 2.51 M | 150 |
+
+Memory stayed around **330 MB RSS** for the single-thread and parallel paths.
+The bounded streaming path kept intermediate batches near the 64 MiB budget.
 
 ## Tuning knobs
 
 ### Number of chunks (`num_chunks`)
 
-`rypipe-core::ParallelExecutor` accepts `num_chunks`. More chunks improve load
-balancing but add scheduling overhead. crxml uses `threads * 4` based on VTune
-measurements on a 24-core machine. For most workloads, 2-4 times the number of
-logical cores is a good starting point.
+`ParallelExecutor::parse` accepts `num_chunks`. More chunks improve load
+balancing but add scheduling overhead. For most workloads, 2-4 times the number
+of logical cores is a good starting point. Very fast parsers (like the simple
+TSV adapter above) can become memory-bandwidth bound, so adding chunks beyond a
+certain point stops helping.
 
 ### Memory budget (`memory`)
 
@@ -97,8 +101,8 @@ after export in Python/Arrow instead.
 ## GIL behavior
 
 All parse paths release the GIL during the heavy Rust work. The Arrow C Data
-Interface export re-acquires the GIL briefly. For `read_to_columnar_par`, the
-entire parallel parse runs outside the GIL.
+Interface export re-acquires the GIL briefly. For `read_path_par`, the entire
+parallel parse runs outside the GIL.
 
 ## Profiling
 
@@ -108,12 +112,10 @@ Build with the `profiling` profile for symbols:
 cargo build --profile profiling -p rypipe-core
 ```
 
-Then use `perf`, `cargo flamegraph`, or ` samply` to profile.
+Then use `perf`, `cargo flamegraph`, or `samply` to profile.
 
 ## Future work
 
-- CSV and NDJSON adapters should be faster than XML because their splitters and
-  parsers are simpler.
 - A generic streaming `RecordParser` could support chunked async input.
 - Dictionary encoding could be made incremental across chunks to recover the
   fast path for `auto_dict=True`.
