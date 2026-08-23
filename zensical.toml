@@ -70,9 +70,6 @@ name = "rypipe on PyPI"
 [[project.nav]]
 "Performance" = "performance.md"
 
-[[project.nav]]
-"Integrating crxml" = "integrating-crxml.md"
-
 [project.markdown_extensions]
 "seoslug.contrib.zensical" = {
   canonical_host = "rypipe.emiliano-go.com",
