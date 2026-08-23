@@ -6,50 +6,83 @@ on:
   pull_request:
     branches: [main, master]
 
+env:
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
+  CARGO_INCREMENTAL: 0
+
 jobs:
-  test:
+  rust:
+    name: Rust tests and lints
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Rust
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-features
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+      - name: Clippy workspace
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  benchmark:
+    name: Engine throughput benchmark
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up Python
+      - name: Run throughput benchmark
+        run: cargo run --release -p rypipe-core --example bench_throughput
+
+  python:
+    name: Python extension (${{ matrix.os }}, py${{ matrix.python-version }})
+    needs: rust
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
 
       - name: Export PYO3_PYTHON
         run: echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
 
-      - name: Check workspace
-        run: cargo check --workspace
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
-
-      - name: Test workspace
-        run: cargo test --workspace
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
-
-      - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
-
       - name: Install Python build tools
-        run: pip install maturin pyarrow
+        run: pip install maturin pytest pyarrow
 
       - name: Build Python extension
         run: maturin build --release --manifest-path crates/rypipe-python/Cargo.toml
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
 
-      - name: Run Python smoke tests
+      - name: Install wheel and run Python tests
         run: |
-          pip install pytest target/wheels/*.whl
+          pip install target/wheels/*.whl
           pytest crates/rypipe-python/tests/
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
