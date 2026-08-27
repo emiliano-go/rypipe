@@ -106,6 +106,10 @@ impl StrColumn {
         self.validity.len()
     }
 
+    fn bytes_used(&self) -> usize {
+        self.data.len() + self.offsets.len() * 4 + self.validity.len()
+    }
+
     fn get(&self, i: usize) -> Option<&str> {
         if !*self.validity.get(i)? {
             return None;
@@ -487,6 +491,20 @@ impl ColumnBuilder {
             ColumnBuilder::Date32(v) => v.len(),
             ColumnBuilder::Timestamp(_, v) => v.len(),
             ColumnBuilder::Dictionary { codes, .. } => codes.len(),
+        }
+    }
+
+    pub(crate) fn bytes_used(&self) -> usize {
+        match self {
+            ColumnBuilder::String(s) => s.bytes_used(),
+            ColumnBuilder::Int64(v) => v.len() * 8 + v.capacity() * 0,
+            ColumnBuilder::Float64(v) => v.len() * 8,
+            ColumnBuilder::Boolean(v) => v.len(),
+            ColumnBuilder::Date32(v) => v.len() * 4,
+            ColumnBuilder::Timestamp(_, v) => v.len() * 8,
+            ColumnBuilder::Dictionary { codes, dict, .. } => {
+                codes.len() * 4 + dict.len() * 16 + codes.capacity() * 0
+            }
         }
     }
 

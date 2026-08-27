@@ -106,14 +106,29 @@ impl BoundedExecutor {
             batch_engine.extend(chunk_engine)?;
             rows_in_batch += chunk_rows;
 
-            while rows_in_batch >= rows_per_batch {
-                let mut to_consume = batch_engine.split_off(rows_per_batch);
+            // Dynamic sizing: flush when either row count or actual bytes_used exceeds budget.
+            while rows_in_batch >= rows_per_batch
+                || batch_engine.bytes_used() >= self.budget.bytes()
+            {
+                if batch_engine.num_rows() == 0 {
+                    break;
+                }
+                let n = rows_per_batch.min(batch_engine.num_rows());
+                // If bytes_used is the trigger, estimate a smaller n to stay under budget
+                let n = if batch_engine.bytes_used() >= self.budget.bytes() && batch_engine.num_rows() > 1 {
+                    let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
+                        / batch_engine.bytes_used() as f64) as usize;
+                    est.clamp(1, n)
+                } else {
+                    n
+                };
+                let mut to_consume = batch_engine.split_off(n);
                 let mut batch = to_consume.finish()?;
                 if let Some(ref filter) = plan.filter {
                     batch = apply_compare_filter(batch, filter)?;
                 }
                 consumer.consume(batch)?;
-                rows_in_batch -= rows_per_batch;
+                rows_in_batch = rows_in_batch.saturating_sub(n);
             }
         }
 
@@ -242,8 +257,8 @@ impl BoundedExecutor {
             chunk_buf.resize(chunk_len, 0);
             file.seek(SeekFrom::Start(chunk.start as u64))?;
             file.read_exact(&mut chunk_buf)?;
-
-            let mut chunk_engine = TableBuilder::with_plan((chunk_len / 512).max(64), plan.clone());
+            let mut chunk_engine =
+                TableBuilder::with_plan((chunk.len() / 512).max(64), plan.clone());
             parser.validate(&chunk_buf)?;
             parser.parse_chunk(&chunk_buf, &mut chunk_engine)?;
 
@@ -251,14 +266,29 @@ impl BoundedExecutor {
             batch_engine.extend(chunk_engine)?;
             rows_in_batch += chunk_rows;
 
-            while rows_in_batch >= rows_per_batch {
-                let mut to_consume = batch_engine.split_off(rows_per_batch);
+            // Dynamic sizing: flush when either row count or actual bytes_used exceeds budget.
+            while rows_in_batch >= rows_per_batch
+                || batch_engine.bytes_used() >= self.budget.bytes()
+            {
+                if batch_engine.num_rows() == 0 {
+                    break;
+                }
+                let n = rows_per_batch.min(batch_engine.num_rows());
+                // If bytes_used is the trigger, estimate a smaller n to stay under budget
+                let n = if batch_engine.bytes_used() >= self.budget.bytes() && batch_engine.num_rows() > 1 {
+                    let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
+                        / batch_engine.bytes_used() as f64) as usize;
+                    est.clamp(1, n)
+                } else {
+                    n
+                };
+                let mut to_consume = batch_engine.split_off(n);
                 let mut batch = to_consume.finish()?;
                 if let Some(ref filter) = plan.filter {
                     batch = apply_compare_filter(batch, filter)?;
                 }
                 consumer.consume(batch)?;
-                rows_in_batch -= rows_per_batch;
+                rows_in_batch = rows_in_batch.saturating_sub(n);
             }
         }
 

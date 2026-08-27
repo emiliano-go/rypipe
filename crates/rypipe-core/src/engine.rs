@@ -77,6 +77,12 @@ impl TableBuilder {
         }
     }
 
+    pub(crate) fn bytes_used(&self) -> usize {
+        self.columns.iter().map(|c| c.bytes_used()).sum::<usize>()
+            + self.column_order.iter().map(|s| s.len()).sum::<usize>()
+            + self.row_dirty.len()
+    }
+
     /// Split off the first `n` rows into a new `TableBuilder`.
     ///
     /// Leaves `n` rows in `self`'s remainder as `self - n`. Used for
