@@ -47,9 +47,7 @@ implementing two small traits: `Splitter` and `RecordParser`.
 other format. Those live in separate adapter packages. Install the engine plus
 the adapters you need.
 
-> **Note:** the engine model is taken from
-> [emiliano-go/crxml](https://github.com/emiliano-go/crxml), abstracted away
-> from any single format.
+> **Note:** `crxml` was the original idea: a fast Crystal Reports XML parser that needed parallel, bounded-memory, and Arrow-native execution. The engine that made `crxml` fast (`Splitter` + `RecordParser` + `TableBuilder` + `ExecutionPlan`) was then separated and abstracted into `rypipe` so any format could reuse it. `crxml` now lives as a thin adapter (`crxml-core` + `CrystalXMLSource`) on top of `rypipe-core`. See `rypipe` `docs/crxml-adapter.md` for the `3 GB/s` evolution.
 
 ## Features
 

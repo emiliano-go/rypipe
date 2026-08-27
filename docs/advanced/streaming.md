@@ -1,20 +1,20 @@
 # Streaming with constant memory
 
-`rypipe` can stream arbitrarily large files with **constant memory** — even a 50 GB file on a 2 GB Raspberry Pi — by yielding `RecordBatch` objects one at a time and dropping each after the consumer returns.
+`rypipe` can stream arbitrarily large files with **constant memory**: even a 50 GB file on a 2 GB Raspberry Pi: by yielding `RecordBatch` objects one at a time and dropping each after the consumer returns.
 
 ## Bounded vs streaming
 
 | Mode | API | Peak memory | When to use |
 |---|---|---|---|
-| `bounded` (collecting) | `BoundedExecutor::run` / `Pipeline::read_path_stream` → `Vec<RecordBatch>` | `budget + sum(batches)` — still grows with file size if you collect | `source.to_arrow()` with `memory="256MB"` for a single table |
-| `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | `budget + one batch` — constant | `for batch in rypipe.iter_record_batches(..., memory="64KB"):` + `ParquetWriter` |
+| `bounded` (collecting) | `BoundedExecutor::run` / `Pipeline::read_path_stream` → `Vec<RecordBatch>` | `budget + sum(batches)`: still grows with file size if you collect | `source.to_arrow()` with `memory="256MB"` for a single table |
+| `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | `budget + one batch`: constant | `for batch in rypipe.iter_record_batches(..., memory="64KB"):` + `ParquetWriter` |
 
 The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs:19`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs:30`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine.rs:75`) to keep RSS at `budget + batch`.
 
 ## Memory guarantee
 
 * **Rust-only:** `budget + batch + export buffer`. With `batch_size=1` and `memory="64KB"` and small rows (~1 KB for `crxml` `Details`), peak is a few tens of KB plus the `mmap` mapping (dropped after `plan_chunks` `bounded.rs:52`). This is the **64 KB** target in the spec.
-* **Python:** `pyarrow.RecordBatch` + interpreter overhead make true 64 KB impossible, but `iter_record_batches` is still bounded — `benchmarks/bench_extended.py` `bounded 64MB` 494 MB/s vs `bounded 64KB` 607 MB/s on 1 GB, and `50 GB` extrapolates to `~84s` at `64KB` vs `18s` `par32` full-RAM.
+* **Python:** `pyarrow.RecordBatch` + interpreter overhead make true 64 KB impossible, but `iter_record_batches` is still bounded: `benchmarks/bench_extended.py` `bounded 64MB` 494 MB/s vs `bounded 64KB` 607 MB/s on 1 GB, and `50 GB` extrapolates to `~84s` at `64KB` vs `18s` `par32` full-RAM.
 
 ## Rust API
 
@@ -76,7 +76,7 @@ for batch in pipe.iter_record_batches(memory="256MB"):
 
 ## When streaming falls back
 
-`Pipeline.iter_record_batches` checks `plan_split` `rypipe/fusion.py:130`; if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented — it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` constant).
+`Pipeline.iter_record_batches` checks `plan_split` `rypipe/fusion.py:130`; if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented: it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` constant).
 
 ## Testing
 
