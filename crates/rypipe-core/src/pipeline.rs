@@ -68,6 +68,33 @@ where
         engine.finish()
     }
 
+    /// Parse an in-memory byte slice in parallel, returning one or more
+    /// `RecordBatch`es.
+    ///
+    /// Equivalent to [`Pipeline::read_path_par`] without file I/O: chunks are
+    /// sliced directly from `bytes`.
+    pub fn read_bytes_par(&self, bytes: &[u8], num_chunks: usize) -> Result<Vec<RecordBatch>> {
+        ParallelExecutor::parse(
+            bytes,
+            &self.splitter,
+            self.parser.clone(),
+            self.plan.clone(),
+            num_chunks,
+        )
+    }
+
+    /// Parse an in-memory byte slice in bounded-memory batches.
+    ///
+    /// Equivalent to [`Pipeline::read_path_stream`] without file I/O: chunk
+    /// ranges are computed over `bytes` and sliced directly.
+    pub fn read_bytes_stream(
+        &self,
+        bytes: &[u8],
+        budget: MemoryBudget,
+    ) -> Result<Vec<RecordBatch>> {
+        BoundedExecutor::new(budget).run_bytes(bytes, &self.splitter, self.parser.clone(), self.plan.clone())
+    }
+
     /// Parse a file into a single `RecordBatch`.
     ///
     /// `use_mmap` requests a memory-mapped input when the `"mmap"` feature is

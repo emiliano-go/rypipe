@@ -49,6 +49,13 @@ Supported types include:
 | `int64` / `int` | `FieldType::Int64` | Parses integer strings during parse. |
 | `float64` / `float` | `FieldType::Float64` | Parses float strings during parse. |
 | `bool` / `boolean` | `FieldType::Boolean` | Parses common bool representations. |
+| `dictionary` | `FieldType::Dictionary` | Dictionary encoding; equivalent to listing the column in `dictionary_columns`. |
+| `date32` | `FieldType::Date32` | ISO dates (`YYYY-MM-DD`) stored as days since the Unix epoch. |
+| `timestamp`, `timestamp[s]`, `timestamp[ms]`, `timestamp[us]`, `timestamp[ns]` | `FieldType::Timestamp(unit)` | ISO-8601 timestamps stored as integers in the given unit (default µs). |
+
+`field_types={"status": "dictionary"}` and `dictionary_columns=["status"]` are
+two spellings of the same storage decision; prefer `dictionary_columns` (or
+`auto_dict`) so encoding choices stay separate from value types.
 
 In Rust:
 
@@ -62,9 +69,15 @@ let plan = ExecutionPlan::new()
 
 ## Numeric compare filters
 
-Casting during parse is especially important for filters. When a column is stored as `Int64` or `Float64`, the engine can use Arrow compute kernels for `Compare` filters (`<`, `<=`, `>`, `>=`). These kernels are vectorized and avoid Python-level comparisons.
+Casting during parse is especially important for filters. When both sides of a
+column-to-column comparison (`Compare`) are stored as `Int64` or `Float64`, the
+engine compares them natively per-row during parsing with numeric promotion
+(Int64 vs Float64 widens to f64) : no Python-level comparisons and no
+post-assembly pass.
 
-If the column is left as a string, the engine must either skip the filter or fall back to Python. Declare the type explicitly to keep numeric comparisons in Rust.
+If the columns are left as strings, the comparison falls back to string
+ordering, which is rarely what you want for numbers. Declare the types
+explicitly to keep numeric comparisons native.
 
 ## Combining schema hints with fusion
 

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+
 class _ConstantPredicate:
     __slots__ = ("_field", "_op", "_value")
 
@@ -95,3 +98,117 @@ class FilterRows:
         if self._filter_spec is not None:
             return {"filter": self._filter_spec}
         return None
+
+
+# ---------------------------------------------------------------------------
+# Boolean combinators over fusable FilterRows
+# ---------------------------------------------------------------------------
+
+def _require_filter_spec(obj, label: str) -> dict:
+    """Extract a fusable spec or raise with a helpful message."""
+    if not isinstance(obj, FilterRows):
+        raise TypeError(f"{label} expects FilterRows instances, got {type(obj).__name__!r}")
+    if obj._filter_spec is None:
+        raise ValueError(
+            f"{label} only accepts fusable filters: FilterRows with field/op/value "
+            f"or field_a/op/field_b keyword form. Pass FilterRows(..., field=..., op=..., "
+            f"value=...) or field_a/field_b instead of a plain lambda/Callable."
+        )
+    return obj._filter_spec
+
+
+class FilterRowsAny:
+    """Keep rows that satisfy **any** of the given fusable filters (OR).
+
+    Each argument must be a :class:`FilterRows` built with the keyword form
+    (``field``/``field_a``) so it can be pushed into the Rust parse loop.
+
+    Example::
+
+        FilterRowsAny(
+            FilterRows(field="dept", op="==", value="sales"),
+            FilterRows(field="tenure", op="==", value="junior"),
+        )
+        # keeps rows where dept == 'sales' OR tenure == 'junior'
+    """
+
+    __slots__ = ("_filters", "_specs")
+
+    def __init__(self, *filters: FilterRows):
+        if len(filters) < 2:
+            raise ValueError("FilterRowsAny requires at least two filters")
+        self._filters = filters
+        self._specs = [_require_filter_spec(f, "FilterRowsAny") for f in filters]
+
+    def apply(self, record: dict) -> dict | None:
+        for f in self._filters:
+            if f._predicate(record):
+                return record
+        return None
+
+    def __call__(self, stream):
+        return (r for r in map(self.apply, stream) if r is not None)
+
+    def _plan_kwargs(self) -> dict | None:
+        return {"filter": {"or": self._specs}}
+
+
+class FilterRowsAll:
+    """Keep rows that satisfy **all** of the given fusable filters (AND).
+
+    Chaining plain ``FilterRows`` stages with ``|`` already implies AND; this
+    class makes an explicit conjunction useful when combining inside another
+    combinator or when the stage order matters.
+
+    Example::
+
+        FilterRowsAll(
+            FilterRows(field="status", op="==", value="active"),
+            FilterRows(field_a="price", op=">", field_b="cost"),
+        )
+    """
+
+    __slots__ = ("_filters", "_specs")
+
+    def __init__(self, *filters: FilterRows):
+        if len(filters) < 2:
+            raise ValueError("FilterRowsAll requires at least two filters")
+        self._filters = filters
+        self._specs = [_require_filter_spec(f, "FilterRowsAll") for f in filters]
+
+    def apply(self, record: dict) -> dict | None:
+        for f in self._filters:
+            if not f._predicate(record):
+                return None
+        return record
+
+    def __call__(self, stream):
+        return (r for r in map(self.apply, stream) if r is not None)
+
+    def _plan_kwargs(self) -> dict | None:
+        return {"filter": {"and": self._specs}}
+
+
+class FilterRowsNot:
+    """Negate a single fusable filter.
+
+    Example::
+
+        FilterRowsNot(FilterRows(field="status", op="==", value="deleted"))
+        # keeps rows where status != 'deleted'
+    """
+
+    __slots__ = ("_inner", "_spec")
+
+    def __init__(self, inner: FilterRows):
+        self._inner = inner
+        self._spec = _require_filter_spec(inner, "FilterRowsNot")
+
+    def apply(self, record: dict) -> dict | None:
+        return None if self._inner._predicate(record) else record
+
+    def __call__(self, stream):
+        return (r for r in map(self.apply, stream) if r is not None)
+
+    def _plan_kwargs(self) -> dict | None:
+        return {"filter": {"not": self._spec}}

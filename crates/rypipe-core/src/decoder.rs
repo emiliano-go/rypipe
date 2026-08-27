@@ -39,6 +39,21 @@ pub trait ColumnarSink {
         true
     }
 
+    /// Resolve a raw field name to its output column name, or `None` if dropped.
+    /// Default keeps the name as-is. Adapters that do expensive extraction can
+    /// call this once and then `put_field_resolved` to avoid a second
+    /// `resolve_field` inside `put_field`.
+    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        Some(name)
+    }
+
+    /// Push a field that has already been resolved via `resolve`.
+    /// Default delegates to `put_field` (which will resolve again). Overrides
+    /// should bypass the rename/drop lookup.
+    fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
+        self.put_field(resolved_name, value);
+    }
+
     /// Finalize the sink into an Arrow `RecordBatch`.
     fn finish(&mut self) -> Result<RecordBatch>;
 }

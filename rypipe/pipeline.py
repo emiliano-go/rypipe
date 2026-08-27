@@ -83,3 +83,27 @@ class Pipeline:
                 batch = []
         if batch:
             yield batch
+
+    def iter_arrow_batches(self, batch_size: Optional[int] = None):
+        """Yield ``pyarrow.RecordBatch`` objects from the fused pipeline.
+
+        Uses the Arrow batch chain when possible; falls back to materializing
+        rows into batches otherwise.
+        """
+        if batch_size is None:
+            batch_size = self._batch_size
+        import pyarrow as pa
+
+        table = self._to_arrow()
+        if table is not None:
+            yield from table.to_batches(max_chunksize=batch_size)
+            return
+
+        batch: list[dict] = []
+        for row in self:
+            batch.append(row)
+            if len(batch) >= batch_size:
+                yield from pa.Table.from_pylist(batch).to_batches()
+                batch = []
+        if batch:
+            yield from pa.Table.from_pylist(batch).to_batches()

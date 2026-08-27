@@ -2,6 +2,8 @@
 
 This page shows common patterns in Python and Rust. All Python examples assume a registered adapter is installed (for example `pip install crxml` for XML). `rypipe` itself does not ship format parsers.
 
+Legend: `(ADAPTER BOUND)` is code you write in your adapter crate (format specific). `(CORE)` is code in `rypipe` crates (reused). The split is the same as in [Architecture](./architecture/).
+
 ## Python API examples
 
 ### Read a file through a registered adapter
@@ -99,80 +101,108 @@ to_parquet(pipeline, "active.parquet")
 
 ## Rust API examples
 
-All Rust examples use the `rypipe-core` crate.
+All Rust examples use the `rypipe-core` crate. `(ADAPTER BOUND)` parts are the `Splitter` and `RecordParser` you implement; `(CORE)` parts are the engine.
 
-### Define a custom record parser
+### Define a custom Splitter and RecordParser  (ADAPTER BOUND)
 
 ```rust
-use rypipe_core::{RecordParser, Value, Error};
+use rypipe_core::{Splitter, RecordParser, ColumnarSink, Value, Result};
 
 #[derive(Clone, Default)]
-struct LogParser;
+pub struct LogSplitter; // (ADAPTER BOUND)
 
-impl RecordParser for LogParser {
-    fn parse_record(&self, bytes: &[u8]) -> Result<Vec<Value>, Error> {
-        // Split a line like "key=value,key2=value2" into fields.
-        let mut values = Vec::new();
-        for part in bytes.split(|b| *b == b',') {
-            let kv: Vec<_> = part.splitn(2, |b| *b == b'=').collect();
-            if kv.len() == 2 {
-                values.push(Value::String(std::str::from_utf8(kv[1])?.into()));
-            }
+impl Splitter for LogSplitter { // (ADAPTER BOUND)
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
+        if max_chunks <= 1 || bytes.is_empty() { return vec![0, bytes.len()]; }
+        let mut points = vec![0];
+        for (i, &b) in bytes.iter().enumerate().skip(1) {
+            if b == b'\n' && points.len() < max_chunks { points.push(i + 1); }
         }
-        Ok(values)
+        if *points.last().unwrap() != bytes.len() { points.push(bytes.len()); }
+        points
+    }
+    fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+        (sample.len() / sample.iter().filter(|&&b| b == b'\n').count().max(1)).max(1)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct LogParser; // (ADAPTER BOUND)
+
+impl RecordParser for LogParser { // (ADAPTER BOUND)
+    fn validate(&self, bytes: &[u8]) -> Result<()> { // (ADAPTER BOUND) check UTF-8
+        simdutf8::basic::from_utf8(bytes).map_err(rypipe_core::Error::Utf8)?;
+        Ok(())
+    }
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> { // (ADAPTER BOUND) emits (CORE) Value events
+        let text = std::str::from_utf8(bytes).unwrap();
+        for line in text.lines() {
+            if line.is_empty() { continue; }
+            sink.begin_row(); // (CORE) TableBuilder
+            for part in line.split(',') {
+                if let Some((k, v)) = part.split_once('=') {
+                    if let Some(r) = sink.resolve(k) { // (CORE) one hash
+                        sink.put_field_resolved(r, Value::Str(v)); // (CORE) single index lookup plus dirty
+                    }
+                }
+            }
+            sink.end_row(); // (CORE) null fill plus filter
+        }
+        Ok(())
     }
 }
 ```
 
-### Run a single-threaded columnar parse
+### Run single-threaded, parallel, and bounded  (CORE) drivers
 
 ```rust
-use rypipe_core::{ExecutionPlan, TableBuilder};
-use std::path::Path;
+use rypipe_core::{ExecutionPlan, FieldType, Pipeline, MemoryBudget}; // (CORE)
+use std::path::Path; // (CORE) InputBuffer uses Path
 
-fn parse_file(path: &Path) -> arrow::record_batch::RecordBatch {
-    let plan = ExecutionPlan::default()
-        .with_field_types([("amount".into(), "float64".into())])
-        .with_drop_fields(["internal_id".into()]);
+// (CORE) Pipeline wires (ADAPTER BOUND) splitter/parser to (CORE) engine
+let pipeline = Pipeline::new(LogSplitter, LogParser).with_plan( // (CORE) plus (ADAPTER BOUND) types
+    ExecutionPlan::new().type_as("amount", FieldType::Float64).drop("internal_id")
+);
 
-    let bytes = std::fs::read(path).unwrap();
-    let parser = LogParser;
-    let records = split_records(&bytes); // adapter-specific splitting
-    let builder = TableBuilder::new(plan);
-    for record in records {
-        builder.push(&parser.parse_record(record).unwrap()).unwrap();
-    }
-    builder.finish().unwrap()
-}
+// (CORE) Single thread, whole file
+let batch = pipeline.read_path(Path::new("data.log"), false, false)?; // (CORE) via InputBuffer
+
+// (CORE) Parallel (rayon), chunked, fast path when !auto_dict and schemas consistent
+let batches = pipeline.read_path_par(Path::new("data.log"), 8, false, false)?; // (CORE)
+
+// (CORE) Bounded memory (streaming), from file or from bytes
+let batches = pipeline.read_path_stream(Path::new("huge.log"), MemoryBudget::new(128 * 1024 * 1024), false)?; // (CORE)
+let batches = pipeline.read_bytes_stream(data_bytes, MemoryBudget::new(64 * 1024 * 1024))?; // (CORE) no file IO, slicing
 ```
 
-### Parallel chunked parse
+### Low level direct TableBuilder  (CORE)
 
 ```rust
-use rypipe_core::{Pipeline, ParallelConfig};
-use std::path::Path;
+use rypipe_core::{ExecutionPlan, TableBuilder, ColumnarSink, Value}; // (CORE)
+use std::path::Path; // (CORE)
 
-fn parse_parallel(path: &Path, chunks: usize) -> arrow::record_batch::RecordBatch {
-    let config = ParallelConfig::default()
-        .chunks(chunks)
-        .memory_budget(512 * 1024 * 1024);
-
-    Pipeline::new(path, LogParser, config)
-        .run()
-        .unwrap()
-}
+let plan = ExecutionPlan::new().drop("internal_id"); // (CORE)
+let input = rypipe_core::InputBuffer::open(Path::new("data.log"), false, false)?; // (CORE) handles mmap plus gzip/zstd/lz4
+let mut builder = TableBuilder::with_plan(1024, plan); // (CORE)
+LogParser.validate(input.as_slice())?; // (ADAPTER BOUND)
+LogParser.parse_chunk(input.as_slice(), &mut builder)?; // (ADAPTER BOUND) -> (CORE) sink
+let batch = builder.finish()?; // (CORE) normalize, auto_dict, sort, to_arrow
 ```
 
-### Export a RecordBatch to PyArrow
+### Export a RecordBatch to PyArrow  (CORE) helper plus (ADAPTER BOUND) registration
 
 ```rust
-use rypipe_python::{record_batch_to_pyarrow, py_err_from_rypipe};
-use pyo3::prelude::*;
+use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table}; // (CORE) helper
+use pyo3::prelude::*; // (CORE) plus (ADAPTER BOUND) glue
 
 #[pyfunction]
-fn read_log(py: Python, path: &str) -> PyResult<PyObject> {
-    let batch = parse_file(path.into());
-    record_batch_to_pyarrow(py, &batch).map_err(py_err_from_rypipe)
+fn read_log(py: Python, path: &str, field_mapping: Option<std::collections::HashMap<String,String>>) -> PyResult<pyo3::Bound<pyo3::PyAny>> {
+    let plan = execution_plan_from_kwargs(field_mapping, None, None, None, None, None, false, None, None)?; // (CORE)
+    let batches = py.allow_threads(|| { // (CORE) GIL release
+        use rypipe_core::{Pipeline, MemoryBudget};
+        Pipeline::new(LogSplitter, LogParser).with_plan(plan).read_path_par(path, 4, false, false) // (CORE) plus (ADAPTER BOUND)
+    })?;
+    record_batches_to_pyarrow_table(py, &batches) // (CORE) C Data Interface
 }
 ```
 

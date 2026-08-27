@@ -127,6 +127,10 @@ cargo build --profile profiling -p rypipe-core
 
 Then use `perf`, `cargo flamegraph`, or `samply` to profile.
 
+## Example: `crxml` adapter
+
+`crxml` (Crystal Reports XML, at `docs/crxml-adapter.md`) is the reference for what a good adapter looks like: hand-rolled `memchr` scanner `crxml-core/src/xml/scanner.rs` instead of `quick-xml`, shared between columnar `scan_chunk` and streaming `scan_one_row` + `RowSink` `crxml-core/src/lib.rs:564`, `Vec<ColumnBuilder>`+`field_index` + `row_dirty` bitmask in `engine.rs:16`, `InputBuffer` `mmap` auto for >50 MB (`crxml-core` `auto_mmap`), and `wants`-driven skip-bytes. On a Ryzen 5800X it holds **714 MB/s single / 2.6–3.0 GB/s parallel** (1 GB, 926k rows) and **4183 MB/s** with `drop_all` pushdown, with streaming now **508 MB/s** (2× over `quick-xml`'s 251). See `benchmarks/bench_extended.py` (104 benchmarks/file) for the full matrix (native, source×sink, pushdowns, chunk/bounded/batch/pipeline).
+
 ## Future work
 
 - A generic streaming `RecordParser` could support chunked async input.
@@ -135,6 +139,6 @@ Then use `perf`, `cargo flamegraph`, or `samply` to profile.
 
 ## See also
 
-- [Architecture](./architecture.md): engine design and fast/merge paths.
+- [Architecture](./architecture/): engine design and fast/merge paths.
 - [Rust API](./rust-api.md): tuning `num_chunks` and `memory` from Rust.
 - [Python API](./python-api.md): the same knobs from Python.

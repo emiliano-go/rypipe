@@ -1,14 +1,32 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int32Array, Int64Array, StringArray,
+    ArrayRef, BooleanArray, Date32Array, DictionaryArray, Float64Array, Int32Array, Int64Array,
+    PrimitiveArray, StringArray,
 };
-use arrow::datatypes::{DataType, Int32Type};
+use arrow::datatypes::{
+    DataType, Int32Type, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType, TimeUnit,
+};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::plan::FieldType;
 use crate::value::Value;
 use crate::Result;
+
+/// A borrowed, typed view of a single stored value, used for native-typed
+/// filter evaluation without allocating.
+#[derive(Debug, PartialEq)]
+pub(crate) enum TypedValue<'a> {
+    Str(&'a str),
+    Int64(i64),
+    Float64(f64),
+    Bool(bool),
+    /// Days since the Unix epoch.
+    Date32(i32),
+    /// Raw integer in the column's `TimeUnit`.
+    Timestamp(i64),
+}
 
 /// Flat string column storage in Arrow layout: one contiguous byte arena +
 /// offsets + validity. No per-cell allocation, and Arrow export is a block
@@ -88,12 +106,16 @@ impl StrColumn {
 }
 
 /// Per-column builder: stores all values.  The variant determines the storage
-/// type (String, Int64, Float64, Boolean, or Dictionary).
+/// type (String, Int64, Float64, Boolean, Date32, Timestamp, or Dictionary).
 pub(crate) enum ColumnBuilder {
     String(StrColumn),
     Int64(Vec<Option<i64>>),
     Float64(Vec<Option<f64>>),
     Boolean(Vec<Option<bool>>),
+    /// Days since the Unix epoch.
+    Date32(Vec<Option<i32>>),
+    /// Raw integers in `unit` since the Unix epoch.
+    Timestamp(TimeUnit, Vec<Option<i64>>),
     Dictionary {
         codes: Vec<Option<i32>>,
         dict: Vec<String>,
@@ -113,6 +135,63 @@ fn dict_code(dict: &mut Vec<String>, index: &mut HashMap<String, i32>, v: &str) 
     code
 }
 
+/// Parse an ISO-8601 date (`YYYY-MM-DD`) into days since the Unix epoch.
+pub fn parse_date32(s: &str) -> Option<i32> {
+    let d = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()?;
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?;
+    Some((d - epoch).num_days() as i32)
+}
+
+/// Parse an ISO-8601 datetime (or bare date = midnight) into an integer in
+/// `unit`. Naive parsing only; adapters handling timezones should emit
+/// `Value::Timestamp` directly.
+pub fn parse_timestamp(s: &str, unit: TimeUnit) -> Option<i64> {
+    let t = s.trim();
+    let dt = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S%.f"))
+        .or_else(|_| {
+            chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d")
+                .map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+        })
+        .ok()?;
+    let utc = dt.and_utc();
+    Some(match unit {
+        TimeUnit::Second => utc.timestamp(),
+        TimeUnit::Millisecond => utc.timestamp_millis(),
+        TimeUnit::Microsecond => utc.timestamp_micros(),
+        TimeUnit::Nanosecond => utc
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| utc.timestamp_micros().saturating_mul(1_000)),
+    })
+}
+
+/// Format days-since-epoch back to ISO-8601 (`YYYY-MM-DD`).
+fn format_date32(days: i32) -> String {
+    match chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+        .and_then(|epoch| epoch.checked_add_signed(chrono::Duration::days(days as i64)))
+    {
+        Some(d) => d.format("%Y-%m-%d").to_string(),
+        None => days.to_string(),
+    }
+}
+
+/// Format a raw timestamp integer to ISO-8601 (`YYYY-MM-DDTHH:MM:SS(.fff…)`).
+fn format_timestamp(v: i64, unit: TimeUnit) -> String {
+    let (secs, subsec_nanos) = match unit {
+        TimeUnit::Second => (v, 0u32),
+        TimeUnit::Millisecond => (v.div_euclid(1_000), (v.rem_euclid(1_000) * 1_000_000) as u32),
+        TimeUnit::Microsecond => (
+            v.div_euclid(1_000_000),
+            (v.rem_euclid(1_000_000) * 1_000) as u32,
+        ),
+        TimeUnit::Nanosecond => (v.div_euclid(1_000_000_000), v.rem_euclid(1_000_000_000) as u32),
+    };
+    match chrono::DateTime::from_timestamp(secs, subsec_nanos) {
+        Some(dt) => dt.naive_utc().to_string(),
+        None => v.to_string(),
+    }
+}
+
 impl ColumnBuilder {
     pub(crate) fn with_capacity(cap: usize, field_type: &FieldType) -> Self {
         match field_type {
@@ -120,6 +199,10 @@ impl ColumnBuilder {
             FieldType::Int64 => ColumnBuilder::Int64(Vec::with_capacity(cap)),
             FieldType::Float64 => ColumnBuilder::Float64(Vec::with_capacity(cap)),
             FieldType::Boolean => ColumnBuilder::Boolean(Vec::with_capacity(cap)),
+            FieldType::Date32 => ColumnBuilder::Date32(Vec::with_capacity(cap)),
+            FieldType::Timestamp(unit) => {
+                ColumnBuilder::Timestamp(*unit, Vec::with_capacity(cap))
+            }
             FieldType::Dictionary => ColumnBuilder::Dictionary {
                 codes: Vec::with_capacity(cap),
                 dict: Vec::new(),
@@ -167,7 +250,123 @@ impl ColumnBuilder {
                 }
                 _ => self.push(None),
             },
+            Value::Date32(d) => match self {
+                ColumnBuilder::Date32(v) => v.push(Some(d)),
+                ColumnBuilder::Int64(v) => v.push(Some(d as i64)),
+                ColumnBuilder::Float64(v) => v.push(Some(d as f64)),
+                ColumnBuilder::String(col) => col.push(Some(&format_date32(d))),
+                ColumnBuilder::Dictionary { codes, dict, index } => {
+                    let code = dict_code(dict, index, &format_date32(d));
+                    codes.push(Some(code));
+                }
+                _ => self.push(None),
+            },
+            Value::Timestamp(ts) => {
+                // Raw integer is interpreted in the column's unit.
+                let unit = self.unit();
+                match self {
+                    ColumnBuilder::Timestamp(_, v) => v.push(Some(ts)),
+                    ColumnBuilder::Int64(v) => v.push(Some(ts)),
+                    ColumnBuilder::Float64(v) => v.push(Some(ts as f64)),
+                    ColumnBuilder::String(col) => match unit {
+                        Some(unit) => col.push(Some(&format_timestamp(ts, unit))),
+                        None => col.push(Some(&ts.to_string())),
+                    },
+                    ColumnBuilder::Dictionary { codes, dict, index } => {
+                        let text = match unit {
+                            Some(unit) => format_timestamp(ts, unit),
+                            None => ts.to_string(),
+                        };
+                        let code = dict_code(dict, index, &text);
+                        codes.push(Some(code));
+                    }
+                    _ => self.push(None),
+                }
+            }
         }
+    }
+
+    /// The `TimeUnit` carried by this builder, if any.
+    fn unit(&self) -> Option<TimeUnit> {
+        match self {
+            ColumnBuilder::Timestamp(unit, _) => Some(*unit),
+            _ => None,
+        }
+    }
+
+    /// Static discriminant for cross-chunk schema consistency checks.
+    pub(crate) fn variant_key(&self) -> &'static str {
+        match self {
+            ColumnBuilder::String(_) => "string",
+            ColumnBuilder::Int64(_) => "int64",
+            ColumnBuilder::Float64(_) => "float64",
+            ColumnBuilder::Boolean(_) => "boolean",
+            ColumnBuilder::Date32(_) => "date32",
+            // Distinguish timestamp units: merging across units is an error.
+            ColumnBuilder::Timestamp(unit, _) => match unit {
+                TimeUnit::Second => "timestamp[s]",
+                TimeUnit::Millisecond => "timestamp[ms]",
+                TimeUnit::Microsecond => "timestamp[us]",
+                TimeUnit::Nanosecond => "timestamp[ns]",
+            },
+            ColumnBuilder::Dictionary { .. } => "dictionary",
+        }
+    }
+
+    /// Convert this builder in place to the storage variant identified by
+    /// `target` (a [`ColumnBuilder::variant_key`] string).
+    ///
+    /// Supports the safe promotions accepted by [`unify_variants`] plus
+    /// same-key no-ops; any other target returns [`crate::Error::Merge`].
+    pub(crate) fn promote_to_variant(&mut self, target: &'static str) -> Result<()> {
+        if self.variant_key() == target {
+            return Ok(());
+        }
+
+        // int64 → float64 widening.
+        let ints = match self {
+            ColumnBuilder::Int64(v) => Some(std::mem::take(v)),
+            _ => None,
+        };
+        if let Some(v) = ints {
+            if target != "float64" {
+                *self = ColumnBuilder::Int64(v);
+                return Err(crate::Error::Merge(format!(
+                    "cannot promote column to unified variant '{target}'"
+                )));
+            }
+            *self = ColumnBuilder::Float64(v.into_iter().map(|o| o.map(|n| n as f64)).collect());
+            return Ok(());
+        }
+
+        // string → dictionary encoding.
+        let strs = match self {
+            ColumnBuilder::String(v) => Some(std::mem::take(v)),
+            _ => None,
+        };
+        if let Some(old) = strs {
+            if target != "dictionary" {
+                *self = ColumnBuilder::String(old);
+                return Err(crate::Error::Merge(format!(
+                    "cannot promote column to unified variant '{target}'"
+                )));
+            }
+            let mut dict: Vec<String> = Vec::new();
+            let mut index: HashMap<String, i32> = HashMap::default();
+            let mut codes: Vec<Option<i32>> = Vec::with_capacity(old.len());
+            for val in old.iter() {
+                match val {
+                    Some(s) => codes.push(Some(dict_code(&mut dict, &mut index, s))),
+                    None => codes.push(None),
+                }
+            }
+            *self = ColumnBuilder::Dictionary { codes, dict, index };
+            return Ok(());
+        }
+
+        Err(crate::Error::Merge(format!(
+            "cannot promote column to unified variant '{target}'"
+        )))
     }
 
     /// Push an owned optional string. Kept for compatibility with code that
@@ -183,6 +382,12 @@ impl ColumnBuilder {
             }
             ColumnBuilder::Boolean(v) => {
                 v.push(value.and_then(|s| s.parse::<bool>().ok()));
+            }
+            ColumnBuilder::Date32(v) => {
+                v.push(value.and_then(|s| parse_date32(&s)));
+            }
+            ColumnBuilder::Timestamp(unit, v) => {
+                v.push(value.and_then(|s| parse_timestamp(&s, *unit)));
             }
             ColumnBuilder::Dictionary { codes, dict, index } => match value {
                 Some(v) => {
@@ -208,6 +413,12 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => {
                 v.push(value.and_then(|s| s.parse::<bool>().ok()));
             }
+            ColumnBuilder::Date32(v) => {
+                v.push(value.and_then(parse_date32));
+            }
+            ColumnBuilder::Timestamp(unit, v) => {
+                v.push(value.and_then(|s| parse_timestamp(s, *unit)));
+            }
             ColumnBuilder::Dictionary { codes, dict, index } => match value {
                 Some(v) => {
                     let idx = dict_code(dict, index, v);
@@ -224,6 +435,8 @@ impl ColumnBuilder {
             ColumnBuilder::Int64(v) => drop(v.pop()),
             ColumnBuilder::Float64(v) => drop(v.pop()),
             ColumnBuilder::Boolean(v) => drop(v.pop()),
+            ColumnBuilder::Date32(v) => drop(v.pop()),
+            ColumnBuilder::Timestamp(_, v) => drop(v.pop()),
             ColumnBuilder::Dictionary { codes, .. } => drop(codes.pop()),
         }
     }
@@ -234,20 +447,48 @@ impl ColumnBuilder {
             ColumnBuilder::Int64(v) => v.len(),
             ColumnBuilder::Float64(v) => v.len(),
             ColumnBuilder::Boolean(v) => v.len(),
+            ColumnBuilder::Date32(v) => v.len(),
+            ColumnBuilder::Timestamp(_, v) => v.len(),
             ColumnBuilder::Dictionary { codes, .. } => codes.len(),
         }
     }
 
     /// Value at `index` formatted as a string for filter comparison.
+    /// Date/timestamp columns format as ISO-8601.
     pub(crate) fn get_filter_value(&self, index: usize) -> Option<String> {
         match self {
             ColumnBuilder::String(v) => v.get(index).map(|s| s.to_owned()),
             ColumnBuilder::Int64(v) => v.get(index).and_then(|o| o.map(|n| n.to_string())),
             ColumnBuilder::Float64(v) => v.get(index).and_then(|o| o.map(|n| n.to_string())),
             ColumnBuilder::Boolean(v) => v.get(index).and_then(|o| o.map(|n| n.to_string())),
+            ColumnBuilder::Date32(v) => {
+                v.get(index).and_then(|o| *o).map(format_date32)
+            }
+            ColumnBuilder::Timestamp(unit, v) => {
+                let unit = *unit;
+                v.get(index)
+                    .and_then(|o| *o)
+                    .map(|ts| format_timestamp(ts, unit))
+            }
             ColumnBuilder::Dictionary { codes, dict, .. } => codes
                 .get(index)
                 .and_then(|code| code.map(|idx| dict[idx as usize].clone())),
+        }
+    }
+
+    /// Borrowed typed value at `index` for native filter comparison.
+    /// Dictionary columns decode to their string form.
+    pub(crate) fn get_typed_value(&self, index: usize) -> Option<TypedValue<'_>> {
+        match self {
+            ColumnBuilder::String(v) => v.get(index).map(TypedValue::Str),
+            ColumnBuilder::Int64(v) => v.get(index)?.map(TypedValue::Int64),
+            ColumnBuilder::Float64(v) => v.get(index)?.map(TypedValue::Float64),
+            ColumnBuilder::Boolean(v) => v.get(index)?.map(TypedValue::Bool),
+            ColumnBuilder::Date32(v) => v.get(index)?.map(TypedValue::Date32),
+            ColumnBuilder::Timestamp(_, v) => v.get(index)?.map(TypedValue::Timestamp),
+            ColumnBuilder::Dictionary { codes, dict, .. } => codes
+                .get(index)?
+                .map(|idx| TypedValue::Str(dict[idx as usize].as_str())),
         }
     }
 
@@ -265,6 +506,18 @@ impl ColumnBuilder {
                 a.append(&mut b);
             }
             (ColumnBuilder::Boolean(a), ColumnBuilder::Boolean(mut b)) => {
+                a.append(&mut b);
+            }
+            (ColumnBuilder::Date32(a), ColumnBuilder::Date32(mut b)) => {
+                a.append(&mut b);
+            }
+            (ColumnBuilder::Timestamp(ua, a), ColumnBuilder::Timestamp(ub, mut b)) => {
+                let unit_a: TimeUnit = *ua;
+                if unit_a != ub {
+                    return Err(crate::Error::Merge(format!(
+                        "extend_owned: timestamp unit mismatch ({unit_a:?} vs {ub:?})"
+                    )));
+                }
                 a.append(&mut b);
             }
             (
@@ -297,7 +550,16 @@ impl ColumnBuilder {
 
     /// Upgrade a String builder to Dictionary if cardinality is low enough.
     /// No-op if not String, or if rows < min_rows.
-    pub(crate) fn try_upgrade_to_dict(&mut self, min_rows: usize) {
+    ///
+    /// `max_ratio` is the maximum fraction of rows allowed as distinct values
+    /// (default `0.05`); `max_size` caps the dictionary length (default `256`).
+    /// The effective threshold is clamped to at least 16 entries.
+    pub(crate) fn try_upgrade_to_dict(
+        &mut self,
+        min_rows: usize,
+        max_ratio: f64,
+        max_size: usize,
+    ) {
         let old = match self {
             ColumnBuilder::String(v) => std::mem::take(v),
             _ => return,
@@ -311,9 +573,11 @@ impl ColumnBuilder {
         for s in old.iter().flatten() {
             seen.insert(s);
         }
-        // Threshold: at most 5% distinct, clamped to [16, 256].
-        let threshold = (old.len() / 20).clamp(16, 256);
-        if seen.len() > threshold {
+        // Threshold: at most `max_ratio` of rows distinct, floored at 16 so
+        // tiny columns can still upgrade, then capped by `max_size`.
+        let ratio_cap = ((old.len() as f64 * max_ratio) as usize).max(16);
+        let cap = ratio_cap.min(max_size);
+        if seen.len() > cap {
             *self = ColumnBuilder::String(old);
             return;
         }
@@ -340,6 +604,8 @@ impl ColumnBuilder {
             ColumnBuilder::Int64(_) => DataType::Int64,
             ColumnBuilder::Float64(_) => DataType::Float64,
             ColumnBuilder::Boolean(_) => DataType::Boolean,
+            ColumnBuilder::Date32(_) => DataType::Date32,
+            ColumnBuilder::Timestamp(unit, _) => DataType::Timestamp(*unit, None),
             ColumnBuilder::Dictionary { .. } => {
                 DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
             }
@@ -353,6 +619,29 @@ impl ColumnBuilder {
             ColumnBuilder::Int64(v) => Arc::new(v.iter().copied().collect::<Int64Array>()),
             ColumnBuilder::Float64(v) => Arc::new(v.iter().copied().collect::<Float64Array>()),
             ColumnBuilder::Boolean(v) => Arc::new(v.iter().copied().collect::<BooleanArray>()),
+            ColumnBuilder::Date32(v) => Arc::new(v.iter().copied().collect::<Date32Array>()),
+            ColumnBuilder::Timestamp(unit, v) => match unit {
+                TimeUnit::Second => Arc::new(
+                    v.iter()
+                        .copied()
+                        .collect::<PrimitiveArray<TimestampSecondType>>(),
+                ),
+                TimeUnit::Millisecond => Arc::new(
+                    v.iter()
+                        .copied()
+                        .collect::<PrimitiveArray<TimestampMillisecondType>>(),
+                ),
+                TimeUnit::Microsecond => Arc::new(
+                    v.iter()
+                        .copied()
+                        .collect::<PrimitiveArray<TimestampMicrosecondType>>(),
+                ),
+                TimeUnit::Nanosecond => Arc::new(
+                    v.iter()
+                        .copied()
+                        .collect::<PrimitiveArray<TimestampNanosecondType>>(),
+                ),
+            },
             ColumnBuilder::Dictionary { codes, dict, .. } => {
                 let keys: Int32Array = codes.iter().copied().collect();
                 let values: ArrayRef = Arc::new(
@@ -372,6 +661,38 @@ impl ColumnBuilder {
             ColumnBuilder::String(v) => v.iter().map(|o| o.map(str::to_owned)).collect(),
             _ => panic!("as_str_vec called on non-String ColumnBuilder"),
         }
+    }
+}
+
+/// Every string produced by [`ColumnBuilder::variant_key`].
+const VARIANT_KEYS: [&str; 10] = [
+    "string",
+    "int64",
+    "float64",
+    "boolean",
+    "date32",
+    "timestamp[s]",
+    "timestamp[ms]",
+    "timestamp[us]",
+    "timestamp[ns]",
+    "dictionary",
+];
+
+/// Reconcile two variant keys into a single storage variant.
+///
+/// Returns the unified key, or `None` when the types are irreconcilable and
+/// callers must surface an error. Safe promotions:
+///
+/// - `int64` + `float64` → `float64`
+/// - `string` + `dictionary` → `dictionary`
+pub(crate) fn unify_variants(a: &str, b: &str) -> Option<&'static str> {
+    if a == b {
+        return VARIANT_KEYS.iter().copied().find(|k| *k == a);
+    }
+    match (a, b) {
+        ("int64", "float64") | ("float64", "int64") => Some("float64"),
+        ("string", "dictionary") | ("dictionary", "string") => Some("dictionary"),
+        _ => None,
     }
 }
 

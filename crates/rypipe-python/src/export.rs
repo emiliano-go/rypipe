@@ -16,6 +16,22 @@ pub fn record_batch_to_pyarrow<'py>(
     batch.to_pyarrow(py)
 }
 
+/// Export a slice of Arrow `RecordBatch`es as a Python list of
+/// `pyarrow.RecordBatch` objects (no concatenation).
+///
+/// Useful for streaming-style APIs: callers can iterate the list and process
+/// each batch incrementally instead of materializing one big table.
+pub fn record_batches_to_pyarrow_batches<'py>(
+    py: Python<'py>,
+    batches: &[RecordBatch],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for batch in batches {
+        list.append(record_batch_to_pyarrow(py, batch)?)?;
+    }
+    Ok(list)
+}
+
 /// Export a slice of Arrow `RecordBatch`es to a single `pyarrow.Table`.
 ///
 /// Mirrors crxml's `concat_tables` logic:

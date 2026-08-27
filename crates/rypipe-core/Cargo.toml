@@ -15,9 +15,17 @@ authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
 [features]
 default = []
 mmap = ["dep:memmap2"]
+# Transparently decompress inputs whose leading magic bytes identify them.
+# Detection happens in `InputBuffer::open`; decompressed bytes are served
+# from memory (`InputBuffer::Owned`) across all execution modes.
+gzip = ["dep:flate2"]
+zstd = ["dep:zstd"]
+lz4 = ["dep:lz4_flex"]
+compress-all = ["gzip", "zstd", "lz4"]
 
 [dependencies]
-arrow = { version = "=59.2.0", default-features = false }
+arrow = { version = "=55.2.0", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 rayon = "1"
 memchr = "2"
 simdutf8 = "0.1"
@@ -25,3 +33,9 @@ lexical = "7"
 rustc-hash = "2"
 thiserror = "2"
 memmap2 = { version = "0.9", optional = true }
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
+zstd = { version = "0.13", optional = true }
+lz4_flex = { version = "0.11", optional = true }
+
+[dev-dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

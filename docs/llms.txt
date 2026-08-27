@@ -14,7 +14,7 @@
 
 ## Examples
 - [Examples](https://rypipe.emiliano-go.com/examples/): Python and Rust API recipes for reading, pipelines, adapters, and sinks
-- [crxml adapter](https://rypipe.emiliano-go.com/crxml-adapter/): Real-world adapter example; 2.4 GB/s Crystal Reports XML parser built on rypipe-core
+- [crxml adapter](https://rypipe.emiliano-go.com/crxml-adapter/): Real-world adapter example; 3.0 GB/s Crystal Reports XML parser built on rypipe-core (714 MB/s single, 2.6–3.0 GB/s parallel, 508 MB/s streaming)
 
 ## Advanced
 - [Advanced overview](https://rypipe.emiliano-go.com/advanced/): Roadmap and checklist for the advanced section
@@ -28,7 +28,7 @@
 - [Adapter design](https://rypipe.emiliano-go.com/advanced/adapter-design/): Splitter, RecordParser, memchr, and sink.wants
 - [Profiling](https://rypipe.emiliano-go.com/advanced/profiling/): perf, flamegraph, bench_throughput, and RSS measurement
 - [Anti-patterns](https://rypipe.emiliano-go.com/advanced/anti-patterns/): Common mistakes that hurt throughput and memory
-- [Case study: crxml](https://rypipe.emiliano-go.com/advanced/case-study-crxml/): How crxml reaches ~2.4 GB/s
+- [Case study: crxml](https://rypipe.emiliano-go.com/advanced/case-study-crxml/): How crxml reaches 3.0 GB/s (scanner + row_dirty + streaming RowSink)
 
 ## Internals
 - [Architecture](https://rypipe.emiliano-go.com/architecture/): Splitting, row extraction, typed builders, and engine design

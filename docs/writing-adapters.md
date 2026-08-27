@@ -51,7 +51,9 @@ impl Splitter for CsvSplitter {
             if b == b'"' {
                 in_quotes = !in_quotes;
             } else if b == b'\n' && !in_quotes && points.len() < max_chunks {
-                points.push(i);
+                // Point at the FIRST BYTE of the next record, not at the
+                // newline itself; otherwise chunks begin with a stray '\n'.
+                points.push(i + 1);
             }
         }
         if *points.last().unwrap() != bytes.len() {
@@ -71,7 +73,8 @@ Rules:
 
 - The first point must be `0`; the last must be `bytes.len()`.
 - Adjacent equal points produce empty ranges that the engine ignores.
-- Each chunk must start at a valid row boundary.
+- Each chunk must start at a valid row boundary. Split points point at the
+  first byte of a record, never at the delimiter itself.
 
 ## Implement `RecordParser`
 
@@ -84,14 +87,12 @@ pub struct CsvDecoder {
 
 impl RecordParser for CsvDecoder {
     fn validate(&self, bytes: &[u8]) -> Result<()> {
-        simdutf8::basic::from_utf8(bytes)
-            .map_err(|e| rypipe_core::Error::Utf8(e.to_string()))?;
+        simdutf8::basic::from_utf8(bytes).map_err(rypipe_core::Error::Utf8)?;
         Ok(())
     }
 
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text = simdutf8::basic::from_utf8(bytes).map_err(rypipe_core::Error::Utf8)?;
         for line in text.lines() {
             if line.is_empty() {
                 continue;
@@ -106,16 +107,43 @@ impl RecordParser for CsvDecoder {
         }
         Ok(())
     }
+
+    // Fastest when extraction is expensive : one resolve instead of two:
+    // (requires rypipe-core >=0.1.1)
+    fn parse_chunk_fast(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+        let text = simdutf8::basic::from_utf8(bytes).map_err(rypipe_core::Error::Utf8)?;
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            sink.begin_row();
+            for (col, value) in self.header.iter().zip(line.split(',')) {
+                if let Some(resolved) = sink.resolve(col) {
+                    // ... expensive unescaping / decoding of `value` here ...
+                    sink.put_field_resolved(resolved, Value::Str(value));
+                }
+            }
+            sink.end_row();
+        }
+        Ok(())
+    }
 }
 ```
 
 Key points:
 
 - Call `sink.wants(name)` before expensive extraction to skip dropped fields.
+  When extraction itself is expensive (entity unescaping, base64, …), use the
+  zero-copy pair `sink.resolve(name)` + `sink.put_field_resolved(resolved, value)`
+  to pay the `rename→drop` hash only once instead of twice.
 - Emit `Value::Str` for stringly formats; emit typed `Value` variants when the
   format has native numbers/booleans.
 - Do not call `end_row()` for partial trailing rows; the engine will discard
   them.
+- Columns are now stored as `Vec<ColumnBuilder>` with a `field_index: FxHashMap<String,usize>`
+  beside `column_order`. The hot path `push_field` is a single index lookup
+  (`field_index.get` → `columns[idx]`) instead of two `HashMap` probes; this
+  benefits every adapter equally.
 
 ## Run it with `Pipeline`
 
@@ -235,11 +263,11 @@ df = (
 ).to_dataframe()
 ```
 
-`RenameFields`, `DropFields`, `CastTypes`, and constant `FilterRows` expose
-`_plan_kwargs()` so the pipeline fusion layer pushes them into `_read_arrow`.
-Your Rust `read_csv` receives the merged kwargs and applies them in the parse
-loop. Non-fusable stages (custom callables, compare filters, stateful transforms)
-run over the returned table automatically.
+`RenameFields`, `DropFields`, `CastTypes`, and `FilterRows` predicates (both
+constant and column-to-column forms) expose `_plan_kwargs()` so the pipeline
+fusion layer pushes them into `_read_arrow`. Your Rust `read_csv` receives the
+merged kwargs and applies them in the parse loop. Non-fusable stages (custom
+callables, stateful transforms) run over the returned table automatically.
 
 ## Testing an adapter
 
@@ -260,6 +288,6 @@ self-contained splitter/parser samples.
 ## See also
 
 - [Rust API](./rust-api.md): `Pipeline`, `ExecutionPlan`, and `Value`.
-- [Architecture](./architecture.md): how splitters, parsers, and the engine interact.
+- [Architecture](./architecture/): how splitters, parsers, and the engine interact.
 - [Python API](./python-api.md): registering adapters with the `rypipe` package.
 - [crxml adapter](./crxml-adapter.md): a production adapter that reaches 2.4 GB/s on Crystal Reports XML.

@@ -12,16 +12,32 @@ def _arrow_iter(table) -> Iterator[dict]:
 
 
 def plan_split(stages):
-    """Split stages into (pushdown plan kwargs, remaining stages)."""
+    """Split stages into (pushdown plan kwargs, remaining stages).
+
+    Multiple fusable ``FilterRows`` stages that each push a ``filter`` spec are
+    combined with an implicit ``and`` (``{"and": [...]}``) so chaining
+    ``FilterRows`` stages no longer silently drops all but the last filter.
+    Other plan keys (``field_mapping``, ``drop_fields``, etc.) still merge
+    with last-write-wins via ``dict.update``.
+    """
     plan_overrides: dict = {}
     remaining: list = []
+    filter_specs: list = []
     for stage in stages:
         if hasattr(stage, "_plan_kwargs"):
             kwargs = stage._plan_kwargs()
             if kwargs is not None:
-                plan_overrides.update(kwargs)
+                if "filter" in kwargs:
+                    filter_specs.append(kwargs["filter"])
+                    rest = {k: v for k, v in kwargs.items() if k != "filter"}
+                    if rest:
+                        plan_overrides.update(rest)
+                else:
+                    plan_overrides.update(kwargs)
                 continue
         remaining.append(stage)
+    if filter_specs:
+        plan_overrides["filter"] = filter_specs[0] if len(filter_specs) == 1 else {"and": filter_specs}
     return plan_overrides, remaining
 
 

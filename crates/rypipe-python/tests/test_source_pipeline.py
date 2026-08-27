@@ -13,6 +13,9 @@ from rypipe import (
     CastTypes,
     DropFields,
     FilterRows,
+    FilterRowsAll,
+    FilterRowsAny,
+    FilterRowsNot,
     RenameFields,
     Source,
     collect,
@@ -21,6 +24,7 @@ from rypipe import (
     to_dataframe,
     to_polars,
 )
+from rypipe.fusion import plan_split
 
 
 _TYPE_MAP = {
@@ -62,34 +66,49 @@ def _apply_plan(table: pa.Table, plan: dict):
             names.append(name)
         table = pa.table(columns, names=names)
 
-    # Filter.
-    spec = plan.get("filter")
-    if spec:
+    # Filter — recurses into and/or/not trees so the mock matches Rust Check semantics.
+    def _mask_for(spec) -> "pa.Array":
+        if "and" in spec:
+            masks = [_mask_for(s) for s in spec["and"]]
+            out = masks[0]
+            for m in masks[1:]:
+                out = pc.and_(out, m)
+            return out
+        if "or" in spec:
+            masks = [_mask_for(s) for s in spec["or"]]
+            out = masks[0]
+            for m in masks[1:]:
+                out = pc.or_(out, m)
+            return out
+        if "not" in spec:
+            inner = _mask_for(spec["not"])
+            return pc.invert(inner)
         if "field" in spec:
             field, op, value = spec["field"], spec["op"], spec["value"]
-            mask = pc.equal(table.column(field), value)
+            m = pc.equal(table.column(field), value)
             if op not in ("==", "eq"):
-                mask = pc.invert(mask)
-            mask = pc.fill_null(mask, op in ("==", "eq"))
-        else:
-            field_a, op, field_b = spec["field_a"], spec["op"], spec["field_b"]
-            fn_name = {
-                ">": "greater",
-                "gt": "greater",
-                "<": "less",
-                "lt": "less",
-                ">=": "greater_equal",
-                "ge": "greater_equal",
-                "<=": "less_equal",
-                "le": "less_equal",
-                "==": "equal",
-                "eq": "equal",
-                "!=": "not_equal",
-                "ne": "not_equal",
-            }[op]
-            mask = getattr(pc, fn_name)(table.column(field_a), table.column(field_b))
-            mask = pc.fill_null(mask, False)
-        table = table.filter(mask)
+                m = pc.invert(m)
+            return pc.fill_null(m, op in ("==", "eq"))
+        field_a, op, field_b = spec["field_a"], spec["op"], spec["field_b"]
+        fn_name = {
+            ">": "greater",
+            "gt": "greater",
+            "<": "less",
+            "lt": "less",
+            ">=": "greater_equal",
+            "ge": "greater_equal",
+            "<=": "less_equal",
+            "le": "less_equal",
+            "==": "equal",
+            "eq": "equal",
+            "!=": "not_equal",
+            "ne": "not_equal",
+        }[op]
+        return pc.fill_null(getattr(pc, fn_name)(table.column(field_a), table.column(field_b)), False)
+
+    spec = plan.get("filter")
+    if spec:
+        table = table.filter(_mask_for(spec))
 
     return table
 
@@ -323,3 +342,134 @@ def test_adapter_subclass_filter(sample_table):
     rows = collect(src | FilterRows(field="city", op="==", value="LA"))
     assert len(rows) == 1
     assert rows[0]["name"] == "Bob"
+
+
+def test_source_iter_arrow_batches(sample_table):
+    src = _MockSource(sample_table)
+    batches = list(src.iter_arrow_batches(batch_size=2))
+    assert len(batches) == 2
+    total_rows = sum(b.num_rows for b in batches)
+    assert total_rows == 3
+    combined = pa.Table.from_batches(batches, schema=sample_table.schema)
+    assert combined.equals(sample_table)
+
+
+def test_pipeline_iter_arrow_batches(sample_table):
+    pipe = _MockSource(sample_table) | DropFields(["city"])
+    batches = list(pipe.iter_arrow_batches(batch_size=2))
+    combined = pa.Table.from_batches(batches)
+    assert combined.column_names == ["name", "age"]
+    assert combined.num_rows == 3
+
+
+def test_read_batches_module_level(sample_table, monkeypatch):
+    class _FakeAdapter:
+        def read(self, path, **kwargs):
+            return sample_table
+
+    monkeypatch.setitem(rypipe._ADAPTERS, "mockfmt", _FakeAdapter())
+    batches = list(rypipe.read_batches("data.mockfmt", format="mockfmt", batch_size=2))
+    assert len(batches) == 2
+    combined = pa.Table.from_batches(batches, schema=sample_table.schema)
+    assert combined.equals(sample_table)
+
+
+def test_read_stream_still_collects(sample_table, monkeypatch):
+    class _FakeAdapter:
+        def read(self, path, **kwargs):
+            return sample_table
+
+    monkeypatch.setitem(rypipe._ADAPTERS, "mockfmt", _FakeAdapter())
+    table = rypipe.read_stream("data.mockfmt", format="mockfmt")
+    assert table.equals(sample_table)
+
+
+# ---------------------------------------------------------------------------
+# v1.1: Boolean combinators and multi-filter fusion
+
+def test_filter_rows_any_or(sample_table):
+    # name == Alice OR city == LA → 2 rows
+    src = _MockSource(sample_table)
+    pipe = src | FilterRowsAny(
+        FilterRows(field="name", op="==", value="Alice"),
+        FilterRows(field="city", op="==", value="LA"),
+    )
+    rows = collect(pipe)
+    assert len(rows) == 2
+    names = {r["name"] for r in rows}
+    assert names == {"Alice", "Bob"}
+
+
+def test_filter_rows_all_and(sample_table):
+    # Alice is in NYC (both match) — only row 1
+    src = _MockSource(sample_table)
+    pipe = src | FilterRowsAll(
+        FilterRows(field="name", op="==", value="Alice"),
+        FilterRows(field="city", op="==", value="NYC"),
+    )
+    rows = collect(pipe)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+
+
+def test_filter_rows_not(sample_table):
+    src = _MockSource(sample_table)
+    pipe = src | FilterRowsNot(FilterRows(field="city", op="==", value="LA"))
+    rows = collect(pipe)
+    assert len(rows) == 2
+    assert all(r["city"] != "LA" for r in rows)
+
+
+def test_chained_filter_rows_implicit_and(sample_table):
+    # Chaining FilterRows is now implicit AND (fusion bugfix).
+    src = _MockSource(sample_table)
+    pipe = (
+        src
+        | FilterRows(field="city", op="==", value="NYC")
+        | FilterRows(field="name", op="==", value="Alice")
+    )
+    rows = collect(pipe)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+    # Verify fusion produced a single and-spec rather than dropping the first filter.
+    overrides, _ = plan_split([FilterRows(field="a", op="==", value="1"), FilterRows(field="b", op="==", value="2")])
+    assert overrides["filter"] == {"and": [{"field": "a", "op": "==", "value": "1"}, {"field": "b", "op": "==", "value": "2"}]}
+
+
+def test_nested_combinator_pipeline(sample_table):
+    # (city==NYC OR city==LA) AND name != Carol → 2 rows
+    src = _MockSource(sample_table)
+    ors = FilterRowsAny(
+        FilterRows(field="city", op="==", value="NYC"),
+        FilterRows(field="city", op="==", value="LA"),
+    )
+    not_carol = FilterRowsNot(FilterRows(field="name", op="==", value="Carol"))
+    # Verify per-row .apply: ors keeps 2 rows, not_carol keeps 2, conjunction keeps 2.
+    assert len(collect(src | ors)) == 2
+    assert len(collect(src | not_carol)) == 2
+    # Piping ors then not_carol is an AND of the two trees
+    rows = collect(src | ors | not_carol)
+    assert len(rows) == 2
+    assert all(r["name"] in {"Alice", "Bob"} for r in rows)
+
+
+def test_filter_rows_any_rejects_callable_inner():
+    with pytest.raises(ValueError, match="only accepts fusable"):
+        FilterRowsAny(FilterRows(predicate=lambda r: True), FilterRows(field="x", op="==", value="1"))
+
+
+def test_filter_rows_not_requires_leaf():
+    with pytest.raises(ValueError, match="only accepts fusable"):
+        FilterRowsNot(FilterRows(predicate=lambda r: False))
+
+
+def test_filter_rows_any_needs_two():
+    with pytest.raises(ValueError):
+        FilterRowsAny(FilterRows(field="x", op="==", value="1"))
+
+
+def test_filter_compare_inside_or(sample_table):
+    a = FilterRows(field_a="city", op="==", field_b="city")  # self-compare always true
+    b = FilterRows(field="name", op="==", value="Nobody")
+    rows = collect(_MockSource(sample_table) | FilterRowsAny(a, b))
+    assert len(rows) == 3  # all rows satisfy self-compare

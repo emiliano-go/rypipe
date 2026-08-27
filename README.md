@@ -162,7 +162,7 @@ maturin develop --release
 ```bash
 # Rust
 cargo test --workspace --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features : -D warnings
 
 # Python (against an installed build)
 pip install -e ".[dev]"
@@ -193,13 +193,32 @@ Full docs and integration guides are in the `docs/` directory:
 - [Writing a format adapter](docs/writing-adapters.md)
 - [Performance](docs/performance.md)
 
-## Why rypipe
+## Why Python, not pure Rust
 
-The engine started out welded to a single format. Abstracting it keeps that
-speed while making the same execution model available for JSON, CSV, HTML, and
-other formats through a small adapter interface. Format-specific code now lives
-in separate packages; this repository contains only the engine and its Python
-bindings.
+Data work lives in Python : `pip`, notebooks, and the PyArrow/pandas/Polars
+ecosystem. ETL is glue: `S3 → parse → rename/drop/cast/filter → validate →
+write Parquet`. That glue is Python; the hot loop that touches every byte at
+700 MB/s (2.5 GB/s parallel) must be Rust.
+
+`rypipe` is **Rust where it counts, Python where it ships**:
+
+* **Zero-copy, GIL-free Rust core** parses outside the GIL and hands Arrow
+  `RecordBatch`es to `pyarrow` via the C Data Interface : no copy, no
+  serialization.
+* **Python composition** : `source | RenameFields | FilterRows | CastTypes |
+  .to_dataframe()` : lets the same pipeline be explored in a notebook and
+  scaled unchanged in Airflow/Dagster on 100 GB of files.
+* **Pure-Rust still works** when you need it: `rypipe-core` has no Python
+  dependency and is usable as a crate (`Pipeline::new(Splitter, Parser)` →
+  `read_path_par`).
+
+A pure-Rust library would save ~0.1 ms of orchestration and cost the 90% of
+users who have never run `cargo build` their workflow. For data teams, a
+`pip install` beats a toolchain install every time.
+
+> `polars` didn’t win by being pure Rust : it won with a Rust engine behind
+> `pl.DataFrame`. `rypipe` does the same for ingestion. See the full
+> data-driven justification in [Why Python?](docs/why-python.md).
 
 ## License
 

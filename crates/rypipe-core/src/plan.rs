@@ -1,3 +1,4 @@
+use arrow::datatypes::TimeUnit;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 /// The storage type for a column.
@@ -8,6 +9,10 @@ pub enum FieldType {
     Float64,
     Boolean,
     Dictionary,
+    /// Calendar date: days since the Unix epoch.
+    Date32,
+    /// Point in time with an explicit unit.
+    Timestamp(TimeUnit),
 }
 
 impl FieldType {
@@ -19,6 +24,14 @@ impl FieldType {
             "float64" => Some(FieldType::Float64),
             "bool" | "boolean" => Some(FieldType::Boolean),
             "dictionary" => Some(FieldType::Dictionary),
+            "date32" => Some(FieldType::Date32),
+            "timestamp" => Some(FieldType::Timestamp(TimeUnit::Microsecond)),
+            "timestamp[s]" => Some(FieldType::Timestamp(TimeUnit::Second)),
+            "timestamp[ms]" => Some(FieldType::Timestamp(TimeUnit::Millisecond)),
+            "timestamp[us]" | "timestamp[µs]" => {
+                Some(FieldType::Timestamp(TimeUnit::Microsecond))
+            }
+            "timestamp[ns]" => Some(FieldType::Timestamp(TimeUnit::Nanosecond)),
             _ => None,
         }
     }
@@ -46,6 +59,12 @@ pub struct ExecutionPlan {
     /// When true, string columns with low cardinality are automatically
     /// upgraded to dictionary encoding during parse.
     pub auto_dict: bool,
+    /// Auto-dict tuning: maximum fraction of rows allowed as distinct values
+    /// for an upgrade. Defaults to `0.05` when `None`.
+    pub dict_threshold: Option<f64>,
+    /// Auto-dict tuning: maximum dictionary size (distinct values) allowed for
+    /// an upgrade. Defaults to `256` when `None`.
+    pub dict_max_size: Option<usize>,
 }
 
 impl ExecutionPlan {
@@ -105,7 +124,7 @@ impl ExecutionPlan {
         self
     }
 
-    /// Keep only rows where `field_a op field_b` (post-reduce via Arrow compute).
+    /// Keep only rows where `field_a op field_b` (native-typed, per-row).
     pub fn filter_compare(
         mut self,
         field_a: impl Into<String>,
@@ -135,6 +154,18 @@ impl ExecutionPlan {
     /// string columns.
     pub fn with_auto_dict(mut self, yes: bool) -> Self {
         self.auto_dict = yes;
+        self
+    }
+
+    /// Override the auto-dict distinct-ratio threshold (default `0.05`).
+    pub fn with_dict_threshold(mut self, threshold: f64) -> Self {
+        self.dict_threshold = Some(threshold);
+        self
+    }
+
+    /// Override the auto-dict maximum dictionary size (default `256`).
+    pub fn with_dict_max_size(mut self, max_size: usize) -> Self {
+        self.dict_max_size = Some(max_size);
         self
     }
 
@@ -190,47 +221,170 @@ impl CompareOp {
 }
 
 /// A filter predicate evaluated per-row during parsing.
+///
+// Leaf predicates (`Equal`, `NotEqual`, `Compare`) can be composed into a
+// tree with `And`, `Or`, and `Not`. Evaluation is recursive with
+// short-circuiting; a row is kept only if the whole tree passes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FilterPredicate {
     /// Keep row if `field_value != value` (string comparison, per-row).
     NotEqual { field: String, value: String },
     /// Keep row if `field_value == value` (string comparison, per-row).
     Equal { field: String, value: String },
-    /// Column-to-column comparison evaluated post-reduce via Arrow compute.
+    /// Column-to-column comparison, evaluated natively per-row during
+    /// parsing with numeric promotion (Int64 vs Float64 widens).
     Compare {
         field_a: String,
         op: CompareOp,
         field_b: String,
     },
+    /// Keep row if both sub-predicates pass. Short-circuits on the first
+    /// failure.
+    And(Box<FilterPredicate>, Box<FilterPredicate>),
+    /// Keep row if either sub-predicate passes. Short-circuits on the first
+    /// success.
+    Or(Box<FilterPredicate>, Box<FilterPredicate>),
+    /// Keep row if the sub-predicate fails.
+    Not(Box<FilterPredicate>),
 }
 
 impl FilterPredicate {
-    /// Check whether a partial row passes the per-row part of the filter.
-    /// `columns` contains all builders; `row_index` is the current row number.
-    /// Returns true to keep the row.  Compare filters always return true here
-    /// because they are evaluated after all rows have been assembled.
+    /// Combine two predicates with logical AND.
+    pub fn all(a: FilterPredicate, b: FilterPredicate) -> Self {
+        FilterPredicate::And(Box::new(a), Box::new(b))
+    }
+
+    /// Combine two predicates with logical OR.
+    pub fn any(a: FilterPredicate, b: FilterPredicate) -> Self {
+        FilterPredicate::Or(Box::new(a), Box::new(b))
+    }
+
+    /// Negate a predicate.
+    #[allow(clippy::should_implement_trait)]
+    pub fn not(inner: FilterPredicate) -> Self {
+        FilterPredicate::Not(Box::new(inner))
+    }
+}
+
+impl FilterPredicate {
+    /// Check whether a partial row passes the filter.
+    /// `columns`/`field_index` contain all builders; `row_index` is the current
+    /// row number. Returns true to keep the row.
+    ///
+    /// * `Equal`/`NotEqual` use string comparison on the stored value.
+    /// * `Compare` is evaluated natively per-row against typed values with
+    ///   numeric promotion (`Int64` vs `Float64` widens to f64); any other
+    ///   type mismatch or a null operand fails the row.
+    /// * `And`/`Or` short-circuit; `Not` negates. A missing field fails an
+    ///   inner leaf, which `Not` can flip back to a keep.
     pub(crate) fn check(
         &self,
-        columns: &HashMap<String, crate::columnar::ColumnBuilder>,
+        columns: &[crate::columnar::ColumnBuilder],
+        field_index: &HashMap<String, usize>,
         row_index: usize,
         plan: &ExecutionPlan,
     ) -> bool {
-        let (field, expected) = match self {
-            FilterPredicate::NotEqual { field, value } => (field, value),
-            FilterPredicate::Equal { field, value } => (field, value),
-            FilterPredicate::Compare { .. } => return true,
-        };
-        // Resolve the filter field name: if renamed, use the new name.
-        let resolved = plan.field_map.get(field).map_or(field, |s| s);
-
-        let actual = columns
-            .get(resolved)
-            .and_then(|b| b.get_filter_value(row_index));
-        let actual = actual.as_deref();
         match self {
-            FilterPredicate::NotEqual { .. } => actual != Some(expected),
-            FilterPredicate::Equal { .. } => actual == Some(expected),
-            FilterPredicate::Compare { .. } => true,
+            FilterPredicate::NotEqual { field, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                actual.as_deref() != Some(value.as_str())
+            }
+            FilterPredicate::Equal { field, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                actual.as_deref() == Some(value.as_str())
+            }
+            FilterPredicate::Compare {
+                field_a,
+                op,
+                field_b,
+            } => {
+                let va = get_column(columns, field_index, resolve(field_a, plan))
+                    .and_then(|b| b.get_typed_value(row_index));
+                let vb = get_column(columns, field_index, resolve(field_b, plan))
+                    .and_then(|b| b.get_typed_value(row_index));
+                match (va, vb) {
+                    (Some(a), Some(b)) => compare_typed(&a, *op, &b),
+                    _ => false,
+                }
+            }
+            FilterPredicate::And(a, b) => {
+                a.check(columns, field_index, row_index, plan)
+                    && b.check(columns, field_index, row_index, plan)
+            }
+            FilterPredicate::Or(a, b) => {
+                a.check(columns, field_index, row_index, plan)
+                    || b.check(columns, field_index, row_index, plan)
+            }
+            FilterPredicate::Not(inner) => !inner.check(columns, field_index, row_index, plan),
         }
+    }
+
+}
+
+/// Resolve a filter field name to its output column name.
+fn resolve<'a>(field: &'a str, plan: &'a ExecutionPlan) -> &'a str {
+    plan.field_map.get(field).map_or(field, |s| s.as_str())
+}
+
+fn get_column<'a>(
+    columns: &'a [crate::columnar::ColumnBuilder],
+    field_index: &HashMap<String, usize>,
+    name: &str,
+) -> Option<&'a crate::columnar::ColumnBuilder> {
+    field_index.get(name).map(|&i| &columns[i])
+}
+
+/// Fetch a stored value formatted as a string for Equal/NotEqual checks.
+fn get_value(
+    columns: &[crate::columnar::ColumnBuilder],
+    field_index: &HashMap<String, usize>,
+    field: &str,
+    plan: &ExecutionPlan,
+    row_index: usize,
+) -> Option<String> {
+    get_column(columns, field_index, resolve(field, plan)).and_then(|b| b.get_filter_value(row_index))
+}
+
+/// Native-typed comparison with numeric promotion. Mixed Int64/Float64
+/// operands are widened to f64; any other type mismatch yields false.
+/// Nulls never reach here (checked by the caller).
+fn compare_typed(
+    a: &crate::columnar::TypedValue<'_>,
+    op: CompareOp,
+    b: &crate::columnar::TypedValue<'_>,
+) -> bool {
+    use crate::columnar::TypedValue as T;
+    // Numeric promotion: Int64 <-> Float64.
+    let num_pair: Option<(f64, f64)> = match (a, b) {
+        (T::Int64(x), T::Int64(y)) => Some((*x as f64, *y as f64)),
+        (T::Float64(x), T::Float64(y)) => Some((*x, *y)),
+        (T::Int64(x), T::Float64(y)) | (T::Float64(y), T::Int64(x)) => Some((*x as f64, *y)),
+        _ => None,
+    };
+    if let Some((x, y)) = num_pair {
+        return apply_op(op, x.partial_cmp(&y));
+    }
+    match (a, b) {
+        (T::Str(x), T::Str(y)) => apply_op(op, x.cmp(y).into()),
+        (T::Bool(x), T::Bool(y)) => apply_op(op, x.cmp(y).into()),
+        // Temporal types compare by their raw integer; mixed Date32/Timestamp
+        // or differing timestamp units are not comparable.
+        (T::Date32(x), T::Date32(y)) => apply_op(op, x.cmp(y).into()),
+        (T::Timestamp(x), T::Timestamp(y)) => apply_op(op, x.cmp(y).into()),
+        _ => false,
+    }
+}
+
+/// Apply an operator to an `Ordering`, treating `None` (NaN) as no-match.
+fn apply_op(op: CompareOp, ord: Option<std::cmp::Ordering>) -> bool {
+    use std::cmp::Ordering::*;
+    let Some(ord) = ord else { return false };
+    match op {
+        CompareOp::Gt => ord == Greater,
+        CompareOp::Lt => ord == Less,
+        CompareOp::Ge => ord != Less,
+        CompareOp::Le => ord != Greater,
+        CompareOp::Eq => ord == Equal,
+        CompareOp::Ne => ord != Equal,
     }
 }

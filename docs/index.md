@@ -11,8 +11,8 @@ separate packages. Install the engine plus the adapters you need.
 ## What rypipe is
 
 - A Rust workspace with two crates:
-  - [`rypipe-core`](./architecture.md#rypipe-core): the generic engine.
-  - [`rypipe-python`](./architecture.md#rypipe-python): PyO3 bindings and helper
+  - [`rypipe-core`](./architecture/): the generic engine (see [Architecture overview](./architecture/) for crate map).
+  - [`rypipe-python`](./architecture/#rypipe-python): PyO3 bindings and helper
     functions for adapter packages.
 - Zero-copy friendly: decoders emit borrowed strings; the engine copies only
   when necessary.
@@ -85,7 +85,8 @@ let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
 
 ## Guides
 
-- [Architecture](./architecture.md): how the pieces fit together.
+- [Architecture](./architecture/): how the pieces fit together (start with [Overview](./architecture/index.md), then [Engine](./architecture/engine.md), [Columnar](./architecture/columnar.md), [Plan](./architecture/plan.md), [Execution](./architecture/execution.md), [Data flow](./architecture/data-flow.md), [Storage](./architecture/storage.md), [Optimizations](./architecture/optimizations.md)).
+- [Why Python?](./why-python.md): why rypipe is Rust core plus Python surface, not pure Rust : the data driven case for the hybrid.
 - [Python API](./python-api.md): the `rypipe` package and `_rypipe` helpers.
 - [Rust API](./rust-api.md): using `rypipe-core` and writing custom adapters.
 - [Writing a format adapter](./writing-adapters.md): adding CSV, JSON, etc.

@@ -12,6 +12,12 @@ pub enum Value<'a> {
     Float64(f64),
     /// Boolean.
     Bool(bool),
+    /// Calendar date: days since the Unix epoch (Arrow `Date32`).
+    Date32(i32),
+    /// Point in time as a raw integer in the column's `TimeUnit`
+    /// (Arrow `Timestamp`). Adapters should declare the unit via
+    /// `field_types` so the raw integer is interpreted correctly.
+    Timestamp(i64),
     /// Explicit null / missing value.
     Null,
 }
