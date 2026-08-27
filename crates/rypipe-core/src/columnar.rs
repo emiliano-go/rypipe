@@ -65,6 +65,43 @@ impl StrColumn {
         }
     }
 
+    fn split_off(&mut self, n: usize) -> Self {
+        assert!(n <= self.len());
+        if n == 0 {
+            return Self::default();
+        }
+        if n == self.len() {
+            let other = std::mem::take(self);
+            self.offsets.push(0);
+            return other;
+        }
+        // n is prefix to drain; self retains suffix
+        let split_offset = self.offsets[n] as usize;
+        let mut other_data = Vec::with_capacity(split_offset);
+        other_data.extend_from_slice(&self.data[..split_offset]);
+        let mut other_offsets = Vec::with_capacity(n + 1);
+        other_offsets.extend_from_slice(&self.offsets[..=n]);
+        let mut other_validity = Vec::with_capacity(n);
+        other_validity.extend_from_slice(&self.validity[..n]);
+
+        // Adjust self: drop prefix
+        self.data.drain(..split_offset);
+        // Rebase offsets: subtract split_offset and drop first n
+        let mut new_offsets = Vec::with_capacity(self.validity.len() - n + 1);
+        new_offsets.push(0);
+        for &off in &self.offsets[n + 1..] {
+            new_offsets.push(off - split_offset as i32);
+        }
+        self.offsets = new_offsets;
+        self.validity.drain(..n);
+
+        Self {
+            data: other_data,
+            offsets: other_offsets,
+            validity: other_validity,
+        }
+    }
+
     fn len(&self) -> usize {
         self.validity.len()
     }
@@ -450,6 +487,47 @@ impl ColumnBuilder {
             ColumnBuilder::Date32(v) => v.len(),
             ColumnBuilder::Timestamp(_, v) => v.len(),
             ColumnBuilder::Dictionary { codes, .. } => codes.len(),
+        }
+    }
+
+    pub(crate) fn split_off(&mut self, n: usize) -> Self {
+        assert!(n <= self.len());
+        match self {
+            ColumnBuilder::String(s) => ColumnBuilder::String(s.split_off(n)),
+            ColumnBuilder::Int64(v) => {
+                let other = v[..n].to_vec();
+                v.drain(..n);
+                ColumnBuilder::Int64(other)
+            }
+            ColumnBuilder::Float64(v) => {
+                let other = v[..n].to_vec();
+                v.drain(..n);
+                ColumnBuilder::Float64(other)
+            }
+            ColumnBuilder::Boolean(v) => {
+                let other = v[..n].to_vec();
+                v.drain(..n);
+                ColumnBuilder::Boolean(other)
+            }
+            ColumnBuilder::Date32(v) => {
+                let other = v[..n].to_vec();
+                v.drain(..n);
+                ColumnBuilder::Date32(other)
+            }
+            ColumnBuilder::Timestamp(unit, v) => {
+                let other = v[..n].to_vec();
+                v.drain(..n);
+                ColumnBuilder::Timestamp(*unit, other)
+            }
+            ColumnBuilder::Dictionary { codes, dict, index } => {
+                let other_codes = codes[..n].to_vec();
+                codes.drain(..n);
+                ColumnBuilder::Dictionary {
+                    codes: other_codes,
+                    dict: dict.clone(),
+                    index: index.clone(),
+                }
+            }
         }
     }
 

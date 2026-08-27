@@ -146,6 +146,48 @@ where
             prefault,
         )
     }
+
+    /// Parse an in-memory byte slice in bounded-memory batches, calling
+    /// `consumer` per batch (streaming, constant memory).
+    pub fn read_bytes_stream_consumer<C>(
+        &self,
+        bytes: &[u8],
+        budget: MemoryBudget,
+        consumer: &mut C,
+    ) -> Result<()>
+    where
+        C: crate::consumer::BatchConsumer,
+    {
+        BoundedExecutor::new(budget).run_bytes_stream(
+            bytes,
+            &self.splitter,
+            self.parser.clone(),
+            self.plan.clone(),
+            consumer,
+        )
+    }
+
+    /// Parse a file in bounded-memory batches, calling `consumer` per batch
+    /// (streaming, constant memory).
+    pub fn read_path_stream_consumer<C>(
+        &self,
+        path: impl AsRef<Path>,
+        budget: MemoryBudget,
+        prefault: bool,
+        consumer: &mut C,
+    ) -> Result<()>
+    where
+        C: crate::consumer::BatchConsumer,
+    {
+        BoundedExecutor::new(budget).run_stream(
+            path.as_ref(),
+            &self.splitter,
+            self.parser.clone(),
+            self.plan.clone(),
+            prefault,
+            consumer,
+        )
+    }
 }
 
 #[cfg(test)]

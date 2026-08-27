@@ -259,7 +259,67 @@ def read_batches(
     pyarrow.RecordBatch
         One batch at a time, sized by the adapter (or ``batch_size``).
     """
-    table = read(path, memory=memory, **kwargs)
+    yield from iter_record_batches(path, memory=memory, batch_size=batch_size, **kwargs)
+
+
+def iter_record_batches(
+    path: str | os.PathLike[str],
+    *,
+    format: str | None = None,
+    adapter: Any | None = None,
+    memory: int | str = "64MiB",
+    batch_size: int | None = None,
+    **kwargs: Any,
+) -> Iterator[Any]:
+    """Stream a file into Arrow ``RecordBatch`` objects with constant memory.
+
+    Unlike ``read`` (which materializes a full ``pyarrow.Table``) or the old
+    ``read_batches`` (which also materialized), this yields each ``RecordBatch``
+    as soon as it is produced and drops it after the consumer returns. Peak
+    memory is ``memory`` + one batch + export buffer.
+
+    When ``batch_size`` is ``None`` (default) it is derived from ``memory``
+    and the estimated row size (like ``BoundedExecutor``). Pass ``batch_size=1``
+    for the smallest possible batches (one row per batch, ~1 KB) and the lowest
+    memory footprint — only feasible when the pipeline stays in Rust.
+
+    For the Python path, the per-batch ``pyarrow.RecordBatch`` object and the
+    interpreter overhead mean true 64 KB is only reachable from Rust via
+    ``BatchConsumer``. The Python generator is still bounded but a few MB.
+
+    Yields
+    ------
+    pyarrow.RecordBatch
+        One batch at a time.
+
+    Examples
+    --------
+    >>> import pyarrow.parquet as pq
+    >>> writer = pq.ParquetWriter("out.parquet", schema)
+    >>> for batch in rypipe.iter_record_batches("50GB.xml", format="crxml", memory="64KB", row_tag="Details"):
+    ...     writer.write_batch(batch)
+    >>> writer.close()
+    """
+    if adapter is not None:
+        if hasattr(adapter, "iter_record_batches"):
+            yield from adapter.iter_record_batches(str(path), memory=memory, batch_size=batch_size, **kwargs)  # type: ignore
+            return
+        # Fallback: adapter only has read()
+        table = adapter.read(str(path), **kwargs)
+        if batch_size is None:
+            yield from table.to_batches()
+        else:
+            yield from table.to_batches(max_chunksize=batch_size)
+        return
+
+    fmt = format if format is not None else _guess_format(path)
+    ad = _ADAPTERS.get(fmt)
+    if ad is not None and hasattr(ad, "iter_record_batches"):
+        yield from ad.iter_record_batches(str(path), memory=memory, batch_size=batch_size, **kwargs)  # type: ignore
+        return
+    # Generic fallback: use bounded read then split (still materializes, but works for any adapter)
+    table = read(path, format=fmt, **kwargs) if kwargs else read(path, format=fmt, **kwargs)
+    # If table is huge, this still materializes — the true streaming path requires adapter support.
     if batch_size is None:
         yield from table.to_batches()
     else:
