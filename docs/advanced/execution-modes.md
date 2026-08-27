@@ -1,14 +1,15 @@
 # Execution modes
 
-`rypipe` adapters can expose up to three execution strategies. Choosing the right one is usually the biggest single decision for memory and throughput.
+`rypipe` adapters can expose up to four execution strategies. Choosing the right one is the biggest single decision for memory and throughput.
 
-| Mode | Best for | Memory | Parallelism | Output |
-|------|----------|--------|-------------|--------|
-| `stream` | Huge files, unknown schema, row-at-a-time consumers | bounded by batch size | single-threaded parse | iterator / batched record batches |
-| `columnar` | Medium files that fit in RAM, table output | holds full table | single-threaded parse, vectorized builders | one `RecordBatch` |
-| `parallel` | Large files that fit in RAM, many cores | holds full table | chunked multi-threaded parse | one `RecordBatch` or `Vec<RecordBatch>` |
+| Mode | Memory | Parallelism | Speed (1 GB, 5800X) | Best for |
+|------|--------|-------------|---------------------|----------|
+| `columnar` | Full table in RAM | Single | 714 MB/s | <100 MB, single `Table`, `auto_dict` |
+| `parallel` | Full table in RAM | Multi-core | ~3 GB/s | >100 MB, fits RAM, max speed |
+| `bounded` (streaming) | Budget + one batch | Single | 625 MB/s 64KB | Huge files, 64KB–256 MB budget |
+| `parallel streaming` | Budget + small in-flight set | Multi-core | 1.5–2.5 GB/s (256 MB) | Huge files, ≥256 MB budget, speed + bounded |
 
-`auto` lets the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows; otherwise stream. Adapters should document their own heuristic because format split boundaries affect chunk safety.
+`auto` lets the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows and budget is large; otherwise bounded/parallel streaming. Adapters should document their own heuristic because format split boundaries affect chunk safety.
 
 ## Stream mode
 
@@ -60,6 +61,30 @@ Use parallel mode when:
 - the parser is CPU-bound (heavy XML, complex field extraction, many columns);
 - you can tolerate higher peak memory for shorter wall-clock time;
 - `auto_dict` and compare filters are off, so the fast path applies.
+
+## Parallel streaming mode
+
+Parallel streaming (`ParallelStreamingExecutor` `crates/rypipe-core/src/parallel_stream.rs`) parses chunks concurrently with bounded memory:
+
+1. `chunk_size = budget / (threads * 2)` (e.g. 256 MB / 16 threads → 8 MB/chunk, 2 chunks/thread → 256 MB peak).
+2. `Splitter::find_split_points` creates `num_chunks` ranges.
+3. Worker pool (`std::thread` or `rayon` `ThreadPool`) pulls `Range` + `seq` from a queue, parses into `TableBuilder`, sends `(seq, Result<RecordBatch>)` via `sync_channel(max_in_flight)` (backpressure).
+4. Coordinator orders by `seq` via `BTreeMap` pending and delivers to `BatchConsumer` in file order.
+
+Use parallel streaming when:
+
+- the file is large and you want bounded memory, but have ≥256 MB budget and multiple cores;
+- you need higher throughput than sequential streaming (`bounded` 625 MB/s) while avoiding full-table materialization (`parallel` 3 GB/s needs full RAM);
+- schema is fixed (first chunk defines schema, later chunks `unify_variants` or `Error::Merge`).
+
+Example:
+
+```python
+for batch in rypipe.iter_record_batches_parallel("huge.xml", memory="256MB", threads=8, format="crxml"):
+    writer.write_batch(batch)
+```
+
+Small budgets (`64KB`) are faster single-threaded; use `parallel streaming` for `≥256MB`.
 
 ## Auto engine selection
 

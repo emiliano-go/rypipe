@@ -8,6 +8,8 @@ HTML, or any other row-oriented format once you provide a small adapter.
 `rypipe` itself does **not** ship parsers for any format. Adapters live in
 separate packages. Install the engine plus the adapters you need.
 
+> **Origin:** `rypipe` was born as the engine inside [`crxml`](https://github.com/emiliano-go/crxml): a high-throughput Crystal Reports XML parser. The `crxml` adapter was the original idea and the first production user; the engine was then separated and abstracted into `rypipe` so any row-oriented format (CSV, JSON, XML, HTML, …) could reuse the same `Splitter` + `RecordParser` + `ColumnarSink` + `TableBuilder` + `ExecutionPlan` machinery. `crxml` now lives as a thin adapter crate (`crxml-core`) on top of `rypipe-core`.
+
 ## What rypipe is
 
 - A Rust workspace with two crates:

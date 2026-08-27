@@ -6,7 +6,7 @@
 
 Crystal Reports exports tabular data inside XML elements like `<Field Name="X"><Value>123</Value></Field>` and `<Text Name="Y"><TextValue>abc</TextValue></Text>`. `crxml` reads these exports and turns them into Arrow tables or DataFrames.
 
-On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6–3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, now also scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB (was 251/234 `quick-xml`), within 30% of columnar (was 174% gap). The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O — `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine.rs:16`, `row_dirty` `engine.rs:26`) keeps up without being the bottleneck.
+On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6–3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, now also scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB (was 251/234 `quick-xml`), within 30% of columnar (was 174% gap). The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O: `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine.rs:16`, `row_dirty` `engine.rs:26`) keeps up without being the bottleneck.
 
 ## How it fits into rypipe
 
@@ -72,7 +72,7 @@ impl Splitter for CrystalXmlSplitter {
 
 ### Record parser
 
-`CrystalXmlDecoder` implements `rypipe_core::RecordParser` in `src/xml/decoder.rs`. Since `crxml 1.2` it uses a hand-rolled `memchr`/`memmem` scanner `src/xml/scanner.rs` (not `quick_xml`) — the same scanner backs both the columnar and the super-optimized streaming path (`lib.rs:534` `RowParser`+`RowSink`+`scan_one_row` `scanner.rs:81`).
+`CrystalXmlDecoder` implements `rypipe_core::RecordParser` in `src/xml/decoder.rs`. Since `crxml 1.2` it uses a hand-rolled `memchr`/`memmem` scanner `src/xml/scanner.rs` (not `quick_xml`): the same scanner backs both the columnar and the super-optimized streaming path (`lib.rs:534` `RowParser`+`RowSink`+`scan_one_row` `scanner.rs:81`).
 
 For each row element it:
 
@@ -153,9 +153,9 @@ The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from
 2. **Find split points cheaply**: one `memmem` `splitter.rs:27` + `find_special_regions` `splitter.rs:61` with `is_empty` fast path beats byte-by-byte; `estimate_bytes_per_row` `splitter.rs:41` sizes `TableBuilder` `lib.rs:275`.
 3. **Handle boundary cases**: chunks can start inside a row; `scan_one_row` `scanner.rs:81` (`Recover` → `pos+1`) and `wants`-driven `find_close_after` keep parallel correct.
 4. **Borrow strings into the engine**: `Value::Str(&str)` slices via `utf8_unchecked` `scanner.rs:39` + conditional `&` `scanner.rs:662` avoids `Cow` alloc (94% of values are plain ASCII). `RowSink` `lib.rs:564` pushes directly without `TableBuilder` hash/arena for streaming.
-5. **Skip dropped fields in the scanner**: check `wants`/`resolve` *before* visiting `<Value>` children — `field_element` `scanner.rs:210` byte-jumps to `</Field>` via `Finder` (drop_all 4183 MB/s, 66% win).
+5. **Skip dropped fields in the scanner**: check `wants`/`resolve` *before* visiting `<Value>` children: `field_element` `scanner.rs:210` byte-jumps to `</Field>` via `Finder` (drop_all 4183 MB/s, 66% win).
 6. **Reuse the scanner for both engines**: columnar `scan_chunk` `scanner.rs:54` and streaming `scan_one_row` `scanner.rs:81` share `parse_row` `scanner.rs:73`, so one optimization benefits `stream`/`columnar`/`parallel`/`bounded`.
-7. **Measure first**: `perf` `scan_open_tag` 8.3% + `field_element` 8.6% + `push_field_resolved` 2.76% vs `rep_movs` 3% tells you `mmap` is 3% but scanner is 35% — focus there. `benchmarks/bench_extended.py` (104 benchmarks/file) covers all engines×sinks×pushdowns×chunk/bounded/batch/pipeline.
+7. **Measure first**: `perf` `scan_open_tag` 8.3% + `field_element` 8.6% + `push_field_resolved` 2.76% vs `rep_movs` 3% tells you `mmap` is 3% but scanner is 35%: focus there. `benchmarks/bench_extended.py` (104 benchmarks/file) covers all engines×sinks×pushdowns×chunk/bounded/batch/pipeline.
 8. **Register with `rypipe`**: thin `CrystalXMLAdapter` keeps `rypipe.read(format="crxml")` while Rust stays fast.
 
 ## Source
