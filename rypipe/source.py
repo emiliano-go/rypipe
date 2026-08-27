@@ -130,6 +130,26 @@ class Source(ABC):
             batch_size = self._batch_size
         yield from self.to_arrow().to_batches(max_chunksize=batch_size)
 
+    def iter_record_batches(
+        self, memory: int | str = "64MiB", batch_size: Optional[int] = None
+    ) -> Iterator["pa.RecordBatch"]:
+        """Yield ``RecordBatch`` objects with constant memory (streaming).
+
+        Unlike ``to_arrow()`` (which materializes a full table), this streams
+        via ``BatchConsumer`` and drops each batch after the consumer returns.
+        Peak is ``memory`` + one batch. Pass ``memory="64KB"`` and
+        ``batch_size=1`` for one-row batches (Rust-only 64 KB).
+
+        Subclasses that wrap a Rust `StreamingBatchIterator` (e.g. ``crxml``)
+        should override ``_iter_record_batches_stream`` to get true streaming;
+        otherwise this falls back to ``to_arrow().to_batches()``.
+        """
+        if hasattr(self, "_iter_record_batches_stream"):
+            yield from self._iter_record_batches_stream(memory, batch_size)  # type: ignore
+            return
+        # Fallback: materialize then split (still bounded during parse if adapter streams)
+        yield from self.to_arrow().to_batches(max_chunksize=batch_size or self._batch_size)
+
     def __iter__(self) -> Iterator[dict]:
         """Iterate rows as dicts."""
         for batch in self._iter_batches():

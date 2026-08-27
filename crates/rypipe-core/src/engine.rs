@@ -77,6 +77,36 @@ impl TableBuilder {
         }
     }
 
+    /// Split off the first `n` rows into a new `TableBuilder`.
+    ///
+    /// Leaves `n` rows in `self`'s remainder as `self - n`. Used for
+    /// 64KB streaming where a single file chunk may contain many more rows
+    /// than `rows_per_batch`.
+    pub(crate) fn split_off(&mut self, n: usize) -> Self {
+        assert!(n <= self.row_count, "split_off beyond row_count");
+        assert!(n > 0);
+        let mut other = Self {
+            columns: Vec::with_capacity(self.columns.len()),
+            field_index: self.field_index.clone(),
+            column_order: self.column_order.clone(),
+            row_count: n,
+            estimated_rows: n,
+            plan: self.plan.clone(),
+            row_dirty: vec![false; self.columns.len()],
+        };
+        for (idx, col) in self.columns.iter_mut().enumerate() {
+            let drain = col.split_off(n);
+            other.columns.push(drain);
+            // Remainder stays in self.columns[idx]
+            let _ = idx;
+        }
+        self.row_count -= n;
+        // row_dirty for self should be all false (no dirty in remainder yet)
+        self.row_dirty = vec![false; self.columns.len()];
+        // row_dirty for other is also false (just finished batch)
+        other
+    }
+
     /// Remove and return a column by name, fixing the Vec index map.
     /// Used by `merge::extend` to move builders out of the `other` table.
     pub(crate) fn take_column(&mut self, name: &str) -> Option<ColumnBuilder> {

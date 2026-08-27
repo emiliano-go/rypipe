@@ -107,3 +107,28 @@ class Pipeline:
                 batch = []
         if batch:
             yield from pa.Table.from_pylist(batch).to_batches()
+
+    def iter_record_batches(
+        self, memory: int | str = "64MiB", batch_size: Optional[int] = None
+    ):
+        """Yield ``RecordBatch`` objects with constant memory.
+
+        Streaming via ``BatchConsumer`` when the source and all stages are
+        fusable; otherwise falls back to ``to_arrow``.
+        """
+        # Try streaming via source if all stages are fusable
+        src = self._source
+        if hasattr(src, "iter_record_batches"):
+            try:
+                from .fusion import plan_split
+
+                plan_overrides, remaining = plan_split(self._stages)
+                if not remaining:
+                    yield from src.iter_record_batches(
+                        memory=memory, batch_size=batch_size, **(plan_overrides or {})
+                    )
+                    return
+            except Exception:
+                pass
+        # Fallback: materialize then split
+        yield from self.iter_arrow_batches(batch_size=batch_size)

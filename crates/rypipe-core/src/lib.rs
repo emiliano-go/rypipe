@@ -7,6 +7,7 @@
 pub mod arrow_export;
 pub mod bounded;
 pub mod columnar;
+pub mod consumer;
 pub mod decoder;
 pub mod engine;
 pub mod error;
@@ -15,10 +16,12 @@ pub mod merge;
 pub mod parallel;
 pub mod pipeline;
 pub mod plan;
+pub mod streaming;
 pub mod value;
 
 pub use arrow_export::apply_compare_filter;
 pub use bounded::MemoryBudget;
+pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 pub use decoder::{ColumnarSink, RecordParser, Splitter};
 pub use engine::TableBuilder;
 pub use error::{Error, Result};
@@ -26,4 +29,5 @@ pub use input::InputBuffer;
 pub use merge::engines_to_record_batches;
 pub use pipeline::Pipeline;
 pub use plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate};
+pub use streaming::StreamingBatchIterator;
 pub use value::Value;
