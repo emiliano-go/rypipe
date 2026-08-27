@@ -38,7 +38,11 @@ impl TableBuilder {
                 let idx = self.columns.len();
                 self.columns.push(builder);
                 self.field_index.insert(name.clone(), idx);
-                self.row_dirty.push(false);
+                // Ensure row_dirty has enough words for new column
+                let needed = (self.columns.len() + 63) / 64;
+                if self.row_dirty.len() < needed {
+                    self.row_dirty.push(0);
+                }
                 let order_idx = self.schema_insert_index(name);
                 self.column_order.insert(order_idx, name.clone());
             }

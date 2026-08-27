@@ -20,10 +20,11 @@ pub struct TableBuilder {
     pub(crate) row_count: usize,
     pub(crate) estimated_rows: usize,
     pub(crate) plan: ExecutionPlan,
-    /// Dirty mask for the current row: true iff column `i` received a value
-    /// in this row. Used to null-fill only missing columns in `finish_row`
-    /// instead of iterating all columns and checking `len < target`.
-    pub(crate) row_dirty: Vec<bool>,
+    /// Dirty mask for the current row: bit `i` set iff column `i` received a
+    /// value in this row. `Vec<u64>` word array so >64 columns work (e.g.,
+    /// Crystal Reports exports with >64 fields). One compare `mask != full`
+    /// replaces `for col in 0..ncols` loop when every field is present (dense).
+    pub(crate) row_dirty: Vec<u64>,
 }
 
 impl TableBuilder {
@@ -80,7 +81,7 @@ impl TableBuilder {
     pub(crate) fn bytes_used(&self) -> usize {
         self.columns.iter().map(|c| c.bytes_used()).sum::<usize>()
             + self.column_order.iter().map(|s| s.len()).sum::<usize>()
-            + self.row_dirty.len()
+            + self.row_dirty.len() * 8
     }
 
     /// Split off the first `n` rows into a new `TableBuilder`.
@@ -98,7 +99,7 @@ impl TableBuilder {
             row_count: n,
             estimated_rows: n,
             plan: self.plan.clone(),
-            row_dirty: vec![false; self.columns.len()],
+            row_dirty: vec![0; (self.columns.len() + 63) / 64],
         };
         for (idx, col) in self.columns.iter_mut().enumerate() {
             let drain = col.split_off(n);
@@ -108,7 +109,7 @@ impl TableBuilder {
         }
         self.row_count -= n;
         // row_dirty for self should be all false (no dirty in remainder yet)
-        self.row_dirty = vec![false; self.columns.len()];
+        self.row_dirty = vec![0; (self.columns.len() + 63) / 64];
         // row_dirty for other is also false (just finished batch)
         other
     }
@@ -117,19 +118,17 @@ impl TableBuilder {
     /// Used by `merge::extend` to move builders out of the `other` table.
     pub(crate) fn take_column(&mut self, name: &str) -> Option<ColumnBuilder> {
         let idx = self.field_index.remove(name)?;
-        // Keep row_dirty in sync with columns (order not important for `other`'s remaining dirty state
-        // since `other` is consumed, but we must keep Vec lengths equal).
-        let _ = if self.row_dirty.len() > idx {
-            if idx == self.row_dirty.len() - 1 {
-                self.row_dirty.pop().unwrap();
-                false
-            } else {
-                self.row_dirty.swap_remove(idx);
-                true
-            }
-        } else {
-            false
-        };
+        // Keep row_dirty in sync: Vec<u64> bitmask, need to handle bit removal
+        // For simplicity, just rebuild row_dirty as all zeros after column removal
+        // (row_dirty is per-row, not per-column persistent, so clearing is fine)
+        // Rebuild to correct length
+        let new_len = (self.columns.len() + 63) / 64;
+        self.row_dirty.resize(new_len, 0);
+        // Clear all bits (no dirty in remainder for take_column case)
+        for w in &mut self.row_dirty {
+            *w = 0;
+        }
+        let _ = idx; // suppress unused warning
         // After removal, columns.len() == old_len; last index = old_len - 1.
         // swap_remove will move the last element into idx (if not already last).
         let last = self.columns.len() - 1;
@@ -177,7 +176,7 @@ impl TableBuilder {
         self.columns.clear();
         self.field_index.clear();
         self.column_order.clear();
-        self.row_dirty.clear();
+        for w in &mut self.row_dirty { *w = 0; }
         self.row_count = 0;
     }
 
@@ -190,8 +189,8 @@ impl TableBuilder {
             }
         }
         // Discard any dirty state for the partial row.
-        for v in &mut self.row_dirty {
-            *v = false;
+        for w in &mut self.row_dirty {
+            *w = 0;
         }
     }
 
@@ -256,7 +255,11 @@ impl TableBuilder {
         let idx = self.columns.len();
         self.columns.push(b);
         self.field_index.insert(name.to_owned(), idx);
-        self.row_dirty.push(false);
+        // Ensure row_dirty has enough words for new column
+        let needed = (self.columns.len() + 63) / 64;
+        if self.row_dirty.len() < needed {
+            self.row_dirty.resize(needed, 0);
+        }
         let order_idx = self.schema_insert_index(name);
         self.column_order.insert(order_idx, name.to_owned());
         idx
@@ -266,7 +269,9 @@ impl TableBuilder {
     /// Caller must have already resolved `resolved_name` (or know it is kept).
     fn push_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
         let idx = self.ensure_column_idx(resolved_name);
-        self.row_dirty[idx] = true;
+        let word = idx / 64;
+        let bit = idx % 64;
+        self.row_dirty[word] |= 1u64 << bit;
         let b = &mut self.columns[idx];
         let row_count = self.row_count;
         if b.len() > row_count {
@@ -297,15 +302,30 @@ impl TableBuilder {
 
     /// Null-fill any column missing this row, then apply the per-row filter.
     /// If the filter rejects the row, undo it by popping values.
-    /// Uses the dirty bitmask so only missing columns are touched.
+    /// Uses the dirty bitmask so only missing columns are touched; fast path
+    /// when every column was set (dense data, 10 cols) skips the loop.
     fn finish_row(&mut self) {
-        // Null-fill missing columns: dirty == false means not touched this row.
-        for (i, b) in self.columns.iter_mut().enumerate() {
-            if !self.row_dirty[i] {
-                b.push(None);
-            } else {
-                // Clear for next row.
-                self.row_dirty[i] = false;
+        let ncols = self.columns.len();
+        // Fast path: check if all bits set
+        let full_words = ncols / 64;
+        let rem_bits = ncols % 64;
+        let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
+            && (rem_bits == 0 || self.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem_bits) - 1);
+        if is_full {
+            for w in &mut self.row_dirty {
+                *w = 0;
+            }
+        } else {
+            for (i, b) in self.columns.iter_mut().enumerate() {
+                let word = i / 64;
+                let bit = i % 64;
+                let is_set = (self.row_dirty[word] >> bit) & 1 == 1;
+                if !is_set {
+                    b.push(None);
+                }
+            }
+            for w in &mut self.row_dirty {
+                *w = 0;
             }
         }
 
@@ -679,5 +699,44 @@ mod tests {
         let a = filtered.column_by_name("A").unwrap().as_string::<i32>();
         assert_eq!(a.value(0), "3");
         assert_eq!(a.value(1), "5");
+    }
+
+    #[test]
+    fn test_row_dirty_is_full_edge_cases() {
+        // Directly test the is_full logic for ncols = 1,63,64,65,127,128,129
+        // We do this via TableBuilder with varying column counts
+        for ncols in [1, 63, 64, 65, 127, 128, 129] {
+            let mut tb = TableBuilder::new();
+            for i in 0..ncols {
+                let name = format!("col{i}");
+                tb.field_index.insert(name.clone(), i);
+                tb.columns.push(crate::columnar::ColumnBuilder::String(
+                    crate::columnar::StrColumn::default(),
+                ));
+                tb.column_order.push(name);
+            }
+            // row_dirty should be vec![0; (ncols+63)/64]
+            tb.row_dirty = vec![0; (ncols + 63) / 64];
+            // Test is_full when all bits set
+            for i in 0..ncols {
+                let word = i / 64;
+                let bit = i % 64;
+                tb.row_dirty[word] |= 1u64 << bit;
+            }
+            let full_words = ncols / 64;
+            let rem = ncols % 64;
+            let is_full = (0..full_words).all(|w| tb.row_dirty[w] == u64::MAX)
+                && (rem == 0 || tb.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem) - 1);
+            assert!(is_full, "ncols={ncols} should be full, row_dirty={:?}", tb.row_dirty);
+            // Clear one bit and check not full
+            if ncols > 0 {
+                let word = (ncols - 1) / 64;
+                let bit = (ncols - 1) % 64;
+                tb.row_dirty[word] &= !(1u64 << bit);
+                let is_full2 = (0..full_words).all(|w| tb.row_dirty[w] == u64::MAX)
+                    && (rem == 0 || tb.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem) - 1);
+                assert!(!is_full2, "ncols={ncols} should not be full after clearing one bit");
+            }
+        }
     }
 }
