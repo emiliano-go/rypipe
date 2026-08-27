@@ -94,14 +94,6 @@ impl ParallelStreamingExecutor {
         for _ in 0..n {
             let queue = std::sync::Arc::clone(&chunk_queue);
             let sender_clone: SyncSender<(usize, Result<RecordBatch>)> = sender.clone();
-            let splitter_clone = {
-                // Splitter is not Clone in trait, but we can box it? For now, require Clone.
-                // Workaround: use a dummy splitter that splits on fixed size if not cloneable.
-                // Instead, we clone via a closure: we need S: Clone, but &dyn Splitter is not Clone.
-                // For this initial version, we will split chunks upfront and workers just get Range + bytes slice.
-                // So no need for splitter in worker.
-                ()
-            };
             let parser_clone = parser.clone();
             let plan_clone = (*plan_arc).clone();
             let bytes_owned = bytes.to_vec(); // TODO: avoid clone for large files, use Arc<[u8]>

@@ -66,7 +66,7 @@ impl ParallelExecutor {
             })
             .collect();
 
-        let engines: Vec<TableBuilder> = results.into_iter().collect::<Result<_>>()?;
+        let mut engines: Vec<TableBuilder> = results.into_iter().collect::<Result<_>>()?;
 
         if engines.is_empty() {
             return Ok(Vec::new());
@@ -81,6 +81,45 @@ impl ParallelExecutor {
         // type mismatches instead of an opaque Arrow schema error.
         if !plan.auto_dict && schemas_consistent(&engines) {
             return engines_to_record_batches(engines, &plan);
+        }
+
+        // Incremental dict path for auto_dict: per-chunk upgrade in parallel,
+        // then unify dictionaries (tiny serial) and remap, staying on fast path.
+        if plan.auto_dict {
+            // Per-chunk upgrade in parallel (was serial after merge)
+            engines.par_iter_mut().for_each(|e| e.auto_dict_upgrade());
+            if schemas_consistent(&engines) {
+                // Check if any dict columns need unification (usually not, if seed covered)
+                // For now, try fast path; if dictionaries differ, fall through to merge
+                // TODO Phase 0 seed would make this usually identity; for now we check
+                let mut needs_unify = false;
+                for col_name in &engines[0].column_order.clone() {
+                    let first_idx = engines[0].field_index.get(col_name).copied();
+                    if let Some(idx) = first_idx {
+                        if engines[0].columns[idx].variant_key() == "dictionary" {
+                            // Check if all chunks have same dict for this column
+                            let first_dict = if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } = &engines[0].columns[idx] {
+                                dict
+                            } else { continue };
+                            for e in &engines[1..] {
+                                if let Some(&j) = e.field_index.get(col_name) {
+                                    if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } = &e.columns[j] {
+                                        if dict != first_dict {
+                                            needs_unify = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if needs_unify { break; }
+                        }
+                    }
+                }
+                if !needs_unify {
+                    return engines_to_record_batches(engines, &plan);
+                }
+                // If needs unify, fall through to merge path for now (will be handled by dict.rs unify in 8c)
+            }
         }
 
         // Merge path.
