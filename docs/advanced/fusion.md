@@ -39,9 +39,11 @@ pub struct ExecutionPlan {
     pub drop_fields: HashSet<String>,             // drop
     pub field_types: HashMap<String, FieldType>,  // cast
     pub dictionary_columns: HashSet<String>,      // explicit dict encoding
-    pub filter: Option<FilterPredicate>,          // per-row or post-reduce
+    pub filter: Option<FilterPredicate>,          // per-row (all kinds)
     pub schema_order: Vec<String>,                // output column order
     pub auto_dict: bool,                          // auto-dict upgrade
+    pub dict_threshold: Option<f64>,              // auto-dict ratio (default 0.05)
+    pub dict_max_size: Option<usize>,             // auto-dict max entries (default 256)
 }
 ```
 
@@ -54,7 +56,7 @@ Inside `TableBuilder`, every emitted field goes through this pipeline:
 1. `field_map` renames the raw field name.
 2. `drop_fields` checks the resolved name; if dropped, the field is ignored.
 3. `field_types` / `dictionary_columns` chooses the storage type.
-4. `filter` rejects rows during `end_row` (for `Equal`/`NotEqual`) or after assembly (for `Compare`).
+4. `filter` rejects rows during `end_row`.
 
 This order matters. A filter runs on the resolved name, so it must be written in post-rename terms. A cast type is attached to the resolved name as well.
 
@@ -67,9 +69,10 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 | `RenameFields` | `field_map` | Multiple renames merge into one map. |
 | `DropFields` | `drop_fields` | Merges as a set union. |
 | `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
-| `FilterRows` constant | `filter` | `Equal`/`NotEqual` on a constant string; evaluated during parse. |
+| `FilterRows` predicate | `filter` | Constant (`field`/`op`/`value`) with `==`/`!=`, or column-to-column (`field_a`/`op`/`field_b`); both are evaluated per-row during parse. |
+| `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` | `filter` | `And`, `Or`, `Not` trees built from the same leaf shapes; evaluated per-row with short circuiting; fully fusable. |
 
-`FilterRows` is fusable only when it uses a constant predicate: `field`, `op`, and `value` are all literals. `op` can be `==` or `!=` for in-parser filtering, or comparison operators (`<`, `<=`, `>`, `>=`) for post-assembly filtering with Arrow compute kernels.
+`FilterRows` is fusable when it uses a constant predicate (`field`, `op`, `value`) with `==` or `!=`, or a column-to-column predicate (`field_a`, `op`, `field_b`). `FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable; they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
 
 ## What is not fusable
 
@@ -77,7 +80,7 @@ Non-fusable stages still work, but they run over the Arrow table after the engin
 
 - Python callables (`lambda` or any callable stage).
 - Stateful transforms such as window or aggregate stages.
-- `FilterRows` with computed or non-constant values.
+- `FilterRows` wrapping a callable predicate (runtime-computed values).
 - Custom stages that do not implement `_plan_kwargs()`.
 
 When a non-fusable stage is present, the pipeline automatically falls back to a row stream or table transform path. The fusable prefix still runs in Rust; only the suffix runs in Python.
@@ -131,19 +134,18 @@ drop check (drop_fields)
 type selection (field_types / dictionary_columns)
     |
     v
-per-row filter (Equal / NotEqual)
+per-row filter (Equal / NotEqual / Compare / And / Or / Not)
     |
     v
-builder append
-    |
-    v
-post-assembly filter (Compare)
+builder append (Vec plus map, single hash, dirty bitmask)
     |
     v
 finish: sort by schema_order, auto-dict, Arrow export
 ```
 
-Because drop happens before type selection, you cannot cast a dropped field. Because per-row filter happens before the row is committed, rejected rows consume no Arrow storage.
+Because drop happens before type selection, you cannot cast a dropped field.
+Because every filter : including column-to-column comparisons : runs before the
+row is committed, rejected rows consume no Arrow storage.
 
 ## When fusion does not help
 
@@ -153,6 +155,7 @@ Fusion also cannot help when the workload is dominated by I/O. If the file is on
 
 ## Summary
 
-- Fuse `RenameFields`, `DropFields`, `CastTypes`, and constant `FilterRows` by implementing `_read_arrow(plan_overrides=...)`.
+- Fuse `RenameFields`, `DropFields`, `CastTypes`, and `FilterRows` predicates
+  (constant and column-to-column) by implementing `_read_arrow(plan_overrides=...)`.
 - Inspect `plan_overrides` to confirm that stages reach the Rust parser.
 - Non-fusable stages run after the engine; keep them out of the hot path when throughput matters.

@@ -116,6 +116,20 @@ class Source(ABC):
         for batch in self.to_arrow().to_batches(max_chunksize=batch_size):
             yield batch.to_pylist()
 
+    def iter_arrow_batches(
+        self, batch_size: Optional[int] = None
+    ) -> Iterator["pa.RecordBatch"]:
+        """Yield ``pyarrow.RecordBatch`` objects incrementally.
+
+        Note: batches are currently produced from the materialized table, so
+        memory is bounded during *parsing* (when the adapter streams) but a
+        full table is still held. Use :func:`rypipe.read_batches` with an
+        adapter that supports bounded-memory reads for lower peak memory.
+        """
+        if batch_size is None:
+            batch_size = self._batch_size
+        yield from self.to_arrow().to_batches(max_chunksize=batch_size)
+
     def __iter__(self) -> Iterator[dict]:
         """Iterate rows as dicts."""
         for batch in self._iter_batches():

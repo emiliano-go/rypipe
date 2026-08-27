@@ -1,5 +1,6 @@
 use arrow::array::{ArrayRef, AsArray, BooleanArray};
 use arrow::compute::filter_record_batch;
+use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cast::cast;
 use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow::datatypes::{DataType, Float64Type};
@@ -17,34 +18,67 @@ pub fn null_array(datatype: &DataType, len: usize) -> ArrayRef {
 ///
 /// This is evaluated entirely in Rust using `arrow::compute` comparison
 /// kernels and `filter_record_batch`.  No Python callable is invoked.
-/// Per-row `Equal`/`NotEqual` filters are already applied during row assembly
-/// and are a no-op here.
+///
+/// Per-row evaluation during parse (`FilterPredicate::check`) is
+/// authoritative: every executor path already applies the full predicate tree
+/// while assembling rows. This post-assembly pass therefore only re-applies
+/// trees made solely of `Compare` and `And` nodes (an idempotent recheck);
+/// any tree involving `Or`, `Not`, `Equal`, or `NotEqual` is returned
+/// unchanged so valid rows can never be dropped twice under different null
+/// semantics.
 pub fn apply_compare_filter(
     batch: RecordBatch,
     predicate: &FilterPredicate,
 ) -> Result<RecordBatch> {
-    let FilterPredicate::Compare {
-        field_a,
-        op,
-        field_b,
-    } = predicate
-    else {
+    if !is_pure_compare_tree(predicate) {
         return Ok(batch);
+    }
+
+    let mask = compare_mask(&batch, predicate)?;
+    let mask = match mask {
+        Some(m) => m,
+        None => return Ok(batch),
     };
-
-    let col_a = batch.column_by_name(field_a).ok_or_else(|| {
-        crate::Error::Plan(format!(
-            "compare filter references unknown column {field_a:?}"
-        ))
-    })?;
-    let col_b = batch.column_by_name(field_b).ok_or_else(|| {
-        crate::Error::Plan(format!(
-            "compare filter references unknown column {field_b:?}"
-        ))
-    })?;
-
-    let mask = compare_columns(col_a, col_b, *op)?;
     Ok(filter_record_batch(&batch, &mask)?)
+}
+
+/// True when the predicate tree contains only `Compare` and `And` nodes.
+fn is_pure_compare_tree(predicate: &FilterPredicate) -> bool {
+    match predicate {
+        FilterPredicate::Compare { .. } => true,
+        FilterPredicate::And(a, b) => is_pure_compare_tree(a) && is_pure_compare_tree(b),
+        _ => false,
+    }
+}
+
+/// Recursively evaluate a pure `Compare`/`And` tree into one boolean mask.
+/// Returns `None` for an empty conjunction (all rows pass).
+fn compare_mask(batch: &RecordBatch, predicate: &FilterPredicate) -> Result<Option<BooleanArray>> {
+    match predicate {
+        FilterPredicate::Compare { field_a, op, field_b } => {
+            let col_a = batch.column_by_name(field_a).ok_or_else(|| {
+                crate::Error::Plan(format!(
+                    "compare filter references unknown column {field_a:?}"
+                ))
+            })?;
+            let col_b = batch.column_by_name(field_b).ok_or_else(|| {
+                crate::Error::Plan(format!(
+                    "compare filter references unknown column {field_b:?}"
+                ))
+            })?;
+            Ok(Some(compare_columns(col_a, col_b, *op)?))
+        }
+        FilterPredicate::And(a, b) => {
+            let ma = compare_mask(batch, a)?;
+            let mb = compare_mask(batch, b)?;
+            Ok(match (ma, mb) {
+                (Some(x), Some(y)) => Some(and(&x, &y)?),
+                (Some(x), None) | (None, Some(x)) => Some(x),
+                (None, None) => None,
+            })
+        }
+        _ => Ok(None),
+    }
 }
 
 fn is_numeric(dt: &DataType) -> bool {

@@ -87,7 +87,20 @@ name = "rypipe on PyPI"
 "crxml Adapter" = "crxml-adapter.md"
 
 [[project.nav]]
-"Architecture" = "architecture.md"
+"Architecture" = [
+    "architecture/index.md",
+    { "Engine" = "architecture/engine.md" },
+    { "Columnar storage" = "architecture/columnar.md" },
+    { "Execution plan" = "architecture/plan.md" },
+    { "Decoder API" = "architecture/decoder.md" },
+    { "Execution" = "architecture/execution.md" },
+    { "Data flow" = "architecture/data-flow.md" },
+    { "Storage and export" = "architecture/storage.md" },
+    { "Optimizations" = "architecture/optimizations.md" },
+]
+
+[[project.nav]]
+"Why Python?" = "why-python.md"
 
 [[project.nav]]
 "Performance" = "performance.md"

@@ -14,42 +14,107 @@ use crate::Result;
 /// can feed it field/value events; at the end it produces an Arrow
 /// `RecordBatch`.
 pub struct TableBuilder {
-    pub(crate) columns: HashMap<String, ColumnBuilder>,
+    pub(crate) columns: Vec<ColumnBuilder>,
+    pub(crate) field_index: HashMap<String, usize>,
     pub(crate) column_order: Vec<String>,
     pub(crate) row_count: usize,
     pub(crate) estimated_rows: usize,
     pub(crate) plan: ExecutionPlan,
+    /// Dirty mask for the current row: true iff column `i` received a value
+    /// in this row. Used to null-fill only missing columns in `finish_row`
+    /// instead of iterating all columns and checking `len < target`.
+    pub(crate) row_dirty: Vec<bool>,
 }
 
 impl TableBuilder {
     pub fn new() -> Self {
         Self {
-            columns: HashMap::default(),
+            columns: Vec::new(),
+            field_index: HashMap::default(),
             column_order: Vec::new(),
             row_count: 0,
             estimated_rows: 0,
             plan: ExecutionPlan::new(),
+            row_dirty: Vec::new(),
         }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            columns: HashMap::default(),
+            columns: Vec::new(),
+            field_index: HashMap::default(),
             column_order: Vec::new(),
             row_count: 0,
             estimated_rows: cap,
             plan: ExecutionPlan::new(),
+            row_dirty: Vec::new(),
         }
     }
 
     pub fn with_plan(cap: usize, plan: ExecutionPlan) -> Self {
         Self {
-            columns: HashMap::default(),
+            columns: Vec::new(),
+            field_index: HashMap::default(),
             column_order: Vec::new(),
             row_count: 0,
             estimated_rows: cap,
             plan,
+            row_dirty: Vec::new(),
         }
+    }
+
+    /// Lookup a column by resolved name.
+    pub(crate) fn get_column(&self, name: &str) -> Option<&ColumnBuilder> {
+        self.field_index.get(name).map(|&i| &self.columns[i])
+    }
+
+    /// Mutable lookup by resolved name.
+    pub(crate) fn get_column_mut(&mut self, name: &str) -> Option<&mut ColumnBuilder> {
+        if let Some(&i) = self.field_index.get(name) {
+            Some(&mut self.columns[i])
+        } else {
+            None
+        }
+    }
+
+    /// Remove and return a column by name, fixing the Vec index map.
+    /// Used by `merge::extend` to move builders out of the `other` table.
+    pub(crate) fn take_column(&mut self, name: &str) -> Option<ColumnBuilder> {
+        let idx = self.field_index.remove(name)?;
+        // Keep row_dirty in sync with columns (order not important for `other`'s remaining dirty state
+        // since `other` is consumed, but we must keep Vec lengths equal).
+        let _ = if self.row_dirty.len() > idx {
+            if idx == self.row_dirty.len() - 1 {
+                self.row_dirty.pop().unwrap();
+                false
+            } else {
+                self.row_dirty.swap_remove(idx);
+                true
+            }
+        } else {
+            false
+        };
+        // After removal, columns.len() == old_len; last index = old_len - 1.
+        // swap_remove will move the last element into idx (if not already last).
+        let last = self.columns.len() - 1;
+        let col = if idx == last {
+            self.columns.pop().unwrap()
+        } else {
+            let col = self.columns.swap_remove(idx);
+            // The element that was at `last` is now at `idx`; fix its map entry.
+            let old_last = self.columns.len(); // == last, new len after pop/swap
+            // Find the key that pointed to old_last and repoint it to idx.
+            // We must not borrow field_index mutably while iterating, so clone the key first.
+            let moved_name = self
+                .field_index
+                .iter()
+                .find_map(|(k, &v)| if v == old_last { Some(k.clone()) } else { None });
+            if let Some(k) = moved_name {
+                self.field_index.insert(k, idx);
+            }
+            col
+        };
+        Some(col)
     }
 
     pub fn num_rows(&self) -> usize {
@@ -74,25 +139,34 @@ impl TableBuilder {
     /// Reset all data while preserving the plan and estimated rows.
     pub fn reset(&mut self) {
         self.columns.clear();
+        self.field_index.clear();
         self.column_order.clear();
+        self.row_dirty.clear();
         self.row_count = 0;
     }
 
     /// Truncate every column back to `row_count`, dropping any partial-row
     /// values from a mid-field EOF.  Idempotent.
     pub fn normalize(&mut self) {
-        for b in self.columns.values_mut() {
+        for b in &mut self.columns {
             while b.len() > self.row_count {
                 b.pop();
             }
         }
+        // Discard any dirty state for the partial row.
+        for v in &mut self.row_dirty {
+            *v = false;
+        }
     }
 
-    /// If `auto_dict` is set, upgrade low-cardinality string columns.
+    /// If `auto_dict` is set, upgrade low-cardinality string columns using the
+    /// plan's threshold/max-size tuning (defaults: 5% ratio, max size 256).
     pub fn auto_dict_upgrade(&mut self) {
         if self.plan.auto_dict {
-            for b in self.columns.values_mut() {
-                b.try_upgrade_to_dict(512);
+            let max_ratio = self.plan.dict_threshold.unwrap_or(0.05);
+            let max_size = self.plan.dict_max_size.unwrap_or(256);
+            for b in &mut self.columns {
+                b.try_upgrade_to_dict(512, max_ratio, max_size);
             }
         }
     }
@@ -130,18 +204,39 @@ impl TableBuilder {
         }
     }
 
-    fn ensure_column(&mut self, name: &str) {
-        if !self.columns.contains_key(name) {
-            let est = self.estimated_rows.max(64);
-            let col_type = self.plan.column_type(name);
-            let mut b = ColumnBuilder::with_capacity(est, &col_type);
-            for _ in 0..self.row_count {
-                b.push(None);
-            }
-            self.columns.insert(name.to_owned(), b);
-            let idx = self.schema_insert_index(name);
-            self.column_order.insert(idx, name.to_owned());
+    /// Ensure the column exists and return its Vec index.
+    /// Single hash lookup for the hot path; new columns are created and
+    /// inserted into `column_order` via `schema_insert_index`.
+    fn ensure_column_idx(&mut self, name: &str) -> usize {
+        if let Some(&idx) = self.field_index.get(name) {
+            return idx;
         }
+        let est = self.estimated_rows.max(64);
+        let col_type = self.plan.column_type(name);
+        let mut b = ColumnBuilder::with_capacity(est, &col_type);
+        for _ in 0..self.row_count {
+            b.push(None);
+        }
+        let idx = self.columns.len();
+        self.columns.push(b);
+        self.field_index.insert(name.to_owned(), idx);
+        self.row_dirty.push(false);
+        let order_idx = self.schema_insert_index(name);
+        self.column_order.insert(order_idx, name.to_owned());
+        idx
+    }
+
+    /// Push a field value without resolving renames/drops.
+    /// Caller must have already resolved `resolved_name` (or know it is kept).
+    fn push_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
+        let idx = self.ensure_column_idx(resolved_name);
+        self.row_dirty[idx] = true;
+        let b = &mut self.columns[idx];
+        let row_count = self.row_count;
+        if b.len() > row_count {
+            b.pop();
+        }
+        b.push_value(value);
     }
 
     /// Push a field value, resolving renames/drops and applying last-write-wins
@@ -161,29 +256,26 @@ impl TableBuilder {
             }
         };
 
-        self.ensure_column(resolved);
-        let row_count = self.row_count;
-        if let Some(b) = self.columns.get_mut(resolved) {
-            if b.len() > row_count {
-                b.pop();
-            }
-            b.push_value(value);
-        }
+        self.push_field_resolved(resolved, value);
     }
 
     /// Null-fill any column missing this row, then apply the per-row filter.
     /// If the filter rejects the row, undo it by popping values.
+    /// Uses the dirty bitmask so only missing columns are touched.
     fn finish_row(&mut self) {
-        let target = self.row_count + 1;
-        for b in self.columns.values_mut() {
-            while b.len() < target {
+        // Null-fill missing columns: dirty == false means not touched this row.
+        for (i, b) in self.columns.iter_mut().enumerate() {
+            if !self.row_dirty[i] {
                 b.push(None);
+            } else {
+                // Clear for next row.
+                self.row_dirty[i] = false;
             }
         }
 
         if let Some(ref filter) = self.plan.filter {
-            if !filter.check(&self.columns, self.row_count, &self.plan) {
-                for b in self.columns.values_mut() {
+            if !filter.check(&self.columns, &self.field_index, self.row_count, &self.plan) {
+                for b in &mut self.columns {
                     b.pop();
                 }
                 return;
@@ -214,7 +306,15 @@ impl ColumnarSink for TableBuilder {
     }
 
     fn wants(&self, name: &str) -> bool {
-        self.plan.resolve_field(name).is_some()
+        self.resolve(name).is_some()
+    }
+
+    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        self.plan.resolve_field(name)
+    }
+
+    fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
+        self.push_field_resolved(resolved_name, value);
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -222,7 +322,7 @@ impl ColumnarSink for TableBuilder {
 
         if self.column_order.is_empty() {
             let schema = Arc::new(Schema::empty());
-            return Ok(RecordBatch::try_new(schema, Vec::new())?);
+            return Ok(RecordBatch::new_empty(schema));
         }
 
         self.auto_dict_upgrade();
@@ -231,7 +331,7 @@ impl ColumnarSink for TableBuilder {
         let mut fields = Vec::with_capacity(self.column_order.len());
         let mut arrays = Vec::with_capacity(self.column_order.len());
         for name in &self.column_order {
-            if let Some(b) = self.columns.get(name) {
+            if let Some(b) = self.get_column(name) {
                 fields.push(ArrowField::new(name.as_str(), b.arrow_datatype(), true));
                 arrays.push(b.to_arrow_array()?);
             }
@@ -322,13 +422,8 @@ mod tests {
         let mut merged = TableBuilder::new();
         merged.extend(e1).unwrap();
         assert_eq!(merged.num_rows(), 1);
-        for (name, col) in &merged.columns {
-            assert_eq!(
-                col.len(),
-                merged.num_rows(),
-                "column {} length mismatch",
-                name
-            );
+        for col in &merged.columns {
+            assert_eq!(col.len(), merged.num_rows(), "column length mismatch");
         }
     }
 
@@ -353,7 +448,7 @@ mod tests {
     fn test_last_write_wins_duplicate_field() {
         let engine = parse_bytes(b"X=10 X=20\n", ExecutionPlan::new());
         assert_eq!(engine.num_rows(), 1);
-        let col = engine.columns.get("X").unwrap();
+        let col = engine.get_column("X").unwrap();
         assert_eq!(col.as_str_vec(), vec![Some("20".into())]);
     }
 
@@ -363,10 +458,10 @@ mod tests {
         plan.field_map.insert("X".to_string(), "Y".to_string());
         let engine = parse_bytes(b"X=hello\n", plan);
         assert_eq!(engine.num_rows(), 1);
-        assert!(engine.columns.contains_key("Y"));
-        assert!(!engine.columns.contains_key("X"));
+        assert!(engine.get_column("Y").is_some());
+        assert!(engine.get_column("X").is_none());
         assert_eq!(
-            engine.columns.get("Y").unwrap().as_str_vec(),
+            engine.get_column("Y").unwrap().as_str_vec(),
             vec![Some("hello".into())]
         );
     }
@@ -377,8 +472,8 @@ mod tests {
         plan.drop_fields.insert("X".to_string());
         let engine = parse_bytes(b"X=hello Y=world\n", plan);
         assert_eq!(engine.num_rows(), 1);
-        assert!(!engine.columns.contains_key("X"));
-        assert!(engine.columns.contains_key("Y"));
+        assert!(engine.get_column("X").is_none());
+        assert!(engine.get_column("Y").is_some());
     }
 
     #[test]
@@ -390,7 +485,7 @@ mod tests {
         });
         let engine = parse_bytes(b"X=10\nX=42\nX=30\n", plan);
         assert_eq!(engine.num_rows(), 2);
-        let col = engine.columns.get("X").unwrap();
+        let col = engine.get_column("X").unwrap();
         assert_eq!(col.as_str_vec(), vec![Some("10".into()), Some("30".into())]);
     }
 
@@ -403,7 +498,7 @@ mod tests {
         });
         let engine = parse_bytes(b"X=10\nX=20\nX=10\n", plan);
         assert_eq!(engine.num_rows(), 2);
-        let col = engine.columns.get("X").unwrap();
+        let col = engine.get_column("X").unwrap();
         assert_eq!(col.as_str_vec(), vec![Some("10".into()), Some("10".into())]);
     }
 
@@ -416,7 +511,7 @@ mod tests {
         });
         let engine = parse_bytes(b"X=10\nY=99\n", plan);
         assert_eq!(engine.num_rows(), 1);
-        let col = engine.columns.get("Y").unwrap();
+        let col = engine.get_column("Y").unwrap();
         assert_eq!(col.as_str_vec(), vec![Some("99".into())]);
     }
 
@@ -426,7 +521,7 @@ mod tests {
         plan.field_types.insert("X".to_string(), FieldType::Int64);
         let engine = parse_bytes(b"X=42\nX=bad\nX=100\n", plan);
         assert_eq!(engine.num_rows(), 3);
-        if let ColumnBuilder::Int64(v) = &engine.columns["X"] {
+        if let ColumnBuilder::Int64(v) = engine.get_column("X").unwrap() {
             assert_eq!(v, &vec![Some(42), None, Some(100)]);
         } else {
             panic!("expected Int64 builder");
@@ -438,7 +533,7 @@ mod tests {
         let mut plan = ExecutionPlan::new();
         plan.field_types.insert("X".to_string(), FieldType::Float64);
         let engine = parse_bytes(b"X=1.5\n", plan);
-        if let ColumnBuilder::Float64(v) = &engine.columns["X"] {
+        if let ColumnBuilder::Float64(v) = engine.get_column("X").unwrap() {
             assert!((v[0].unwrap() - 1.5).abs() < 1e-9);
         } else {
             panic!("expected Float64 builder");
@@ -451,7 +546,7 @@ mod tests {
         plan.dictionary_columns.insert("P".to_string());
         let engine = parse_bytes(b"P=Widget\nP=Gadget\nP=Widget\n", plan);
         assert_eq!(engine.num_rows(), 3);
-        if let ColumnBuilder::Dictionary { codes, dict, .. } = &engine.columns["P"] {
+        if let ColumnBuilder::Dictionary { codes, dict, .. } = engine.get_column("P").unwrap() {
             assert_eq!(dict.len(), 2);
             assert_eq!(codes, &vec![Some(0), Some(1), Some(0)]);
         } else {
@@ -468,15 +563,15 @@ mod tests {
         merged.extend(e2).unwrap();
 
         assert_eq!(
-            merged.columns["A"].as_str_vec(),
+            merged.get_column("A").unwrap().as_str_vec(),
             vec![Some("1".into()), Some("3".into()), None]
         );
         assert_eq!(
-            merged.columns["B"].as_str_vec(),
+            merged.get_column("B").unwrap().as_str_vec(),
             vec![Some("2".into()), None, Some("4".into())]
         );
         assert_eq!(
-            merged.columns["C"].as_str_vec(),
+            merged.get_column("C").unwrap().as_str_vec(),
             vec![None, None, Some("5".into())]
         );
     }
@@ -495,16 +590,32 @@ mod tests {
     }
 
     #[test]
-    fn test_extend_variant_mismatch_errors_not_panics() {
+    fn test_extend_string_dictionary_promotes_not_panics() {
         let mut e1 = parse_bytes(b"P=x\n", ExecutionPlan::new());
         let mut plan = ExecutionPlan::new();
         plan.dictionary_columns.insert("P".to_string());
         let e2 = parse_bytes(b"P=x\n", plan);
+        // Safe promotion: string + dictionary reconcile to dictionary.
+        e1.extend(e2).expect("String/Dictionary must reconcile");
+        assert!(matches!(
+            e1.get_column("P").unwrap(),
+            crate::columnar::ColumnBuilder::Dictionary { .. }
+        ));
+    }
+
+    #[test]
+    fn test_extend_irreconcilable_variants_error_not_panic() {
+        let mut e1 = parse_bytes(b"S=x\n", ExecutionPlan::new());
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("S".to_string(), FieldType::Int64);
+        let e2 = parse_bytes(b"S=7\n", plan);
         let result = e1.extend(e2);
-        assert!(
-            result.is_err(),
-            "String/Dictionary mismatch must return Err"
-        );
+        match result {
+            Err(crate::Error::Merge(msg)) => {
+                assert!(msg.contains("'S'"), "error should name the column: {msg}");
+            }
+            other => panic!("String/Int64 mismatch must return Merge error, got {other:?}"),
+        }
     }
 
     #[test]

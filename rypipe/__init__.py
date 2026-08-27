@@ -27,13 +27,21 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import _rypipe
 
 from .source import Adapter, Source
 from .pipeline import Pipeline
-from .stages import RenameFields, CastTypes, FilterRows, DropFields
+from .stages import (
+    CastTypes,
+    DropFields,
+    FilterRows,
+    FilterRowsAll,
+    FilterRowsAny,
+    FilterRowsNot,
+    RenameFields,
+)
 from .sinks import (
     collect,
     to_arrow,
@@ -51,11 +59,15 @@ __all__ = [
     "read",
     "read_par",
     "read_stream",
+    "read_batches",
     "register_adapter",
     "RenameFields",
     "DropFields",
     "CastTypes",
     "FilterRows",
+    "FilterRowsAny",
+    "FilterRowsAll",
+    "FilterRowsNot",
     "collect",
     "to_arrow",
     "to_csv",
@@ -226,3 +238,29 @@ def read_stream(
     `read` method. The adapter decides how to interpret it.
     """
     return read(path, memory=memory, **kwargs)
+
+
+def read_batches(
+    path: str | os.PathLike[str],
+    *,
+    memory: int | str = "64MiB",
+    batch_size: int | None = None,
+    **kwargs: Any,
+) -> Iterator[Any]:
+    """Read a file and yield ``pyarrow.RecordBatch`` objects incrementally.
+
+    Memory is bounded during parsing when the adapter honours ``memory``.
+    Note that batches are currently produced from a materialized table, so
+    peak memory is not yet fully incremental; a callback-based executor will
+    remove this limitation in a future release.
+
+    Yields
+    ------
+    pyarrow.RecordBatch
+        One batch at a time, sized by the adapter (or ``batch_size``).
+    """
+    table = read(path, memory=memory, **kwargs)
+    if batch_size is None:
+        yield from table.to_batches()
+    else:
+        yield from table.to_batches(max_chunksize=batch_size)

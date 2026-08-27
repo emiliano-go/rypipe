@@ -91,6 +91,33 @@ FilterRows(field_a="amount", op=">", field_b="threshold")
 
 Supported ops: `==`, `!=`, `>`, `<`, `>=`, `<=`.
 
+Boolean combinators (`FilterRowsAny`, `FilterRowsAll`, `FilterRowsNot`) are
+fusable and build predicate trees that are evaluated per-row inside the Rust
+parse loop:
+
+```python
+from rypipe import FilterRowsAny, FilterRowsAll, FilterRowsNot
+
+# OR, AND, NOT (keyword-form leaves only; callables are not fusable)
+FilterRowsAny(
+    FilterRows(field="status", op="==", value="active"),
+    FilterRows(field_a="age", op=">=", field_b="min_age"),
+)
+FilterRowsAll(
+    FilterRows(field="region", op="==", value="us"),
+    FilterRows(field="status", op="==", value="active"),
+)
+FilterRowsNot(FilterRows(field="flag", op="==", value="deleted"))
+
+# Chaining FilterRows stages is an implicit AND:
+pipeline = src | FilterRows(field="a", op="==", value="1") | FilterRows(field="b", op="==", value="2")
+# equivalent to FilterRowsAll(...)
+
+# Arbitrary nesting via the filter dict:
+filter={"or": [{"field": "status", "op": "==", "value": "active"}, {"not": {"field": "flag", "op": "==", "value": "deleted"}}]}
+filter={"and": [{"field": "a", "op": "==", "value": "1"}, {"field_a": "x", "op": ">", "field_b": "y"}]}
+```
+
 ### Pipeline sinks
 
 ```python
@@ -196,7 +223,9 @@ use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table}
 
 `execution_plan_from_kwargs` converts Python kwargs into a
 `rypipe_core::ExecutionPlan`. `record_batches_to_pyarrow_table` turns a slice of
-Arrow `RecordBatch`es into a single `pyarrow.Table`.
+Arrow `RecordBatch`es into a single `pyarrow.Table`;
+`record_batches_to_pyarrow_batches` exports them as a list of individual
+`pyarrow.RecordBatch` objects for streaming-style APIs.
 
 ## Plan kwargs
 
@@ -207,11 +236,13 @@ kwargs, which are passed through to the adapter.
 |-------|------|--------|
 | `rename` / `field_mapping` | `dict[str, str]` | Rename raw fields. |
 | `drop` / `drop_fields` | `list[str]` | Drop fields by resolved name. |
-| `fields` / `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, or `"string"`. |
+| `fields` / `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, `"string"`, `"date32"`, or `"timestamp"` (also `"timestamp[s]"`, `"timestamp[ms]"`, `"timestamp[us]"`, `"timestamp[ns]"`). |
 | `dictionary` / `dictionary_columns` | `list[str]` | Explicit dictionary encoding. |
-| `filter` | `dict` | Per-row or post-reduce filter (see below). |
+| `filter` | `dict` | Per-row filter (see below). |
 | `schema` | `list[str]` | Output column order. |
 | `auto_dict` | `bool` | Upgrade low-cardinality string columns to dictionary. |
+| `auto_dict_threshold` | `float` | Max distinct/row ratio for auto-dict (default `0.05`). |
+| `auto_dict_max_size` | `int` | Max dictionary entries for auto-dict (default `256`). |
 | `use_mmap` | `bool` | Memory-map the input file. |
 | `prefault` | `bool` | `MADV_WILLNEED` when mmap is enabled. |
 
@@ -224,16 +255,43 @@ filter={"field": "status", "op": "==", "value": "active"}
 filter={"field": "status", "op": "!=", "value": "archived"}
 ```
 
-Column-to-column comparison (evaluated after the table is assembled):
+Column-to-column comparison (evaluated per-row during parse with native-typed
+comparison; numeric columns promote Int64/Float64):
 
 ```python
 filter={"field_a": "amount", "op": ">", "field_b": "threshold"}
 ```
 
-Supported comparison ops: `>`, `<`, `>=`, `<=`, `==`, `!=`.
+Supported comparison ops: `>`, `<`, `>=`, `<=`, `==`, `!=`. Mismatched
+non-numeric types or null operands fail the row.
+
+Boolean combinators use the same leaf shapes above with
+`{"and": [spec, ...]}`, `{"or": [spec, ...]}`, and `{"not": spec}` and may be
+nested arbitrarily; evaluation is per-row with short-circuiting, so missing-
+field and type-mismatch behaviour of leaves is preserved (a negated missing
+field, for example, keeps the row).
+
+## Streaming batches
+
+```python
+import rypipe
+
+# Bounded-memory read yielding pyarrow.RecordBatch objects.
+for batch in rypipe.read_batches("huge.csv", memory="256MiB"):
+    process(batch)
+
+# Same, from a Source or Pipeline.
+src = MySource("huge.csv")
+for batch in src.iter_arrow_batches(batch_size=10_000):
+    process(batch)
+```
+
+`read_batches` and `iter_arrow_batches` yield Arrow record batches one at a
+time. Memory is bounded during parsing; batches are currently produced from a
+materialized table, so peak memory is not yet fully incremental.
 
 ## See also
 
 - [Rust API](./rust-api.md): the Rust engine and `Pipeline` API.
 - [Writing a format adapter](./writing-adapters.md): adding formats as separate packages.
-- [Architecture](./architecture.md): design overview.
+- [Architecture](./architecture/): design overview.

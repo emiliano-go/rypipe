@@ -1,11 +1,22 @@
 import importlib
 
-__all__ = ["RenameFields", "CastTypes", "FilterRows", "DropFields"]
+__all__ = [
+    "RenameFields",
+    "CastTypes",
+    "FilterRows",
+    "FilterRowsAny",
+    "FilterRowsAll",
+    "FilterRowsNot",
+    "DropFields",
+]
 
 _modules = {
     "RenameFields": ".rename",
     "CastTypes": ".cast",
     "FilterRows": ".filter",
+    "FilterRowsAny": ".filter",
+    "FilterRowsAll": ".filter",
+    "FilterRowsNot": ".filter",
     "DropFields": ".drop",
 }
 

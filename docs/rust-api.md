@@ -21,10 +21,12 @@ boilerplate of opening files and choosing an execution mode.
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
 // Import the adapter for your format from its own crate:
-use my_csv_adapter::{CsvSplitter, CsvDecoder};
+use my_csv_adapter::{CsvDecoder, CsvSplitter};
 
 fn main() -> rypipe_core::Result<()> {
-    let pipeline = Pipeline::new(CsvSplitter::new(), CsvDecoder::new())
+    let pipeline = Pipeline::new(CsvSplitter, CsvDecoder {
+        header: vec!["id".into(), "status".into(), "amount".into()],
+    })
         .with_plan(
             ExecutionPlan::new()
                 .rename("old_name", "new_name")
@@ -50,6 +52,14 @@ fn main() -> rypipe_core::Result<()> {
         false,
     )?;
 
+    // In-memory byte slices (useful for BytesIO, stdin buffers, or decompressed
+    // content) without file I/O.
+    let bytes = std::fs::read("data.csv")?;
+    let batch = pipeline.read_bytes(&bytes)?;
+    let batches = pipeline.read_bytes_par(&bytes, 8)?;
+    let batches =
+        pipeline.read_bytes_stream(&bytes, rypipe_core::MemoryBudget::new(500_000_000))?;
+
     Ok(())
 }
 ```
@@ -60,13 +70,16 @@ If you prefer to control every step, use `TableBuilder` directly:
 
 ```rust
 use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
-use my_csv_adapter::{CsvSplitter, CsvDecoder}; // separate adapter crate
+use my_csv_adapter::{CsvDecoder, CsvSplitter}; // separate adapter crate
+use std::path::Path;
 
 fn main() -> rypipe_core::Result<()> {
-    let input = InputBuffer::open("data.csv".as_ref(), false, false)?;
+    let input = InputBuffer::open(Path::new("data.csv"), false, false)?;
     let mut builder = TableBuilder::with_plan(1024, ExecutionPlan::new());
 
-    let decoder = CsvDecoder::new();
+    let decoder = CsvDecoder {
+        header: vec!["id".into(), "status".into(), "amount".into()],
+    };
     decoder.validate(input.as_slice())?;
     decoder.parse_chunk(input.as_slice(), &mut builder)?;
 
@@ -88,10 +101,25 @@ let plan = ExecutionPlan::new()
     .drop("junk")
     .type_as("amount", FieldType::Float64)
     .dictionary("status")
-    .filter_eq("status", "active")
-    .filter_compare("amount", CompareOp::Gt, "threshold")
-    .schema_order(["id", "status", "amount"])
-    .with_auto_dict(true);
+    // leaf filters; combine with And/Or/Not trees (see below)
+    .filter_eq("status", "active");
+
+// Filter trees from ExecutionPlan helpers or directly:
+
+let any = FilterPredicate::any(
+    FilterPredicate::Equal { field: "a".into(), value: "1".into() },
+    FilterPredicate::not(FilterPredicate::Equal { field: "b".into(), value: "2".into() }),
+);
+let all = FilterPredicate::all(
+    FilterPredicate::Compare { field_a: "amount".into(), op: CompareOp::Gt, field_b: "threshold".into() },
+    FilterPredicate::Equal { field: "status".into(), value: "active".into() },
+);
+
+let plan_with_tree = ExecutionPlan {
+    filter: Some(FilterPredicate::any(any, all)),
+    field_types: plan.field_types.clone(),
+    ..plan.clone()
+};
 ```
 
 You can still mutate the fields directly when you need to:
@@ -130,19 +158,22 @@ native typed values and skip string parsing.
 
 ```rust
 use rypipe_core::{parallel::ParallelExecutor, ExecutionPlan};
-use my_csv_adapter::{CsvSplitter, CsvDecoder}; // separate adapter crate
+use my_csv_adapter::{CsvDecoder, CsvSplitter}; // separate adapter crate
 
 let bytes = std::fs::read("data.csv")?;
-let splitter = CsvSplitter::new();
-let decoder = CsvDecoder::new();
+let splitter = CsvSplitter;
+let decoder = CsvDecoder {
+    header: vec!["id".into(), "status".into(), "amount".into()],
+};
 let plan = ExecutionPlan::new();
 
 let batches = ParallelExecutor::parse(&bytes, &splitter, decoder, plan, 8)?;
 ```
 
 `ParallelExecutor::parse` returns a `Vec<RecordBatch>`. The fast path emits one
-batch per chunk; the merge path returns a single merged batch when `auto_dict`
-or a `Compare` filter is enabled.
+batch per chunk with a unified schema; the merge path returns a single merged
+batch when `auto_dict` is enabled or chunks disagree irreconcilably on column
+types.
 
 ## Bounded parse (low level)
 
@@ -151,16 +182,46 @@ use rypipe_core::{
     bounded::{BoundedExecutor, MemoryBudget},
     ExecutionPlan,
 };
-use my_csv_adapter::{CsvSplitter, CsvDecoder}; // separate adapter crate
+use my_csv_adapter::{CsvDecoder, CsvSplitter}; // separate adapter crate
 use std::path::Path;
 
-let splitter = CsvSplitter::new();
-let decoder = CsvDecoder::new();
+let splitter = CsvSplitter;
+let decoder = CsvDecoder {
+    header: vec!["id".into(), "status".into(), "amount".into()],
+};
 let batches = BoundedExecutor::new(MemoryBudget::new(500_000_000))
     .run(Path::new("huge.csv"), &splitter, decoder, ExecutionPlan::new(), false)?;
+
+// From an in-memory buffer (transparent decompression in InputBuffer::open
+// also lands here when the file was compressed; see Cargo features below).
+let bytes = std::fs::read("huge.csv")?;
+let batches = BoundedExecutor::new(MemoryBudget::new(500_000_000))
+    .run_bytes(&bytes, &splitter, decoder, ExecutionPlan::new())?;
 ```
 
-## Apply a post-reduce Compare filter
+## Transparent compressed-file decoding
+
+File inputs are auto-detected by magic bytes and transparently decompressed
+when the corresponding Cargo feature is enabled:
+
+```toml
+[dependencies]
+rypipe-core = { version = "0.1", features = ["gzip"] } # or "zstd", "lz4", "compress-all"
+```
+
+Supported magics: gzip `1f 8b`, zstd `28 b5 2f fd`, lz4 frame `04 22 4d 18`.
+Detection happens in `InputBuffer::open`; decompressed bytes are served from
+memory (`InputBuffer::Owned`) across all execution modes.
+
+## Apply a Compare filter to an existing batch
+
+Pure column-comparison filters (``Compare`` and ``And`` of ``Compare``) are
+normally evaluated per-row during parsing but can also be applied to an
+already-built ``RecordBatch``. Trees involving ``Or``, ``Not``, ``Equal``, or
+``NotEqual`` are no-ops at this layer (per-row evaluation is already
+authoritative) so valid rows can never be dropped twice. To filter an
+already-built ``RecordBatch`` use
+``apply_compare_filter``:
 
 ```rust
 use rypipe_core::{apply_compare_filter, FilterPredicate, CompareOp};
@@ -178,11 +239,16 @@ let filtered = apply_compare_filter(batch, &predicate)?;
 `rypipe-python` provides Rust helper functions for adapter crates:
 
 ```rust
-use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
+use rypipe_python::{
+    execution_plan_from_kwargs, record_batch_to_pyarrow,
+    record_batches_to_pyarrow_batches, record_batches_to_pyarrow_table,
+};
 
 // Inside a PyO3 function:
 let plan = execution_plan_from_kwargs(...)?;
 let table = record_batches_to_pyarrow_table(py, &batches)?;
+// Or export batches individually for streaming-style APIs:
+let batch_list = record_batches_to_pyarrow_batches(py, &batches)?;
 ```
 
 For a pure-Rust program you do not need this; `arrow::record_batch::RecordBatch`
@@ -214,5 +280,5 @@ impl ColumnarSink for RowCounter {
 ## See also
 
 - [Writing a format adapter](./writing-adapters.md): implement `Splitter` and `RecordParser` in a separate package.
-- [Architecture](./architecture.md): how the pieces fit together.
+- [Architecture](./architecture/): how the pieces fit together.
 - [Python API](./python-api.md): the Python bindings over the same engine.

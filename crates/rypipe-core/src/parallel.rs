@@ -2,6 +2,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::arrow_export::apply_compare_filter;
 use crate::decoder::{split_points_to_ranges, RecordParser, Splitter};
@@ -17,8 +18,9 @@ pub struct ParallelExecutor;
 impl ParallelExecutor {
     /// Parse `bytes` in parallel using `splitter` and `parser`.
     ///
-    /// * Fast path (no `auto_dict` and no `Compare` filter): each chunk is
-    ///   exported as its own `RecordBatch` and a vector of batches is returned.
+    /// * Fast path (no `auto_dict`): each chunk is exported as its own
+    ///   `RecordBatch` and a vector of batches is returned. Row filters
+    ///   (`Equal`/`NotEqual`/`Compare`) are applied during parse per chunk.
     /// * Merge path: chunk builders are merged sequentially so that
     ///   auto-dictionary upgrades see the full cardinality, then a single
     ///   `RecordBatch` is returned inside the vector.
@@ -49,10 +51,17 @@ impl ParallelExecutor {
                     parser.parse_chunk(&bytes[range.clone()], &mut sink)?;
                     Ok(sink)
                 }))
-                .unwrap_or_else(|_| {
-                    Err(crate::Error::Merge(
-                        "worker panicked during parallel parse".to_string(),
-                    ))
+                .unwrap_or_else(|payload| {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    Err(crate::Error::Merge(format!(
+                        "worker panicked during parallel parse: {msg}"
+                    )))
                 })
             })
             .collect();
@@ -65,13 +74,12 @@ impl ParallelExecutor {
 
         let plan = engines[0].plan.clone();
 
-        // Fast path: no auto_dict and no post-reduce Compare filter.
-        if !plan.auto_dict
-            && !matches!(
-                plan.filter,
-                Some(crate::plan::FilterPredicate::Compare { .. })
-            )
-        {
+        // Fast path: no auto_dict and all chunks agree on column types.
+        // Compare filters are evaluated per-row during parse, so they do not
+        // force the merge path. Schema-inconsistent chunks fall through to the
+        // merge path, which surfaces a precise `Error::Merge` for irreconcilable
+        // type mismatches instead of an opaque Arrow schema error.
+        if !plan.auto_dict && schemas_consistent(&engines) {
             return engines_to_record_batches(engines, &plan);
         }
 
@@ -86,4 +94,26 @@ impl ParallelExecutor {
         }
         Ok(vec![batch])
     }
+}
+
+/// True when every chunk builder agrees on each column's storage variant.
+/// Chunks missing a column entirely are fine (the export path null-fills).
+fn schemas_consistent(engines: &[TableBuilder]) -> bool {
+    let Some(first) = engines.first() else {
+        return true;
+    };
+    let base: HashMap<&str, &str> = first
+        .field_index
+        .iter()
+        .map(|(name, &idx)| (name.as_str(), first.columns[idx].variant_key()))
+        .collect();
+    engines[1..].iter().all(|e| {
+        e.field_index.iter().all(|(name, &idx)| {
+            let b = &e.columns[idx];
+            match base.get(name.as_str()) {
+                Some(key) => *key == b.variant_key(),
+                None => true,
+            }
+        })
+    })
 }

@@ -14,7 +14,9 @@ use pyo3::prelude::*;
 mod export;
 mod plan_kwargs;
 
-pub use export::{record_batch_to_pyarrow, record_batches_to_pyarrow_table};
+pub use export::{
+    record_batch_to_pyarrow, record_batches_to_pyarrow_batches, record_batches_to_pyarrow_table,
+};
 pub use plan_kwargs::execution_plan_from_kwargs;
 
 // Typed exceptions so callers can distinguish failure classes:
