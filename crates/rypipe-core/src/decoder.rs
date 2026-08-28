@@ -111,6 +111,15 @@ pub trait ColumnarSink {
         true
     }
 
+    /// Whether the current row has been rejected by the filter and the scanner
+    /// should skip the remainder of the row. Used for predicate-first
+    /// deferred materialization: once `Fail`, the scanner can byte-jump to
+    /// `</Details>` without further field scanning. Default false.
+    #[inline]
+    fn row_rejected(&self) -> bool {
+        false
+    }
+
     /// Finalize the sink into an Arrow `RecordBatch`.
     fn finish(&mut self) -> Result<RecordBatch>;
 }

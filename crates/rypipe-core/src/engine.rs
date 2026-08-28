@@ -9,13 +9,29 @@ pub static RESOLVE_AND_PUT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 use arrow::datatypes::{Field as ArrowField, Schema};
 use arrow::record_batch::RecordBatch;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+
+use smallvec::SmallVec;
+
 
 use crate::columnar::ColumnBuilder;
 use crate::decoder::ColumnarSink;
-use crate::plan::ExecutionPlan;
+use crate::plan::{ExecutionPlan, FilterPredicate};
 use crate::value::Value;
 use crate::Result;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PredicateState {
+    Undecided,
+    Pass,
+    Fail,
+}
+
+impl Default for PredicateState {
+    fn default() -> Self {
+        Self::Undecided
+    }
+}
 
 /// Generic columnar table builder.  Implements `ColumnarSink` so any decoder
 /// can feed it field/value events; at the end it produces an Arrow
@@ -37,6 +53,16 @@ pub struct TableBuilder {
     /// would otherwise be silent). Discovery samples 16×2 MiB for >128 MiB.
     pub(crate) frozen: Option<std::sync::Arc<crate::schema::FrozenSchema>>,
     pub(crate) unknown_error: Option<String>,
+    /// Row buffer for predicate-first deferred materialization. When `plan.filter`
+    /// is Some, fields are buffered per row and predicate is evaluated
+    /// incrementally; on `Fail` the row is discarded without touching columns.
+    /// `SmallVec<[(String,Value<'static>);8]>` borrows chunk buffer (no copy) via
+    /// transmute; `Value<'static>` is safe because chunk `bytes` outlives the row.
+    pub(crate) buffered: SmallVec<[(String, Value<'static>); 32]>,
+    pub(crate) buffered_state: PredicateState,
+    /// Set of output column names that appear in the filter predicate. Computed
+    /// lazily from `plan.filter` on first use. `None` means no filter.
+    pub(crate) predicate_fields: Option<HashSet<String>>,
 }
 
 impl TableBuilder {
@@ -51,6 +77,9 @@ impl TableBuilder {
             row_dirty: Vec::new(),
             frozen: None,
             unknown_error: None,
+            buffered: SmallVec::new(),
+            buffered_state: PredicateState::Undecided,
+            predicate_fields: None,
         }
     }
 
@@ -65,6 +94,9 @@ impl TableBuilder {
             row_dirty: Vec::new(),
             frozen: None,
             unknown_error: None,
+            buffered: SmallVec::new(),
+            buffered_state: PredicateState::Undecided,
+            predicate_fields: None,
         }
     }
 
@@ -75,10 +107,17 @@ impl TableBuilder {
             column_order: Vec::new(),
             row_count: 0,
             estimated_rows: cap,
-            plan,
+            plan: plan.clone(),
             row_dirty: Vec::new(),
             frozen: None,
             unknown_error: None,
+            buffered: SmallVec::new(),
+            buffered_state: if plan.filter.is_some() {
+                PredicateState::Undecided
+            } else {
+                PredicateState::Pass
+            },
+            predicate_fields: None,
         }
     }
 
@@ -148,6 +187,9 @@ impl TableBuilder {
             row_dirty: vec![0; (self.columns.len() + 63) / 64],
             frozen: self.frozen.clone(),
             unknown_error: None,
+            buffered: SmallVec::new(),
+            buffered_state: PredicateState::Undecided,
+            predicate_fields: self.predicate_fields.clone(),
         };
         for (idx, col) in self.columns.iter_mut().enumerate() {
             let drain = col.split_off(n);
@@ -240,6 +282,10 @@ impl TableBuilder {
         self.column_order.clear();
         for w in &mut self.row_dirty { *w = 0; }
         self.row_count = 0;
+        self.buffered.clear();
+        self.buffered_state = PredicateState::Undecided;
+        // Keep frozen/predicate_fields (per builder, not per row)
+        self.unknown_error = None;
     }
 
     /// Truncate every column back to `row_count`, dropping any partial-row
@@ -453,6 +499,318 @@ impl TableBuilder {
 
         self.row_count += 1;
     }
+
+    // Predicate-first helpers
+    fn ensure_predicate_fields(&mut self) {
+        if self.predicate_fields.is_some() || self.plan.filter.is_none() {
+            return;
+        }
+        let mut set = HashSet::default();
+        if let Some(ref f) = self.plan.filter.clone() {
+            Self::collect_predicate_fields(f, &self.plan, &mut set);
+        }
+        self.predicate_fields = Some(set);
+    }
+
+    fn collect_predicate_fields(
+        pred: &FilterPredicate,
+        plan: &ExecutionPlan,
+        set: &mut HashSet<String>,
+    ) {
+        match pred {
+            FilterPredicate::Equal { field, .. } | FilterPredicate::NotEqual { field, .. } => {
+                if let Some(resolved) = plan.resolve_field(field) {
+                    set.insert(resolved.to_string());
+                } else {
+                    // Field is dropped but predicate still references it (via plan.filter
+                    // before drop?); still need to track raw?
+                    set.insert(field.clone());
+                }
+            }
+            FilterPredicate::Compare { field_a, field_b, .. } => {
+                for f in [field_a, field_b] {
+                    if let Some(resolved) = plan.resolve_field(f) {
+                        set.insert(resolved.to_string());
+                    } else {
+                        set.insert(f.clone());
+                    }
+                }
+            }
+            FilterPredicate::And(a, b) | FilterPredicate::Or(a, b) => {
+                Self::collect_predicate_fields(a, plan, set);
+                Self::collect_predicate_fields(b, plan, set);
+            }
+            FilterPredicate::Not(inner) => Self::collect_predicate_fields(inner, plan, set),
+        }
+    }
+
+    fn is_predicate_field(&mut self, name: &str) -> bool {
+        self.ensure_predicate_fields();
+        if let Some(ref set) = self.predicate_fields {
+            set.contains(name)
+        } else {
+            false
+        }
+    }
+
+    fn get_buffered_value(&self, field: &str) -> Option<&Value<'static>> {
+        let resolved = self.plan.resolve_field(field)?;
+        for (n, v) in self.buffered.iter().rev() {
+            if n == resolved {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    fn get_buffered_str(&self, field: &str) -> Option<String> {
+        match self.get_buffered_value(field) {
+            Some(Value::Str(s)) => Some(s.to_string()),
+            Some(Value::Int64(i)) => Some(i.to_string()),
+            Some(Value::Float64(f)) => Some(f.to_string()),
+            Some(Value::Bool(b)) => Some(b.to_string()),
+            Some(v) => Some(format!("{:?}", v)),
+            None => None,
+        }
+    }
+
+    fn evaluate_predicate_state(&self) -> PredicateState {
+        let Some(ref pred) = self.plan.filter else {
+            return PredicateState::Pass;
+        };
+        Self::eval_predicate(pred, self)
+    }
+
+    fn eval_predicate(pred: &FilterPredicate, tb: &TableBuilder) -> PredicateState {
+        match pred {
+            FilterPredicate::Equal { field, value } => {
+                match tb.get_buffered_str(field) {
+                    Some(actual) => {
+                        if actual == *value {
+                            PredicateState::Pass
+                        } else {
+                            PredicateState::Fail
+                        }
+                    }
+                    None => PredicateState::Undecided,
+                }
+            }
+            FilterPredicate::NotEqual { field, value } => {
+                match tb.get_buffered_str(field) {
+                    Some(actual) => {
+                        if actual != *value {
+                            PredicateState::Pass
+                        } else {
+                            PredicateState::Fail
+                        }
+                    }
+                    None => PredicateState::Undecided,
+                }
+            }
+            FilterPredicate::Compare { field_a, op, field_b } => {
+                let va = tb.get_buffered_value(field_a);
+                let vb = tb.get_buffered_value(field_b);
+                match (va, vb) {
+                    (Some(a), Some(b)) => {
+                        let ord = match (a, b) {
+                            (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => Some(ai.cmp(bi).into()),
+                            (crate::value::Value::Float64(af), crate::value::Value::Float64(bf)) => af.partial_cmp(bf),
+                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => (*ai as f64).partial_cmp(bf),
+                            (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => af.partial_cmp(&(*bi as f64)),
+                            (crate::value::Value::Str(a), crate::value::Value::Str(b)) => Some(a.cmp(b).into()),
+                            (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => Some(a.cmp(b).into()),
+                            _ => {
+                                let av = format!("{:?}", a);
+                                let bv = format!("{:?}", b);
+                                Some(av.cmp(&bv).into())
+                            }
+                        };
+                        let pass = match op {
+                            crate::plan::CompareOp::Gt => ord == Some(std::cmp::Ordering::Greater),
+                            crate::plan::CompareOp::Lt => ord == Some(std::cmp::Ordering::Less),
+                            crate::plan::CompareOp::Ge => ord.map_or(false, |o| o != std::cmp::Ordering::Less),
+                            crate::plan::CompareOp::Le => ord.map_or(false, |o| o != std::cmp::Ordering::Greater),
+                            crate::plan::CompareOp::Eq => ord == Some(std::cmp::Ordering::Equal),
+                            crate::plan::CompareOp::Ne => ord != Some(std::cmp::Ordering::Equal),
+                        };
+                        if pass {
+                            PredicateState::Pass
+                        } else {
+                            PredicateState::Fail
+                        }
+                    }
+                    _ => PredicateState::Undecided,
+                }
+            }
+            FilterPredicate::And(a, b) => {
+                let sa = Self::eval_predicate(a, tb);
+                let sb = Self::eval_predicate(b, tb);
+                match (sa, sb) {
+                    (PredicateState::Fail, _) | (_, PredicateState::Fail) => PredicateState::Fail,
+                    (PredicateState::Pass, PredicateState::Pass) => PredicateState::Pass,
+                    _ => PredicateState::Undecided,
+                }
+            }
+            FilterPredicate::Or(a, b) => {
+                let sa = Self::eval_predicate(a, tb);
+                let sb = Self::eval_predicate(b, tb);
+                match (sa, sb) {
+                    (PredicateState::Pass, _) | (_, PredicateState::Pass) => PredicateState::Pass,
+                    (PredicateState::Fail, PredicateState::Fail) => PredicateState::Fail,
+                    _ => PredicateState::Undecided,
+                }
+            }
+            FilterPredicate::Not(inner) => match Self::eval_predicate(inner, tb) {
+                PredicateState::Pass => PredicateState::Fail,
+                PredicateState::Fail => PredicateState::Pass,
+                PredicateState::Undecided => PredicateState::Undecided,
+            },
+        }
+    }
+
+    fn drain_buffered(&mut self, pass: bool) {
+        if pass {
+            // Deduplicate last-write-wins: keep last occurrence per column
+            let mut seen: HashMap<String, Value<'static>> = HashMap::default();
+            for (name, val) in self.buffered.drain(..) {
+                seen.insert(name, val);
+            }
+            for (name, val) in seen {
+                // Check frozen unknown (as in push_field_resolved)
+                if self.frozen.is_some() && !self.field_index.contains_key(&name) {
+                    if self.unknown_error.is_none() {
+                        let frozen = self.frozen.as_ref().unwrap();
+                        self.unknown_error = Some(format!(
+                            "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
+                            name,
+                            frozen.num_columns(),
+                            frozen.is_exact()
+                        ));
+                    }
+                    continue;
+                }
+                let idx = self.ensure_column_idx(&name);
+                let word = idx / 64;
+                let bit = idx % 64;
+                // Ensure row_dirty covers idx
+                let needed = (self.columns.len() + 63) / 64;
+                if self.row_dirty.len() < needed {
+                    self.row_dirty.resize(needed, 0);
+                }
+                self.row_dirty[word] |= 1u64 << bit;
+                let b = &mut self.columns[idx];
+                if b.len() > self.row_count {
+                    b.pop();
+                }
+                b.push_value(val);
+            }
+            // Null-fill missing columns and handle filter/dirty, then increment row_count
+            // Reuse finish_row's null-fill logic but without re-checking filter (already passed)
+            let ncols = self.columns.len();
+            let full_words = ncols / 64;
+            let rem_bits = ncols % 64;
+            let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
+                && (rem_bits == 0
+                    || self.row_dirty.get(full_words).copied().unwrap_or(0)
+                        == (1u64 << rem_bits) - 1);
+            if is_full {
+                for w in &mut self.row_dirty {
+                    *w = 0;
+                }
+            } else {
+                for (i, b) in self.columns.iter_mut().enumerate() {
+                    let word = i / 64;
+                    let bit = i % 64;
+                    let is_set = (self.row_dirty[word] >> bit) & 1 == 1;
+                    if !is_set {
+                        b.push(None);
+                    }
+                }
+                for w in &mut self.row_dirty {
+                    *w = 0;
+                }
+            }
+            self.row_count += 1;
+        } else {
+            // Fail: discard buffered fields, no row increment, clear dirty
+            self.buffered.clear();
+            for w in &mut self.row_dirty {
+                *w = 0;
+            }
+            // Do not increment row_count, columns already have correct len (no push)
+        }
+        // Ensure buffered is cleared for next row (drain already cleared if pass, else clear)
+        if !self.buffered.is_empty() {
+            self.buffered.clear();
+        }
+        self.buffered_state = PredicateState::Undecided;
+    }
+
+    fn evaluate_against_null(&self) -> PredicateState {
+        // At end_row, any predicate field still missing is NULL.
+        // For Equal with missing => Fail, NotEqual with missing => Pass (as per old finish_row check where get_value returns None)
+        // For Compare with missing => Fail.
+        // We can reuse eval_predicate which returns Undecided for missing, then map Undecided to Pass/Fail per leaf semantics.
+        let Some(ref pred) = self.plan.filter else {
+            return PredicateState::Pass;
+        };
+        Self::eval_predicate_with_null(pred, self)
+    }
+
+    fn eval_predicate_with_null(pred: &FilterPredicate, tb: &TableBuilder) -> PredicateState {
+        match pred {
+            FilterPredicate::Equal { field, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if actual == *value {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Fail, // missing => None != Some(value) => Fail for Equal
+            },
+            FilterPredicate::NotEqual { field, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if actual != *value {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Pass, // missing => None != Some(value) => Pass
+            },
+            FilterPredicate::Compare { .. } => {
+                // Compare with missing => Fail (as per old check where get_typed_value returns None)
+                match Self::eval_predicate(pred, tb) {
+                    PredicateState::Undecided => PredicateState::Fail,
+                    other => other,
+                }
+            }
+            FilterPredicate::And(a, b) => {
+                let sa = Self::eval_predicate_with_null(a, tb);
+                let sb = Self::eval_predicate_with_null(b, tb);
+                match (sa, sb) {
+                    (PredicateState::Fail, _) | (_, PredicateState::Fail) => PredicateState::Fail,
+                    (PredicateState::Pass, PredicateState::Pass) => PredicateState::Pass,
+                    _ => PredicateState::Undecided, // Should not happen after null mapping, but treat as Fail?
+                }
+            }
+            FilterPredicate::Or(a, b) => {
+                let sa = Self::eval_predicate_with_null(a, tb);
+                let sb = Self::eval_predicate_with_null(b, tb);
+                match (sa, sb) {
+                    (PredicateState::Pass, _) | (_, PredicateState::Pass) => PredicateState::Pass,
+                    (PredicateState::Fail, PredicateState::Fail) => PredicateState::Fail,
+                    _ => PredicateState::Fail,
+                }
+            }
+            FilterPredicate::Not(inner) => match Self::eval_predicate_with_null(inner, tb) {
+                PredicateState::Pass => PredicateState::Fail,
+                PredicateState::Fail => PredicateState::Pass,
+                PredicateState::Undecided => PredicateState::Fail, // Not Undecided -> Fail?
+            },
+        }
+    }
 }
 
 impl Default for TableBuilder {
@@ -464,17 +822,73 @@ impl Default for TableBuilder {
 impl ColumnarSink for TableBuilder {
     #[inline]
     fn begin_row(&mut self) {
-        // Row boundaries are tracked by `row_count`; no state to set up.
+        if self.plan.filter.is_some() {
+            self.buffered.clear();
+            self.buffered_state = PredicateState::Undecided;
+            self.ensure_predicate_fields();
+        }
+        // Row boundaries are tracked by `row_count`; no state to set up for non-filter path.
     }
 
     #[inline]
     fn put_field(&mut self, name: &str, value: Value<'_>) {
-        self.push_field(name, value);
+        if self.plan.filter.is_none() {
+            self.push_field(name, value);
+            return;
+        }
+        // Buffered path: resolve and buffer
+        let resolved = match self.plan.resolve_field(name) {
+            Some(r) => r.to_owned(),
+            None => return,
+        };
+        // Check frozen unknown (as in push_field_resolved)
+        if self.frozen.is_some() && !self.field_index.contains_key(&resolved) {
+            // Need to check if resolved is in frozen's column set; field_index already has all frozen cols
+            // If not in field_index, it's unknown (since frozen pre-sized)
+            // But we haven't yet checked predicate_fields; unknown should error even if not predicate
+            // For now, treat as unknown and error on drain (or immediately)
+            // We set unknown_error here to surface early
+            if self.unknown_error.is_none() {
+                if let Some(ref frozen) = self.frozen {
+                    if !frozen.column_names().iter().any(|n| n.as_ref() == resolved) {
+                        self.unknown_error = Some(format!(
+                            "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
+                            resolved,
+                            frozen.num_columns(),
+                            frozen.is_exact()
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
+        let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
+        if let Some(pos) = self.buffered.iter().position(|(n, _)| n == &resolved) {
+            self.buffered[pos].1 = val_static;
+        } else {
+            self.buffered.push((resolved.clone(), val_static));
+        }
+        // If this field is a predicate column, re-evaluate
+        if self.is_predicate_field(&resolved) {
+            self.buffered_state = self.evaluate_predicate_state();
+            // Short-circuit: if Fail, we could keep buffering but will discard at end_row;
+            // The scanner will check row_rejected() to skip remainder.
+        }
     }
 
     #[inline]
     fn end_row(&mut self) {
-        self.finish_row();
+        if self.plan.filter.is_none() {
+            self.finish_row();
+            return;
+        }
+        // Buffered path
+        if self.buffered_state == PredicateState::Undecided {
+            // Evaluate against NULL for missing predicate columns
+            self.buffered_state = self.evaluate_against_null();
+        }
+        let pass = self.buffered_state == PredicateState::Pass;
+        self.drain_buffered(pass);
     }
 
     #[inline]
@@ -489,22 +903,115 @@ impl ColumnarSink for TableBuilder {
 
     #[inline]
     fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
-        self.push_field_resolved(resolved_name, value);
+        if self.plan.filter.is_none() {
+            self.push_field_resolved(resolved_name, value);
+            return;
+        }
+        // Buffered path for already-resolved name (no rename lookup)
+        if self.frozen.is_some() && !self.field_index.contains_key(resolved_name) {
+            if let Some(ref frozen) = self.frozen {
+                if !frozen.column_names().iter().any(|n| n.as_ref() == resolved_name) {
+                    if self.unknown_error.is_none() {
+                        self.unknown_error = Some(format!(
+                            "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
+                            resolved_name,
+                            frozen.num_columns(),
+                            frozen.is_exact()
+                        ));
+                    }
+                    return;
+                }
+            }
+        }
+        let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
+        if let Some(pos) = self.buffered.iter().position(|(n, _)| n == resolved_name) {
+            self.buffered[pos].1 = val_static;
+        } else {
+            self.buffered.push((resolved_name.to_string(), val_static));
+        }
+        if self.is_predicate_field(resolved_name) {
+            self.buffered_state = self.evaluate_predicate_state();
+        }
     }
 
     #[inline]
     fn resolve_and_put(&mut self, name: &str, value: Value<'_>) {
         #[cfg(feature = "profiling")]
         RESOLVE_AND_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
+        if self.plan.filter.is_none() {
+            if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+                self.push_field_resolved(name, value);
+            } else {
+                if let Some(resolved) = self.plan.resolve_field(name) {
+                    let owned = resolved.to_owned();
+                    self.push_field_resolved(&owned, value);
+                }
+            }
+            return;
+        }
+        // Buffered path
         if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
-            // Common case: no renames/drops, push directly
-            self.push_field_resolved(name, value);
+            // No rename/drop, raw == resolved
+            let resolved = name;
+            if self.frozen.is_some() && !self.field_index.contains_key(resolved) {
+                if let Some(ref frozen) = self.frozen {
+                    if !frozen.column_names().iter().any(|n| n.as_ref() == resolved) {
+                        if self.unknown_error.is_none() {
+                            self.unknown_error = Some(format!(
+                                "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
+                                resolved,
+                                frozen.num_columns(),
+                                frozen.is_exact()
+                            ));
+                        }
+                        return;
+                    }
+                }
+            }
+            let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
+            if let Some(pos) = self.buffered.iter().position(|(n, _)| n == resolved) {
+                self.buffered[pos].1 = val_static;
+            } else {
+                self.buffered.push((resolved.to_string(), val_static));
+            }
+            if self.is_predicate_field(resolved) {
+                self.buffered_state = self.evaluate_predicate_state();
+            }
         } else {
             if let Some(resolved) = self.plan.resolve_field(name) {
                 let owned = resolved.to_owned();
-                self.push_field_resolved(&owned, value);
+                // Check frozen
+                if self.frozen.is_some() && !self.field_index.contains_key(&owned) {
+                    if let Some(ref frozen) = self.frozen {
+                        if !frozen.column_names().iter().any(|n| n.as_ref() == owned) {
+                            if self.unknown_error.is_none() {
+                                self.unknown_error = Some(format!(
+                                    "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
+                                    owned,
+                                    frozen.num_columns(),
+                                    frozen.is_exact()
+                                ));
+                            }
+                            return;
+                        }
+                    }
+                }
+                let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
+                if let Some(pos) = self.buffered.iter().position(|(n, _)| n == &owned) {
+                    self.buffered[pos].1 = val_static;
+                } else {
+                    self.buffered.push((owned.clone(), val_static));
+                }
+                if self.is_predicate_field(&owned) {
+                    self.buffered_state = self.evaluate_predicate_state();
+                }
             }
         }
+    }
+
+    #[inline]
+    fn row_rejected(&self) -> bool {
+        self.plan.filter.is_some() && self.buffered_state == PredicateState::Fail
     }
 
     #[inline]
