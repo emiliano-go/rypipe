@@ -6,8 +6,8 @@
 |------|--------|-------------|---------------------|----------|
 | `columnar` | Full table in RAM | Single | 714 MB/s | <100 MB, single `Table`, `auto_dict` |
 | `parallel` | Full table in RAM | Multi-core | ~3 GB/s | >100 MB, fits RAM, max speed |
-| `bounded` (streaming) | Budget + one batch | Single | 625 MB/s 64KB | Huge files, 64KB–256 MB budget |
-| `parallel streaming` | Budget + small in-flight set | Multi-core | 1.5–2.5 GB/s (256 MB) | Huge files, ≥256 MB budget, speed + bounded |
+| `bounded` (streaming) | Budget + one batch | Single | 625 MB/s 64KB | Huge files, 64KB-256 MB budget |
+| `parallel streaming` | Budget + small in-flight set | Multi-core | 1.5-2.5 GB/s (256 MB) | Huge files, ≥256 MB budget, speed + bounded |
 
 `auto` lets the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows and budget is large; otherwise bounded/parallel streaming. Adapters should document their own heuristic because format split boundaries affect chunk safety.
 

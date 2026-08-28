@@ -61,7 +61,7 @@ A pure-Rust engine would still need to export Arrow : and then every downstream 
 
 * `field_element` / `scan_open_tag` ~17% : XML scanning (Rust)
 * `push_field_resolved` 2.76% + `field_index.get` 1.64% : column dispatch (Rust, Vec+map after 0.1.2)
-* `rep_movs` 3–10% : the un-avoidable `file → page cache` copy
+* `rep_movs` 3-10% : the un-avoidable `file → page cache` copy
 
 Python time is **orchestration only**: `ExecutionPlan` construction, `Pipeline` `|` chaining, and the final `Table.to_pandas()` conversion : microseconds per row. The GIL is released for the entire `Pipeline::read_*` call (`py.allow_threads` in `crates/rypipe-python`), so multi-core parsing is not gated.
 
@@ -113,7 +113,7 @@ Modern data work is **data-driven development**: the shape of the output dictate
 3. **Freeze the pipeline** (commit the `ExecutionPlan`).
 4. **Scale it** (same pipeline via `read_stream` with `memory="1GiB"` on 100 GB of files).
 
-Steps 1–2 demand a REPL. Step 4 demands Rust speed. rypipe gives both from the same object. A pure-Rust engine would optimize step 4 by pessimizing steps 1–3 : the 80% of time where humans, not CPUs, are the bottleneck.
+Steps 1-2 demand a REPL. Step 4 demands Rust speed. rypipe gives both from the same object. A pure-Rust engine would optimize step 4 by pessimizing steps 1-3 : the 80% of time where humans, not CPUs, are the bottleneck.
 
 > **Analogy:** `polars` didn’t win by being “pure Rust.” It won by putting a Rust engine behind `pl.DataFrame` : a Python/Rust hybrid that feels like pandas but runs at Rust speed. `rypipe` does the same for ingestion.
 
@@ -129,7 +129,7 @@ Yes. See [Rust API](./rust-api.md) and [Writing a format adapter](./writing-adap
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.
 
 **“Will you maintain both APIs?”**
-Yes. `rypipe-core` is versioned independently (`0.1.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10–3.14. Breaking adapter APIs bumps the minor version.
+Yes. `rypipe-core` is versioned independently (`0.1.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
 
 ---
 
