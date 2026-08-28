@@ -103,18 +103,32 @@ fn current_rss_kb() -> Option<usize> {
     None
 }
 
-fn run(name: &str, input_bytes: usize, f: impl FnOnce() -> Result<usize>) {
-    let start = Instant::now();
-    let rows = f().expect("benchmark failed");
-    let elapsed = start.elapsed();
-    let secs = elapsed.as_secs_f64();
-    let rows_per_sec = rows as f64 / secs;
-    let mb_per_sec = input_bytes as f64 / secs / 1_000_000.0;
+fn median_of(n: usize, f: impl Fn() -> Result<usize>) -> (f64, f64, usize) {
+    let mut times: Vec<f64> = Vec::with_capacity(n);
+    let mut last_rows = 0;
+    for _ in 0..n {
+        let start = Instant::now();
+        last_rows = f().expect("benchmark failed");
+        times.push(start.elapsed().as_secs_f64());
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = times[n / 2];
+    let mean = times.iter().sum::<f64>() / n as f64;
+    let stdev = (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+    let cov = stdev / mean;
+    (med, cov, last_rows)
+}
+
+fn run(name: &str, input_bytes: usize, rounds: usize, f: impl Fn() -> Result<usize>) {
+    let (med, cov, rows) = median_of(rounds, &f);
+    let rows_per_sec = rows as f64 / med;
+    let mb_per_sec = input_bytes as f64 / med / 1_000_000.0;
     let memory = current_rss_kb()
         .map(|kb| format!("{:6.0} MB", kb as f64 / 1024.0))
         .unwrap_or_else(|| "  N/A  ".to_string());
+    let cov_pct = cov * 100.0;
     println!(
-        "{name:24} {secs:8.3}s  {rows:10} rows  {:8.0} rows/s  {:6.1} MB/s  RSS {memory}",
+        "{name:24} {med:8.3}s median ({cov_pct:.1}% CoV)  {rows:10} rows  {:8.0} rows/s  {:6.1} MB/s  RSS {memory}",
         rows_per_sec, mb_per_sec
     );
 }
@@ -136,22 +150,25 @@ fn main() -> Result<()> {
             .type_as("count", FieldType::Int64),
     );
 
-    run("single-thread", bytes, || {
+    let rounds = 7;
+    println!("\n({rounds} rounds each, median reported)\n");
+
+    run("single-thread", bytes, rounds, || {
         let batch = pipeline.read_path(&path, false, false)?;
         Ok(batch.num_rows())
     });
 
-    run("parallel (4 chunks)", bytes, || {
+    run("parallel (4 chunks)", bytes, rounds, || {
         let batches = pipeline.read_path_par(&path, 4, false, false)?;
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())
     });
 
-    run("parallel (8 chunks)", bytes, || {
+    run("parallel (8 chunks)", bytes, rounds, || {
         let batches = pipeline.read_path_par(&path, 8, false, false)?;
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())
     });
 
-    run("bounded (64 MiB)", bytes, || {
+    run("bounded (64 MiB)", bytes, rounds, || {
         let batches =
             pipeline.read_path_stream(&path, MemoryBudget::new(64 * 1024 * 1024), false)?;
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())

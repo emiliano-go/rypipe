@@ -8,7 +8,7 @@ use std::path::Path;
 use arrow::record_batch::RecordBatch;
 
 use crate::arrow_export::apply_compare_filter;
-use crate::consumer::{BatchConsumer, CollectingConsumer};
+use crate::consumer::CollectingConsumer;
 use crate::decoder::{split_points_to_ranges, RecordParser, Splitter};
 use crate::engine::TableBuilder;
 use crate::input::InputBuffer;
@@ -100,7 +100,7 @@ impl BoundedExecutor {
             let mut chunk_engine =
                 TableBuilder::with_plan((chunk.len() / 512).max(64), plan.clone());
             parser.validate(chunk_bytes)?;
-            parser.parse_chunk(chunk_bytes, &mut chunk_engine)?;
+            parser.parse_chunk_generic(chunk_bytes, &mut chunk_engine)?;
 
             let chunk_rows = chunk_engine.num_rows();
             batch_engine.extend(chunk_engine)?;
@@ -158,7 +158,7 @@ impl BoundedExecutor {
     where
         P: RecordParser + Clone + Send + Sync,
     {
-        let mut batches = Vec::new();
+        let batches = Vec::new();
         let mut consumer = CollectingConsumer(batches);
         self.run_bytes_stream(bytes, splitter, parser, plan, &mut consumer)?;
         Ok(consumer.0)
@@ -214,7 +214,7 @@ impl BoundedExecutor {
     where
         P: RecordParser + Clone + Send + Sync,
     {
-        let mut batches = Vec::new();
+        let batches = Vec::new();
         let mut consumer = CollectingConsumer(batches);
         self.run_stream(path, splitter, parser, plan, prefault, &mut consumer)?;
         Ok(consumer.0)
@@ -260,7 +260,7 @@ impl BoundedExecutor {
             let mut chunk_engine =
                 TableBuilder::with_plan((chunk.len() / 512).max(64), plan.clone());
             parser.validate(&chunk_buf)?;
-            parser.parse_chunk(&chunk_buf, &mut chunk_engine)?;
+            parser.parse_chunk_generic(&chunk_buf, &mut chunk_engine)?;
 
             let chunk_rows = chunk_engine.num_rows();
             batch_engine.extend(chunk_engine)?;

@@ -110,6 +110,11 @@ impl StrColumn {
         self.data.len() + self.offsets.len() * 4 + self.validity.len()
     }
 
+    /// Total allocated capacity in bytes (data + offsets + validity).
+    fn capacity_bytes(&self) -> usize {
+        self.data.capacity() + self.offsets.capacity() * 4 + self.validity.capacity()
+    }
+
     fn get(&self, i: usize) -> Option<&str> {
         if !*self.validity.get(i)? {
             return None;
@@ -504,6 +509,21 @@ impl ColumnBuilder {
             ColumnBuilder::Timestamp(_, v) => v.len() * 8,
             ColumnBuilder::Dictionary { codes, dict, .. } => {
                 codes.len() * 4 + dict.len() * 16 + codes.capacity() * 0
+            }
+        }
+    }
+
+    /// Total allocated capacity in bytes.
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        match self {
+            ColumnBuilder::String(s) => s.capacity_bytes(),
+            ColumnBuilder::Int64(v) => v.capacity() * 8,
+            ColumnBuilder::Float64(v) => v.capacity() * 8,
+            ColumnBuilder::Boolean(v) => v.capacity(),
+            ColumnBuilder::Date32(v) => v.capacity() * 4,
+            ColumnBuilder::Timestamp(_, v) => v.capacity() * 8,
+            ColumnBuilder::Dictionary { codes, dict, .. } => {
+                codes.capacity() * 4 + dict.capacity() * 16
             }
         }
     }
