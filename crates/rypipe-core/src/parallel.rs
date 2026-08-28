@@ -37,12 +37,13 @@ impl ParallelExecutor {
         let split_points = splitter.find_split_points(bytes, num_chunks);
         let ranges = split_points_to_ranges(&split_points, bytes.len());
 
+        let est_row = splitter.estimate_bytes_per_row(&bytes[..bytes.len().min(65536)]).max(512);
         let results: Vec<Result<TableBuilder>> = ranges
             .into_par_iter()
             .map(|range| {
                 catch_unwind(AssertUnwindSafe(|| {
                     let est = if !range.is_empty() {
-                        (range.len() / 512).max(64)
+                        (range.len() / est_row).max(64)
                     } else {
                         64
                     };

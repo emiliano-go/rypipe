@@ -29,7 +29,9 @@ pub use arrow_export::apply_compare_filter;
 pub use bounded::MemoryBudget;
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 pub use decoder::{ColumnarSink, RecordParser, Splitter};
-pub use engine::{LocateOnly, TableBuilder, RESOLVE_AND_PUT_COUNT};
+#[cfg(feature = "profiling")]
+pub use engine::RESOLVE_AND_PUT_COUNT;
+pub use engine::{LocateOnly, TableBuilder};
 pub use error::{Error, Result};
 pub use schema::{FrozenSchema, DiscoveryOpts, UnknownFieldPolicy};
 pub use input::InputBuffer;
