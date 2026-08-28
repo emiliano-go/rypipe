@@ -21,10 +21,10 @@ Hardware: Linux workstation, AMD Ryzen 9 5900X, DDR4-3200, release build.
 
 | Path | Rows | Time | Rows/s | MB/s | RSS |
 |------|------|------|--------|------|-----|
-| `Pipeline::read_path` | 5,000,000 | 1.31 s | 3.83 M | 229 | 290 MB |
-| `Pipeline::read_path_par` (4 chunks) | 5,000,000 | 1.46 s | 3.43 M | 205 | 432 MB |
-| `Pipeline::read_path_par` (8 chunks) | 5,000,000 | 1.49 s | 3.35 M | 200 | 529 MB |
-| `Pipeline::read_path_stream` (64 MiB) | 5,000,000 | 1.98 s | 2.53 M | 151 | 629 MB |
+| `Pipeline::read_path` | 5,000,000 | 1.18 s | 4.23 M | 253 | 290 MB |
+| `Pipeline::read_path_par` (4 chunks) | 5,000,000 | 1.33 s | 3.76 M | 225 | 388 MB |
+| `Pipeline::read_path_par` (8 chunks) | 5,000,000 | 1.35 s | 3.71 M | 222 | 486 MB |
+| `Pipeline::read_path_stream` (64 MiB) | 5,000,000 | 1.92 s | 2.61 M | 156 | 693 MB |
 
 Single-thread parse is fastest for this simple TSV adapter because chunk
 overhead dominates. Parallel mode trades a small throughput drop for much

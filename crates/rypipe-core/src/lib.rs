@@ -21,6 +21,7 @@ pub mod parallel;
 pub mod parallel_stream;
 pub mod pipeline;
 pub mod plan;
+pub mod schema;
 pub mod streaming;
 pub mod value;
 
@@ -28,8 +29,9 @@ pub use arrow_export::apply_compare_filter;
 pub use bounded::MemoryBudget;
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 pub use decoder::{ColumnarSink, RecordParser, Splitter};
-pub use engine::TableBuilder;
+pub use engine::{LocateOnly, TableBuilder, RESOLVE_AND_PUT_COUNT};
 pub use error::{Error, Result};
+pub use schema::{FrozenSchema, DiscoveryOpts, UnknownFieldPolicy};
 pub use input::InputBuffer;
 pub use merge::engines_to_record_batches;
 pub use parallel_stream::{ParallelStreamingBatchIterator, ParallelStreamingExecutor};

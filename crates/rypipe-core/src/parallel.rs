@@ -48,7 +48,7 @@ impl ParallelExecutor {
                     };
                     let mut sink = TableBuilder::with_plan(est, plan.clone());
                     parser.validate(&bytes[range.clone()])?;
-                    parser.parse_chunk(&bytes[range.clone()], &mut sink)?;
+                    parser.parse_chunk_generic(&bytes[range.clone()], &mut sink)?;
                     Ok(sink)
                 }))
                 .unwrap_or_else(|payload| {

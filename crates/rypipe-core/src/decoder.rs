@@ -23,8 +23,23 @@ pub trait RecordParser: Send + Sync {
     /// Validate that the whole byte slice is well-formed for this format.
     fn validate(&self, bytes: &[u8]) -> Result<()>;
 
-    /// Parse one chunk and feed all row events into `sink`.
+    /// Parse one chunk and feed all row events into `sink` (object-safe, virtual).
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()>;
+
+    /// Parse one chunk generically (monomorphized, inlinable).
+    ///
+    /// Default impl delegates to `parse_chunk` (object-safe) for adapters that
+    /// have not yet migrated. Adapters that implement this directly get
+    /// devirtualized `sink` calls and cross-crate inlining.
+    #[inline]
+    fn parse_chunk_generic<S: ColumnarSink>(&self, bytes: &[u8], sink: &mut S) -> Result<()>
+    where
+        Self: Sized,
+    {
+        // Default impl delegates to the object-safe path. Adapters that override
+        // this method get devirtualized sink calls and cross-crate inlining.
+        self.parse_chunk(bytes, sink as &mut dyn ColumnarSink)
+    }
 }
 
 /// Sink for decoder events.  The decoder calls `begin_row` / `put_field` /
@@ -35,6 +50,7 @@ pub trait ColumnarSink {
     fn end_row(&mut self);
 
     /// Return `false` to signal that the engine will drop this field.
+    #[inline]
     fn wants(&self, _name: &str) -> bool {
         true
     }
@@ -43,6 +59,7 @@ pub trait ColumnarSink {
     /// Default keeps the name as-is. Adapters that do expensive extraction can
     /// call this once and then `put_field_resolved` to avoid a second
     /// `resolve_field` inside `put_field`.
+    #[inline]
     fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
         Some(name)
     }
@@ -50,8 +67,48 @@ pub trait ColumnarSink {
     /// Push a field that has already been resolved via `resolve`.
     /// Default delegates to `put_field` (which will resolve again). Overrides
     /// should bypass the rename/drop lookup.
+    #[inline]
     fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
         self.put_field(resolved_name, value);
+    }
+
+    /// Resolve a field name and push it in one call, avoiding the double
+    /// `resolve_field` that `wants` + `put_field` would perform.
+    /// Default: resolve then put_field_resolved (with owned clone to satisfy
+    /// the borrow checker). Overrides should avoid the allocation.
+    #[inline]
+    fn resolve_and_put(&mut self, name: &str, value: Value<'_>) {
+        if let Some(resolved) = self.resolve(name) {
+            let owned = resolved.to_owned();
+            self.put_field_resolved(&owned, value);
+        }
+    }
+
+    /// Whether this sink needs decoded values from the parser.
+    ///
+    /// Return `false` for locate-only sinks that walk rows and resolve field
+    /// names but skip value extraction entirely.  The parser can use this to
+    /// bypass expensive text extraction (e.g. `raw_text_until` in XML scanners).
+    #[inline]
+    fn needs_value(&self) -> bool {
+        true
+    }
+
+    /// Whether this sink needs field-name resolution (`wants` + `resolve`).
+    ///
+    /// Return `false` for traversal-only sinks that walk rows and find field
+    /// extents but don't need to resolve names or check `wants`.  When false,
+    /// the parser skips `wants()` and `resolve()` calls entirely — it only
+    /// locates the byte extents of each field within a row.
+    ///
+    /// **Note:** this method is primarily for benchmarking/profiling harnesses.
+    /// A sink returning `false` may receive `put_field` calls with unresolved
+    /// names, or none at all, depending on the adapter.  Consider this
+    /// experimental until a non-benchmark consumer exists.
+    #[doc(hidden)]
+    #[inline]
+    fn needs_resolve(&self) -> bool {
+        true
     }
 
     /// Finalize the sink into an Arrow `RecordBatch`.

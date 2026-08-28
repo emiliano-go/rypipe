@@ -64,7 +64,7 @@ where
     pub fn read_bytes(&self, bytes: &[u8]) -> Result<RecordBatch> {
         let mut engine = TableBuilder::with_plan((bytes.len() / 512).max(64), self.plan.clone());
         self.parser.validate(bytes)?;
-        self.parser.parse_chunk(bytes, &mut engine)?;
+        self.parser.parse_chunk_generic(bytes, &mut engine)?;
         engine.finish()
     }
 
@@ -187,6 +187,38 @@ where
             prefault,
             consumer,
         )
+    }
+}
+
+/// Methods requiring `'static` types (thread-spawning paths).
+impl<S, P> Pipeline<S, P>
+where
+    S: Splitter + Clone + Send + Sync + 'static,
+    P: RecordParser + Clone + Send + Sync + 'static,
+{
+    /// Parse a file in parallel with bounded memory (streaming).
+    ///
+    /// Returns an iterator that yields `RecordBatch`es as they are produced.
+    /// The `opts` parameter controls threading, ordering, and optionally an
+    /// explicit `FrozenSchema` (required for parallel streaming without a
+    /// discovery pre-pass).
+    pub fn read_path_stream_par(
+        &self,
+        path: impl AsRef<Path>,
+        budget: MemoryBudget,
+        prefault: bool,
+        opts: crate::parallel_stream::ParallelStreamOpts,
+    ) -> Result<crate::parallel_stream::ParallelStreamingBatchIterator> {
+        let path = path.as_ref().to_path_buf();
+        Ok(crate::parallel_stream::ParallelStreamingBatchIterator::new(
+            path,
+            self.splitter.clone(),
+            self.parser.clone(),
+            self.plan.clone(),
+            budget,
+            prefault,
+            opts,
+        ))
     }
 }
 

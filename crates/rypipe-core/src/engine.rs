@@ -1,4 +1,8 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Diagnostic: counts resolve_and_put calls across all TableBuilder instances.
+pub static RESOLVE_AND_PUT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 use arrow::datatypes::{Field as ArrowField, Schema};
 use arrow::record_batch::RecordBatch;
@@ -62,6 +66,29 @@ impl TableBuilder {
             plan,
             row_dirty: Vec::new(),
         }
+    }
+
+    /// Pre-size all columns from a `FrozenSchema`.
+    ///
+    /// Called by parallel streaming workers so that every chunk's
+    /// `TableBuilder` has the full column set from construction,
+    /// regardless of which fields appear in that chunk.
+    pub fn ensure_schema(&mut self, schema: &crate::schema::FrozenSchema) -> Result<()> {
+        for (slot, name) in schema.column_names().iter().enumerate() {
+            let name_str: &str = name;
+            if self.field_index.contains_key(name_str) {
+                continue; // already present
+            }
+            let ty = schema.column_types()[slot].clone();
+            let col = ColumnBuilder::with_capacity(self.estimated_rows, &ty);
+            self.columns.push(col);
+            self.field_index.insert(name_str.to_string(), self.columns.len() - 1);
+            self.column_order.push(name_str.to_string());
+        }
+        // Resize row_dirty bitmask to cover all columns.
+        let words = (self.columns.len() + 63) / 64;
+        self.row_dirty.resize(words, 0);
+        Ok(())
     }
 
     /// Lookup a column by resolved name.
@@ -162,6 +189,20 @@ impl TableBuilder {
 
     pub fn column_names(&self) -> &[String] {
         &self.column_order
+    }
+
+    /// Diagnostic: (name, bytes_used, bytes_capacity) for each column.
+    pub fn column_diagnostics(&self) -> Vec<(String, usize, usize)> {
+        self.column_order.iter().map(|name| {
+            let idx = self.field_index[name];
+            let col = &self.columns[idx];
+            (name.clone(), col.bytes_used(), col.capacity_bytes())
+        }).collect()
+    }
+
+    /// The estimated_rows capacity hint passed to with_plan.
+    pub fn estimated_rows(&self) -> usize {
+        self.estimated_rows
     }
 
     /// Finalize the builder into an Arrow `RecordBatch`.
@@ -267,7 +308,11 @@ impl TableBuilder {
 
     /// Push a field value without resolving renames/drops.
     /// Caller must have already resolved `resolved_name` (or know it is kept).
+    #[inline]
     fn push_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
+        // #[inline]: small hot path, called per-field. ensure_column_idx is not
+        // inlined (too large); push_value is the real work and benefits from
+        // being in the same compilation unit as its caller.
         let idx = self.ensure_column_idx(resolved_name);
         let word = idx / 64;
         let bit = idx % 64;
@@ -282,7 +327,9 @@ impl TableBuilder {
 
     /// Push a field value, resolving renames/drops and applying last-write-wins
     /// within the current uncommitted row.
+    #[inline]
     fn push_field(&mut self, name: &str, value: Value<'_>) {
+        // #[inline]: fast-path (no rename/drop) is a single branch + delegate.
         // Fast path: no rename/drop configured.
         let owned;
         let resolved: &str = if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
@@ -300,11 +347,20 @@ impl TableBuilder {
         self.push_field_resolved(resolved, value);
     }
 
+    /// Advance the row counter without null-fill, filter, or dirty-mask clear.
+    /// For benchmarking only — separates per-field push cost from per-row
+    /// finalization.
+    #[doc(hidden)]
+    pub fn advance_row(&mut self) {
+        self.row_count += 1;
+    }
+
     /// Null-fill any column missing this row, then apply the per-row filter.
     /// If the filter rejects the row, undo it by popping values.
     /// Uses the dirty bitmask so only missing columns are touched; fast path
     /// when every column was set (dense data, 10 cols) skips the loop.
     fn finish_row(&mut self) {
+        // No #[inline]: 30+ lines with loops; inlining causes code bloat.
         let ncols = self.columns.len();
         // Fast path: check if all bits set
         let full_words = ncols / 64;
@@ -349,30 +405,51 @@ impl Default for TableBuilder {
 }
 
 impl ColumnarSink for TableBuilder {
+    #[inline]
     fn begin_row(&mut self) {
         // Row boundaries are tracked by `row_count`; no state to set up.
     }
 
+    #[inline]
     fn put_field(&mut self, name: &str, value: Value<'_>) {
         self.push_field(name, value);
     }
 
+    #[inline]
     fn end_row(&mut self) {
         self.finish_row();
     }
 
+    #[inline]
     fn wants(&self, name: &str) -> bool {
         self.resolve(name).is_some()
     }
 
+    #[inline]
     fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
         self.plan.resolve_field(name)
     }
 
+    #[inline]
     fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
         self.push_field_resolved(resolved_name, value);
     }
 
+    #[inline]
+    fn resolve_and_put(&mut self, name: &str, value: Value<'_>) {
+        RESOLVE_AND_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
+        if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+            // Common case: no renames/drops, push directly
+            self.push_field_resolved(name, value);
+        } else {
+            if let Some(resolved) = self.plan.resolve_field(name) {
+                let owned = resolved.to_owned();
+                self.push_field_resolved(&owned, value);
+            }
+        }
+    }
+
+    #[inline]
     fn finish(&mut self) -> Result<RecordBatch> {
         self.normalize();
 
@@ -395,6 +472,80 @@ impl ColumnarSink for TableBuilder {
 
         let schema = Arc::new(Schema::new(fields));
         Ok(RecordBatch::try_new(schema, arrays)?)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LocateOnly sink — walk rows, resolve field names, decode nothing.
+// ---------------------------------------------------------------------------
+
+/// A zero-allocation sink that counts rows and fields without decoding or
+/// storing any values.  Use this to measure the cost of the scan + locate
+/// phase independently from extract + store.
+
+pub struct LocateOnly {
+    pub row_count: usize,
+    pub field_count: usize,
+    pub distinct_fields: rustc_hash::FxHashSet<String>,
+    plan: ExecutionPlan,
+}
+
+impl LocateOnly {
+    pub fn new(plan: ExecutionPlan) -> Self {
+        Self {
+            row_count: 0,
+            field_count: 0,
+            distinct_fields: rustc_hash::FxHashSet::default(),
+            plan,
+        }
+    }
+
+    /// Total fields seen across all rows.
+    pub fn total_fields(&self) -> usize {
+        self.field_count
+    }
+
+    /// Number of distinct field names encountered.
+    pub fn num_distinct_fields(&self) -> usize {
+        self.distinct_fields.len()
+    }
+}
+
+impl ColumnarSink for LocateOnly {
+    #[inline]
+    fn begin_row(&mut self) {}
+
+    #[inline]
+    fn put_field(&mut self, name: &str, _value: Value<'_>) {
+        self.field_count += 1;
+        if let Some(resolved) = self.plan.resolve_field(name) {
+            self.distinct_fields.insert(resolved.to_owned());
+        }
+    }
+
+    #[inline]
+    fn end_row(&mut self) {
+        self.row_count += 1;
+    }
+
+    #[inline]
+    fn wants(&self, _name: &str) -> bool {
+        true
+    }
+
+    #[inline]
+    fn needs_value(&self) -> bool {
+        false
+    }
+
+    #[inline]
+    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        self.plan.resolve_field(name)
+    }
+
+    fn finish(&mut self) -> Result<RecordBatch> {
+        let schema = Arc::new(Schema::empty());
+        Ok(RecordBatch::new_empty(schema))
     }
 }
 
