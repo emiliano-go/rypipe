@@ -1,7 +1,10 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "profiling")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 /// Diagnostic: counts resolve_and_put calls across all TableBuilder instances.
+#[cfg(feature = "profiling")]
 pub static RESOLVE_AND_PUT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 use arrow::datatypes::{Field as ArrowField, Schema};
@@ -437,6 +440,7 @@ impl ColumnarSink for TableBuilder {
 
     #[inline]
     fn resolve_and_put(&mut self, name: &str, value: Value<'_>) {
+        #[cfg(feature = "profiling")]
         RESOLVE_AND_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
         if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
             // Common case: no renames/drops, push directly

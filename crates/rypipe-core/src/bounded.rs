@@ -97,8 +97,10 @@ impl BoundedExecutor {
 
         for chunk in &chunks {
             let chunk_bytes = &bytes[chunk.start..chunk.end];
-            let mut chunk_engine =
-                TableBuilder::with_plan((chunk.len() / 512).max(64), plan.clone());
+            let mut chunk_engine = TableBuilder::with_plan(
+                (chunk.len() / bytes_per_row.max(512)).max(64),
+                plan.clone(),
+            );
             parser.validate(chunk_bytes)?;
             parser.parse_chunk_generic(chunk_bytes, &mut chunk_engine)?;
 
@@ -257,8 +259,10 @@ impl BoundedExecutor {
             chunk_buf.resize(chunk_len, 0);
             file.seek(SeekFrom::Start(chunk.start as u64))?;
             file.read_exact(&mut chunk_buf)?;
-            let mut chunk_engine =
-                TableBuilder::with_plan((chunk.len() / 512).max(64), plan.clone());
+            let mut chunk_engine = TableBuilder::with_plan(
+                (chunk.len() / bytes_per_row.max(512)).max(64),
+                plan.clone(),
+            );
             parser.validate(&chunk_buf)?;
             parser.parse_chunk_generic(&chunk_buf, &mut chunk_engine)?;
 

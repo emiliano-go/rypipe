@@ -123,6 +123,8 @@ impl ParallelStreamingExecutor {
         let plan_arc = std::sync::Arc::new(plan);
         let schema_arc = schema.map(std::sync::Arc::new);
 
+        // Pre-compute bytes_per_row for TableBuilder capacity (avoids per-chunk splitter call)
+        let est_row = splitter.estimate_bytes_per_row(&bytes[..bytes.len().min(65536)]).max(512);
         for _ in 0..n {
             let queue = std::sync::Arc::clone(&chunk_queue);
             let sender_clone: SyncSender<(usize, Result<RecordBatch>)> = sender.clone();
@@ -138,10 +140,8 @@ impl ParallelStreamingExecutor {
                     };
                     let Some((seq, range)) = next else { break };
                     let chunk_bytes = &bytes_owned[range.start..range.end];
-                    let mut builder = TableBuilder::with_plan(
-                        (chunk_bytes.len() / 512).max(64),
-                        plan_clone.clone(),
-                    );
+                    let mut builder =
+                        TableBuilder::with_plan((chunk_bytes.len() / est_row).max(64), plan_clone.clone());
                     // If schema is provided, pre-size columns from it.
                     if let Some(ref schema) = schema_clone {
                         builder.ensure_schema(schema)?;

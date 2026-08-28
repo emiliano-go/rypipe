@@ -62,7 +62,11 @@ where
 
     /// Parse an in-memory byte slice into a single `RecordBatch`.
     pub fn read_bytes(&self, bytes: &[u8]) -> Result<RecordBatch> {
-        let mut engine = TableBuilder::with_plan((bytes.len() / 512).max(64), self.plan.clone());
+        let est = self
+            .splitter
+            .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
+            .max(512);
+        let mut engine = TableBuilder::with_plan((bytes.len() / est).max(64), self.plan.clone());
         self.parser.validate(bytes)?;
         self.parser.parse_chunk_generic(bytes, &mut engine)?;
         engine.finish()
