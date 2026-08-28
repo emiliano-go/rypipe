@@ -17,6 +17,7 @@ pub mod engine;
 pub mod error;
 pub mod input;
 pub mod merge;
+pub mod block_masks;
 pub mod parallel;
 pub mod parallel_stream;
 pub mod pipeline;

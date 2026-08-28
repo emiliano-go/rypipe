@@ -269,6 +269,31 @@ fusion layer pushes them into `_read_arrow`. Your Rust `read_csv` receives the
 merged kwargs and applies them in the parse loop. Non-fusable stages (custom
 callables, stateful transforms) run over the returned table automatically.
 
+## Fast delimiter scanning with `BlockMasks` (engine asset)
+
+36.5% of parse is `memchr` on 50–100 byte spans (5–7 searches per field). `BlockMasks`
+computes delimiter positions once per 64-byte block and answers all queries from
+cached bitmasks - an engine asset, not a crxml trick.
+
+```rust
+use rypipe_core::block_masks::BlockMasks;
+
+const DELIMS: &[u8] = &[b',', b'"', b'\n', b'\r']; // CSV
+let mut masks = BlockMasks::new(buf, DELIMS);
+let comma = masks.next(pos, b',');
+let quote = masks.next_any(pos, &[b'"', b'\'']);
+let far = masks.next_far(pos, b'\n', 400); // >256 → memchr fallback
+```
+
+* `BlockMasks::new(buf, delims)` - `delims` static ≤8, e.g. crxml `&[b'<',b'>',b'"',b'\'',b'=']` (MAX_DELIMS=8 covers CSV `, " \n \r` and JSONL `{ } " \n \ \`)
+* Lazy per-delimiter: first query for `','` costs 2×AVX2 loads (64B), next 4 queries reuse the cached mask (`tzcnt` only). 5 searches → 20 instr vs 5× memchr prologue.
+* `next_any` ORs masks, one `tzcnt` for `memchr3` replacement (`scan_open_tag`).
+* Tail: final partial block copied to 64B stack array, masked off.
+* AVX2 (`_mm256_cmpeq_epi8`+`movemask`) → SSE2 (4×16B) → scalar, runtime dispatch via `is_x86_feature_detected!("avx2")` cached in `OnceLock` (same as `memchr`, no manylinux question).
+* `next_far(hint>256)` falls back to `memchr` for long spans (between rows).
+
+Crxml prototype (P2 `next_lt` only) measured **-68% on traverse** (0.574→0.968 ms/MB) - short 50B spans don't amortize; `memchr` already optimal there. Full integration (P3–P4 `scan_open_tag`/`raw_text_until` candidate+verify) is available but gated. For CSV/JSONL with 1KB rows and 5–7 searches per field on the same block, the win should appear; use the P1 microbench (`cargo test -p rypipe-core block_masks --lib`) to gate.
+
 ## Testing an adapter
 
 Recommended tests:
@@ -281,6 +306,7 @@ Recommended tests:
 - Multi-chunk equivalence: parse whole file vs. split + merge.
 - Partial trailing row discarded cleanly.
 - `Pipeline::read_path`, `read_path_par`, and `read_path_stream` agree.
+- `BlockMasks` equivalence: `masks.next(pos,d) == memchr(d, &buf[pos..])` (property test in `block_masks.rs`).
 
 See the `rypipe-core` tests and the `bench_throughput` example for small
 self-contained splitter/parser samples.
