@@ -32,6 +32,11 @@ pub struct TableBuilder {
     /// Crystal Reports exports with >64 fields). One compare `mask != full`
     /// replaces `for col in 0..ncols` loop when every field is present (dense).
     pub(crate) row_dirty: Vec<u64>,
+    /// Frozen schema for parallel streaming. When Some, any field not in the
+    /// schema is an unknown field and hard-errors on `finish()` (data loss
+    /// would otherwise be silent). Discovery samples 16×2 MiB for >128 MiB.
+    pub(crate) frozen: Option<std::sync::Arc<crate::schema::FrozenSchema>>,
+    pub(crate) unknown_error: Option<String>,
 }
 
 impl TableBuilder {
@@ -44,6 +49,8 @@ impl TableBuilder {
             estimated_rows: 0,
             plan: ExecutionPlan::new(),
             row_dirty: Vec::new(),
+            frozen: None,
+            unknown_error: None,
         }
     }
 
@@ -56,6 +63,8 @@ impl TableBuilder {
             estimated_rows: cap,
             plan: ExecutionPlan::new(),
             row_dirty: Vec::new(),
+            frozen: None,
+            unknown_error: None,
         }
     }
 
@@ -68,6 +77,8 @@ impl TableBuilder {
             estimated_rows: cap,
             plan,
             row_dirty: Vec::new(),
+            frozen: None,
+            unknown_error: None,
         }
     }
 
@@ -91,6 +102,11 @@ impl TableBuilder {
         // Resize row_dirty bitmask to cover all columns.
         let words = (self.columns.len() + 63) / 64;
         self.row_dirty.resize(words, 0);
+        // Freeze: any later field not in this schema is an unknown field and
+        // must hard-error (otherwise data loss would be silent on a default
+        // path). Sampling 16×2 MiB covers ~6% of a 533 MB file, so 1% Text21
+        // is expected ~280 hits, but 0.05% would be missed.
+        self.frozen = Some(std::sync::Arc::new(schema.clone()));
         Ok(())
     }
 
@@ -130,6 +146,8 @@ impl TableBuilder {
             estimated_rows: n,
             plan: self.plan.clone(),
             row_dirty: vec![0; (self.columns.len() + 63) / 64],
+            frozen: self.frozen.clone(),
+            unknown_error: None,
         };
         for (idx, col) in self.columns.iter_mut().enumerate() {
             let drain = col.split_off(n);
@@ -290,6 +308,27 @@ impl TableBuilder {
         if let Some(&idx) = self.field_index.get(name) {
             return idx;
         }
+        // Frozen schema: any new column not pre-sized by ensure_schema is an
+        // unknown field (sampling miss or file has column absent during
+        // discovery). Don't silently create it — hard-error on finish().
+        // We still return a dummy idx to keep the hot path inlinable, but
+        // push_field_resolved will have already early-returned after setting
+        // unknown_error, so this path is only for non-frozen builders.
+        if self.frozen.is_some() {
+            // Should have been caught in push_field_resolved; if we reach
+            // here, treat as unknown and record.
+            if self.unknown_error.is_none() {
+                let frozen = self.frozen.as_ref().unwrap();
+                self.unknown_error = Some(format!(
+                    "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...] with full column list or use full-scan discovery",
+                    name,
+                    frozen.num_columns(),
+                    frozen.is_exact()
+                ));
+            }
+            // Return 0 as dummy to avoid panic; caller will have returned.
+            return 0;
+        }
         let est = self.estimated_rows.max(64);
         let col_type = self.plan.column_type(name);
         let mut b = ColumnBuilder::with_capacity(est, &col_type);
@@ -316,6 +355,21 @@ impl TableBuilder {
         // #[inline]: small hot path, called per-field. ensure_column_idx is not
         // inlined (too large); push_value is the real work and benefits from
         // being in the same compilation unit as its caller.
+        // Frozen check: hard error on unknown field (data loss would be silent
+        // on a default path). Sampling 16×2 MiB covers ~6% of 533 MB, so 0.05%
+        // column would be missed.
+        if self.frozen.is_some() && !self.field_index.contains_key(resolved_name) {
+            if self.unknown_error.is_none() {
+                let frozen = self.frozen.as_ref().unwrap();
+                self.unknown_error = Some(format!(
+                    "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...] with full column list or use full-scan discovery",
+                    resolved_name,
+                    frozen.num_columns(),
+                    frozen.is_exact()
+                ));
+            }
+            return;
+        }
         let idx = self.ensure_column_idx(resolved_name);
         let word = idx / 64;
         let bit = idx % 64;
@@ -455,6 +509,9 @@ impl ColumnarSink for TableBuilder {
 
     #[inline]
     fn finish(&mut self) -> Result<RecordBatch> {
+        if let Some(err) = self.unknown_error.take() {
+            return Err(crate::Error::Merge(err));
+        }
         self.normalize();
 
         if self.column_order.is_empty() {

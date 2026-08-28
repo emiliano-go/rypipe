@@ -36,7 +36,7 @@ pub use error::{Error, Result};
 pub use schema::{FrozenSchema, DiscoveryOpts, UnknownFieldPolicy};
 pub use input::InputBuffer;
 pub use merge::engines_to_record_batches;
-pub use parallel_stream::{ParallelStreamingBatchIterator, ParallelStreamingExecutor};
+pub use parallel_stream::{discover_schema_for_bytes, discovery_profile, reset_discovery_profile, ParallelStreamingBatchIterator, ParallelStreamingExecutor, ParallelStreamOpts};
 pub use pipeline::Pipeline;
 pub use plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate};
 pub use streaming::StreamingBatchIterator;

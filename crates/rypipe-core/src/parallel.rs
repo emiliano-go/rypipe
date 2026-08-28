@@ -1,4 +1,6 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
@@ -10,6 +12,31 @@ use crate::engine::TableBuilder;
 use crate::merge::engines_to_record_batches;
 use crate::plan::ExecutionPlan;
 use crate::Result;
+
+// --- Chunk-time profiling ---
+// Reset before each parallel run; read via `chunk_profile()`.
+static CHUNK_TIME_SUM_NS: AtomicU64 = AtomicU64::new(0);
+static CHUNK_TIME_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static CHUNK_COUNT: AtomicU64 = AtomicU64::new(0);
+static SPLIT_SCAN_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Reset profiling counters (call before a parallel run).
+pub fn reset_chunk_profile() {
+    CHUNK_TIME_SUM_NS.store(0, Ordering::Relaxed);
+    CHUNK_TIME_MAX_NS.store(0, Ordering::Relaxed);
+    CHUNK_COUNT.store(0, Ordering::Relaxed);
+    SPLIT_SCAN_NS.store(0, Ordering::Relaxed);
+}
+
+/// Read the chunk-time profile as (split_scan_ns, sum_ns, max_ns, count).
+pub fn chunk_profile() -> (u64, u64, u64, u64) {
+    (
+        SPLIT_SCAN_NS.load(Ordering::Relaxed),
+        CHUNK_TIME_SUM_NS.load(Ordering::Relaxed),
+        CHUNK_TIME_MAX_NS.load(Ordering::Relaxed),
+        CHUNK_COUNT.load(Ordering::Relaxed),
+    )
+}
 
 /// Parallel executor that splits an input byte slice into chunks, parses each
 /// chunk independently, and returns the resulting Arrow record batches.
@@ -34,14 +61,18 @@ impl ParallelExecutor {
     where
         P: RecordParser + Clone + Send + Sync,
     {
+        reset_chunk_profile();
+        let t_split = Instant::now();
         let split_points = splitter.find_split_points(bytes, num_chunks);
+        SPLIT_SCAN_NS.store(t_split.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let ranges = split_points_to_ranges(&split_points, bytes.len());
 
         let est_row = splitter.estimate_bytes_per_row(&bytes[..bytes.len().min(65536)]).max(512);
         let results: Vec<Result<TableBuilder>> = ranges
             .into_par_iter()
             .map(|range| {
-                catch_unwind(AssertUnwindSafe(|| {
+                let t_chunk = Instant::now();
+                let result = catch_unwind(AssertUnwindSafe(|| {
                     let est = if !range.is_empty() {
                         (range.len() / est_row).max(64)
                     } else {
@@ -63,7 +94,24 @@ impl ParallelExecutor {
                     Err(crate::Error::Merge(format!(
                         "worker panicked during parallel parse: {msg}"
                     )))
-                })
+                });
+                // Record chunk timing for get_par_profile()
+                let elapsed_ns = t_chunk.elapsed().as_nanos() as u64;
+                CHUNK_TIME_SUM_NS.fetch_add(elapsed_ns, Ordering::Relaxed);
+                CHUNK_COUNT.fetch_add(1, Ordering::Relaxed);
+                // Atomic max: CAS loop
+                loop {
+                    let prev = CHUNK_TIME_MAX_NS.load(Ordering::Relaxed);
+                    if elapsed_ns <= prev {
+                        break;
+                    }
+                    if CHUNK_TIME_MAX_NS.compare_exchange_weak(
+                        prev, elapsed_ns, Ordering::Relaxed, Ordering::Relaxed,
+                    ).is_ok() {
+                        break;
+                    }
+                }
+                result
             })
             .collect();
 

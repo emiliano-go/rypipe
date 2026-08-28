@@ -19,7 +19,7 @@ enum Compression {
 /// Owned handle for a memory-mapped file.
 #[cfg(feature = "mmap")]
 pub struct MmapHandle {
-    mmap: memmap2::Mmap,
+    pub(crate) mmap: memmap2::Mmap,
 }
 
 #[cfg(feature = "mmap")]

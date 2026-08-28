@@ -49,6 +49,7 @@ fn _rypipe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("XmlError", m.py().get_type::<XmlError>())?;
     m.add("PlanError", m.py().get_type::<PlanError>())?;
     m.add("MergeError", m.py().get_type::<MergeError>())?;
-
+    // Build provenance: the git SHA this .so was compiled from.
+    m.add("__build_sha__", env!("RYPIPE_BUILD_SHA"))?;
     Ok(())
 }

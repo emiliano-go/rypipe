@@ -70,10 +70,29 @@ def main() -> int:
     print("Running rypipe throughput benchmark...")
     records = run_benchmark()
 
+    # Build provenance: cargo bench builds from source, so the binary always
+    # matches HEAD.  But record it anyway for JSON consistency with crxml.
+    build_sha = "cargo-build-from-source"
+    try:
+        build_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent.parent),
+        ).decode().strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=str(Path(__file__).resolve().parent.parent),
+        ).decode().strip())
+        if dirty:
+            build_sha = f"{build_sha}-dirty"
+    except Exception:
+        pass
+
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "benchmark": "bench_throughput",
         "unit": "rows_per_second",
+        "build_sha": build_sha,
+        "python": sys.version,
         "results": records,
     }
 
