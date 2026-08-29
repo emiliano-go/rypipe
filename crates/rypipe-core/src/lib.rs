@@ -8,6 +8,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(feature = "alloc-stats")]
+pub mod alloc_stats;
 pub mod arrow_export;
 pub mod bounded;
 pub mod columnar;
@@ -30,8 +32,8 @@ pub use arrow_export::apply_compare_filter;
 pub use bounded::MemoryBudget;
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 pub use decoder::{ColumnarSink, RecordParser, Splitter};
-#[cfg(feature = "profiling")]
-pub use engine::RESOLVE_AND_PUT_COUNT;
+#[cfg(any(feature = "profiling", feature = "profile"))]
+pub use engine::{RESOLVE_AND_PUT_COUNT, PREDICATE_EVALUATIONS, PREDICATE_FAILS, PREDICATE_UNDECIDED, IS_PRED_TRUE, IS_PRED_FALSE};
 pub use engine::{LocateOnly, TableBuilder};
 pub use error::{Error, Result};
 pub use schema::{FrozenSchema, DiscoveryOpts, UnknownFieldPolicy};

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -55,7 +56,7 @@ impl ParallelExecutor {
         bytes: &[u8],
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         num_chunks: usize,
     ) -> Result<Vec<RecordBatch>>
     where
@@ -78,7 +79,7 @@ impl ParallelExecutor {
                     } else {
                         64
                     };
-                    let mut sink = TableBuilder::with_plan(est, plan.clone());
+                    let mut sink = TableBuilder::with_plan(est, Arc::clone(&plan));
                     parser.validate(&bytes[range.clone()])?;
                     parser.parse_chunk_generic(&bytes[range.clone()], &mut sink)?;
                     Ok(sink)
@@ -121,7 +122,7 @@ impl ParallelExecutor {
             return Ok(Vec::new());
         }
 
-        let plan = engines[0].plan.clone();
+        let plan = Arc::clone(&engines[0].plan);
 
         // Fast path: no auto_dict and all chunks agree on column types.
         // Compare filters are evaluated per-row during parse, so they do not
@@ -172,7 +173,7 @@ impl ParallelExecutor {
         }
 
         // Merge path.
-        let mut merged = TableBuilder::with_plan(engines.len().max(64) * 512, plan.clone());
+        let mut merged = TableBuilder::with_plan(engines.len().max(64) * 512, Arc::clone(&plan));
         for engine in engines {
             merged.extend(engine)?;
         }

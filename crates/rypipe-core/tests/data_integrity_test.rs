@@ -3,6 +3,7 @@
 //! ColumnarSink resolve/put_field_resolved produce bit-identical results
 //! across all execution modes and plans.
 
+use std::sync::Arc;
 use arrow::array::{Array, AsArray};
 use arrow::record_batch::RecordBatch;
 
@@ -494,7 +495,7 @@ fn file_path_apis_match_bytes_apis() {
 #[test]
 fn direct_table_builder_extend_preserves_all_rows_and_columns() {
     // Build two tables with disjoint column sets and merge
-    let mut t1 = TableBuilder::with_plan(4, ExecutionPlan::new());
+    let mut t1 = TableBuilder::with_plan(4, Arc::new(ExecutionPlan::new()));
     for (k, v) in [("A", "1"), ("B", "2")] {
         t1.put_field(k, Value::Str(v));
     }
@@ -504,7 +505,7 @@ fn direct_table_builder_extend_preserves_all_rows_and_columns() {
     }
     t1.end_row();
 
-    let mut t2 = TableBuilder::with_plan(4, ExecutionPlan::new());
+    let mut t2 = TableBuilder::with_plan(4, Arc::new(ExecutionPlan::new()));
     for (k, v) in [("B", "4"), ("C", "5")] {
         t2.put_field(k, Value::Str(v));
     }

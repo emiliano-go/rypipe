@@ -5,6 +5,7 @@
 //! - `Pipeline::read_bytes_par` / `read_bytes_stream` and `BoundedExecutor::run_bytes`
 //! - magic-byte decompression in `InputBuffer::open`
 
+use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 
 use rypipe_core::{
@@ -69,7 +70,7 @@ impl RecordParser for LineParser {
 }
 
 fn parse_bytes(bytes: &[u8], plan: ExecutionPlan) -> RecordBatch {
-    let mut sink = TableBuilder::with_plan((bytes.len() / 16).max(4), plan);
+    let mut sink = TableBuilder::with_plan((bytes.len() / 16).max(4), Arc::new(plan));
     LineParser.parse_chunk(bytes, &mut sink).unwrap();
     sink.finish().unwrap()
 }
@@ -317,10 +318,10 @@ fn test_batchpipe_style_bounded_engine_run_bytes() {
             bytes,
             &LineSplitter as &dyn Splitter,
             LineParser,
-            ExecutionPlan {
+            Arc::new(ExecutionPlan {
                 filter: Some(FilterPredicate::any(eq("A", "3"), eq("B", "1"))),
                 ..Default::default()
-            },
+            }),
         )
         .unwrap();
     assert!(!batches.is_empty());

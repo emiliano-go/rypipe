@@ -17,6 +17,7 @@
 //! let batch = pipeline.read_path("data.txt", false, false).unwrap();
 //! ```
 
+use std::sync::Arc;
 use std::path::Path;
 
 use arrow::record_batch::RecordBatch;
@@ -37,7 +38,7 @@ use crate::Result;
 pub struct Pipeline<S, P> {
     splitter: S,
     parser: P,
-    plan: ExecutionPlan,
+    plan: Arc<ExecutionPlan>,
 }
 
 impl<S, P> Pipeline<S, P>
@@ -50,13 +51,13 @@ where
         Self {
             splitter,
             parser,
-            plan: ExecutionPlan::new(),
+            plan: Arc::new(ExecutionPlan::new()),
         }
     }
 
     /// Replace the execution plan.
     pub fn with_plan(mut self, plan: ExecutionPlan) -> Self {
-        self.plan = plan;
+        self.plan = Arc::new(plan);
         self
     }
 
@@ -66,7 +67,7 @@ where
             .splitter
             .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
             .max(512);
-        let mut engine = TableBuilder::with_plan((bytes.len() / est).max(64), self.plan.clone());
+        let mut engine = TableBuilder::with_plan((bytes.len() / est).max(64), Arc::clone(&self.plan));
         self.parser.validate(bytes)?;
         self.parser.parse_chunk_generic(bytes, &mut engine)?;
         engine.finish()
@@ -82,7 +83,7 @@ where
             bytes,
             &self.splitter,
             self.parser.clone(),
-            self.plan.clone(),
+            Arc::clone(&self.plan),
             num_chunks,
         )
     }
@@ -96,7 +97,7 @@ where
         bytes: &[u8],
         budget: MemoryBudget,
     ) -> Result<Vec<RecordBatch>> {
-        BoundedExecutor::new(budget).run_bytes(bytes, &self.splitter, self.parser.clone(), self.plan.clone())
+        BoundedExecutor::new(budget).run_bytes(bytes, &self.splitter, self.parser.clone(), Arc::clone(&self.plan))
     }
 
     /// Parse a file into a single `RecordBatch`.
@@ -130,7 +131,7 @@ where
             input.as_slice(),
             &self.splitter,
             self.parser.clone(),
-            self.plan.clone(),
+            Arc::clone(&self.plan),
             num_chunks,
         )
     }
@@ -146,7 +147,7 @@ where
             path.as_ref(),
             &self.splitter,
             self.parser.clone(),
-            self.plan.clone(),
+            Arc::clone(&self.plan),
             prefault,
         )
     }
@@ -166,7 +167,7 @@ where
             bytes,
             &self.splitter,
             self.parser.clone(),
-            self.plan.clone(),
+            Arc::clone(&self.plan),
             consumer,
         )
     }
@@ -187,7 +188,7 @@ where
             path.as_ref(),
             &self.splitter,
             self.parser.clone(),
-            self.plan.clone(),
+            Arc::clone(&self.plan),
             prefault,
             consumer,
         )
@@ -218,7 +219,7 @@ where
             path,
             self.splitter.clone(),
             self.parser.clone(),
-            self.plan.clone(),
+            Arc::clone(&self.plan),
             budget,
             prefault,
             opts,

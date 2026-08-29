@@ -3,6 +3,7 @@
 //! Uses a tiny newline-delimited parser so the tests exercise the core engine
 //! without any XML-specific logic.
 
+use std::sync::Arc;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
@@ -42,7 +43,7 @@ impl RecordParser for LineParser {
 }
 
 fn parse_bytes(bytes: &[u8], plan: ExecutionPlan) -> RecordBatch {
-    let mut sink = TableBuilder::with_plan((bytes.len() / 16).max(4), plan);
+    let mut sink = TableBuilder::with_plan((bytes.len() / 16).max(4), Arc::new(plan));
     LineParser.parse_chunk(bytes, &mut sink).unwrap();
     sink.finish().unwrap()
 }
@@ -276,7 +277,7 @@ fn test_compare_parallel_matches_single() {
     let single = parse_bytes(&data, plan.clone());
 
     let batches =
-        rypipe_core::parallel::ParallelExecutor::parse(&data, &splitter, LineParser, plan, 4)
+        rypipe_core::parallel::ParallelExecutor::parse(&data, &splitter, LineParser, Arc::new(plan), 4)
             .unwrap();
 
     let par_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -453,7 +454,7 @@ fn test_parallel_panic_propagates_message() {
         b"r1\nr2\n",
         &AnySplitter,
         PanickyParser,
-        ExecutionPlan::new(),
+        Arc::new(ExecutionPlan::new()),
         2,
     )
     .unwrap_err();

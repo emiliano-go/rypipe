@@ -1,15 +1,30 @@
 use std::sync::Arc;
 
-#[cfg(feature = "profiling")]
+#[cfg(any(feature = "profiling", feature = "profile"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Diagnostic: counts resolve_and_put calls across all TableBuilder instances.
-#[cfg(feature = "profiling")]
+#[cfg(any(feature = "profiling", feature = "profile"))]
 pub static RESOLVE_AND_PUT_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Diagnostic: counts predicate evaluations across all TableBuilder instances.
+#[cfg(any(feature = "profiling", feature = "profile"))]
+pub static PREDICATE_EVALUATIONS: AtomicUsize = AtomicUsize::new(0);
+/// Diagnostic: counts how many times evaluate_predicate_state returns Fail.
+#[cfg(any(feature = "profiling", feature = "profile"))]
+pub static PREDICATE_FAILS: AtomicUsize = AtomicUsize::new(0);
+/// Diagnostic: counts how many times evaluate_predicate_state returns Undecided.
+#[cfg(any(feature = "profiling", feature = "profile"))]
+pub static PREDICATE_UNDECIDED: AtomicUsize = AtomicUsize::new(0);
+/// Diagnostic: counts how many times is_predicate_slot returns true.
+#[cfg(any(feature = "profiling", feature = "profile"))]
+pub static IS_PRED_TRUE: AtomicUsize = AtomicUsize::new(0);
+/// Diagnostic: counts how many times is_predicate_slot returns false.
+#[cfg(any(feature = "profiling", feature = "profile"))]
+pub static IS_PRED_FALSE: AtomicUsize = AtomicUsize::new(0);
 
 use arrow::datatypes::{Field as ArrowField, Schema};
 use arrow::record_batch::RecordBatch;
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::FxHashMap as HashMap;
 
 use smallvec::SmallVec;
 
@@ -33,6 +48,34 @@ impl Default for PredicateState {
     }
 }
 
+/// Heap-allocated row buffer for predicate-first deferred materialization.
+/// Boxed so that unfiltered parses (the common case) don't carry 1 KB of
+/// inline SmallVec in every `TableBuilder`.
+pub(crate) struct RowBuffer {
+    /// Per-row field buffer: `(slot_index, value)`. u32 is the column index
+    /// from `field_index`, eliminating per-field String allocation.
+    pub(crate) fields: SmallVec<[(u32, Value<'static>); 32]>,
+    pub(crate) state: PredicateState,
+    /// Bitmask of predicate column slots. Bit `i` is set when slot `i` appears
+    /// in the filter predicate. For ≤64 columns this is a single u64; above
+    /// 64 it grows like `row_dirty`.
+    pub(crate) predicate_mask: SmallVec<[u64; 1]>,
+    /// When true, the predicate has already resolved to Pass and remaining
+    /// fields are pushed directly to columns (no buffering).
+    pub(crate) direct: bool,
+    /// Learned ordinal of the predicate column (0-based), set after the first
+    /// row. When the predicate is late (> 4/5 of columns), buffering is a net
+    /// loss — we switch to direct push + pop-on-reject instead.
+    pub(crate) predicate_ordinal: Option<u32>,
+    /// Whether the adaptive strategy has decided buffering is worthwhile.
+    /// True by default; set to false on row 2 when predicate_ordinal is late.
+    pub(crate) buffer_worthwhile: bool,
+    /// Resolved predicate field names, cached once by `build_predicate_mask`.
+    /// Used to check newly-created columns against the filter without cloning
+    /// the filter tree on every non-predicate field.
+    pub(crate) pred_names: SmallVec<[String; 4]>,
+}
+
 /// Generic columnar table builder.  Implements `ColumnarSink` so any decoder
 /// can feed it field/value events; at the end it produces an Arrow
 /// `RecordBatch`.
@@ -42,7 +85,7 @@ pub struct TableBuilder {
     pub(crate) column_order: Vec<String>,
     pub(crate) row_count: usize,
     pub(crate) estimated_rows: usize,
-    pub(crate) plan: ExecutionPlan,
+    pub(crate) plan: Arc<ExecutionPlan>,
     /// Dirty mask for the current row: bit `i` set iff column `i` received a
     /// value in this row. `Vec<u64>` word array so >64 columns work (e.g.,
     /// Crystal Reports exports with >64 fields). One compare `mask != full`
@@ -53,16 +96,10 @@ pub struct TableBuilder {
     /// would otherwise be silent). Discovery samples 16×2 MiB for >128 MiB.
     pub(crate) frozen: Option<std::sync::Arc<crate::schema::FrozenSchema>>,
     pub(crate) unknown_error: Option<String>,
-    /// Row buffer for predicate-first deferred materialization. When `plan.filter`
-    /// is Some, fields are buffered per row and predicate is evaluated
-    /// incrementally; on `Fail` the row is discarded without touching columns.
-    /// `SmallVec<[(String,Value<'static>);8]>` borrows chunk buffer (no copy) via
-    /// transmute; `Value<'static>` is safe because chunk `bytes` outlives the row.
-    pub(crate) buffered: SmallVec<[(String, Value<'static>); 32]>,
-    pub(crate) buffered_state: PredicateState,
-    /// Set of output column names that appear in the filter predicate. Computed
-    /// lazily from `plan.filter` on first use. `None` means no filter.
-    pub(crate) predicate_fields: Option<HashSet<String>>,
+    /// Heap-allocated row buffer for predicate-first deferred materialization.
+    /// `None` when `plan.filter` is `None` — unfiltered parses carry zero
+    /// overhead from predicate machinery.
+    pub(crate) row_buf: Option<Box<RowBuffer>>,
 }
 
 impl TableBuilder {
@@ -73,13 +110,11 @@ impl TableBuilder {
             column_order: Vec::new(),
             row_count: 0,
             estimated_rows: 0,
-            plan: ExecutionPlan::new(),
+            plan: Arc::new(ExecutionPlan::new()),
             row_dirty: Vec::new(),
             frozen: None,
             unknown_error: None,
-            buffered: SmallVec::new(),
-            buffered_state: PredicateState::Undecided,
-            predicate_fields: None,
+            row_buf: None,
         }
     }
 
@@ -90,34 +125,38 @@ impl TableBuilder {
             column_order: Vec::new(),
             row_count: 0,
             estimated_rows: cap,
-            plan: ExecutionPlan::new(),
+            plan: Arc::new(ExecutionPlan::new()),
             row_dirty: Vec::new(),
             frozen: None,
             unknown_error: None,
-            buffered: SmallVec::new(),
-            buffered_state: PredicateState::Undecided,
-            predicate_fields: None,
+            row_buf: None,
         }
     }
 
-    pub fn with_plan(cap: usize, plan: ExecutionPlan) -> Self {
+    pub fn with_plan(cap: usize, plan: Arc<ExecutionPlan>) -> Self {
         Self {
             columns: Vec::new(),
             field_index: HashMap::default(),
             column_order: Vec::new(),
             row_count: 0,
             estimated_rows: cap,
-            plan: plan.clone(),
+            plan: Arc::clone(&plan),
             row_dirty: Vec::new(),
             frozen: None,
             unknown_error: None,
-            buffered: SmallVec::new(),
-            buffered_state: if plan.filter.is_some() {
-                PredicateState::Undecided
+            row_buf: if plan.filter.is_some() {
+                Some(Box::new(RowBuffer {
+                    fields: SmallVec::new(),
+                    state: PredicateState::Undecided,
+                    predicate_mask: SmallVec::new(),
+                    direct: false,
+                    predicate_ordinal: None,
+                    buffer_worthwhile: true,
+                    pred_names: SmallVec::new(),
+                }))
             } else {
-                PredicateState::Pass
+                None
             },
-            predicate_fields: None,
         }
     }
 
@@ -183,13 +222,23 @@ impl TableBuilder {
             column_order: self.column_order.clone(),
             row_count: n,
             estimated_rows: n,
-            plan: self.plan.clone(),
+            plan: Arc::clone(&self.plan),
             row_dirty: vec![0; (self.columns.len() + 63) / 64],
             frozen: self.frozen.clone(),
             unknown_error: None,
-            buffered: SmallVec::new(),
-            buffered_state: PredicateState::Undecided,
-            predicate_fields: self.predicate_fields.clone(),
+            row_buf: if self.plan.filter.is_some() {
+                Some(Box::new(RowBuffer {
+                    fields: SmallVec::new(),
+                    state: PredicateState::Undecided,
+                    predicate_mask: self.row_buf.as_ref().map_or_else(SmallVec::new, |b| b.predicate_mask.clone()),
+                    direct: false,
+                    predicate_ordinal: None,
+                    buffer_worthwhile: true,
+                    pred_names: self.row_buf.as_ref().map_or_else(SmallVec::new, |b| b.pred_names.clone()),
+                }))
+            } else {
+                None
+            },
         };
         for (idx, col) in self.columns.iter_mut().enumerate() {
             let drain = col.split_off(n);
@@ -282,9 +331,11 @@ impl TableBuilder {
         self.column_order.clear();
         for w in &mut self.row_dirty { *w = 0; }
         self.row_count = 0;
-        self.buffered.clear();
-        self.buffered_state = PredicateState::Undecided;
-        // Keep frozen/predicate_fields (per builder, not per row)
+        if let Some(ref mut buf) = self.row_buf {
+            buf.fields.clear();
+            buf.state = PredicateState::Undecided;
+        }
+        // Keep frozen/row_buf (per builder, not per row)
         self.unknown_error = None;
     }
 
@@ -378,7 +429,16 @@ impl TableBuilder {
         let est = self.estimated_rows.max(64);
         let col_type = self.plan.column_type(name);
         let mut b = ColumnBuilder::with_capacity(est, &col_type);
-        for _ in 0..self.row_count {
+        // When the predicate passes mid-row, drain_buffered increments
+        // row_count before all fields are pushed. New columns created after
+        // that must backfill row_count-1 Nones (for the already-committed
+        // rows), not row_count, because the current row's value follows.
+        let backfill = if self.row_buf.as_ref().map_or(false, |b| b.direct) {
+            self.row_count.saturating_sub(1)
+        } else {
+            self.row_count
+        };
+        for _ in 0..backfill {
             b.push(None);
         }
         let idx = self.columns.len();
@@ -433,21 +493,45 @@ impl TableBuilder {
     #[inline]
     fn push_field(&mut self, name: &str, value: Value<'_>) {
         // #[inline]: fast-path (no rename/drop) is a single branch + delegate.
-        // Fast path: no rename/drop configured.
-        let owned;
-        let resolved: &str = if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
-            name
-        } else {
-            match self.plan.resolve_field(name) {
-                Some(n) => {
-                    owned = n.to_owned();
-                    &owned
-                }
-                None => return,
+        // Fast path: no rename/drop configured — zero allocation.
+        if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+            self.push_field_resolved(name, value);
+            return;
+        }
+        // Resolve name via plan's field_map (borrows &self.plan).
+        // Try the zero-allocation fast path: column already exists.
+        if let Some(idx) = Self::resolve_and_slot(&self.plan, &self.field_index, name) {
+            let word = idx / 64;
+            let bit = idx % 64;
+            self.row_dirty[word] |= 1u64 << bit;
+            let b = &mut self.columns[idx];
+            let row_count = self.row_count;
+            if b.len() > row_count {
+                b.pop();
             }
-        };
+            b.push_value(value);
+        } else {
+            // Column doesn't exist yet (first row with rename) or field was
+            // dropped. Only allocate when the field is kept.
+            if let Some(resolved) = self.plan.resolve_field(name) {
+                let owned = resolved.to_owned();
+                self.push_field_resolved(&owned, value);
+            }
+        }
+    }
 
-        self.push_field_resolved(resolved, value);
+    /// Resolve a field name through the plan's field_map and look up its slot
+    /// index. Returns `Some(slot)` only if the column already exists in
+    /// field_index. Zero allocation — borrows plan and field_index as
+    /// separate fields.
+    #[inline]
+    fn resolve_and_slot(
+        plan: &ExecutionPlan,
+        field_index: &HashMap<String, usize>,
+        name: &str,
+    ) -> Option<usize> {
+        let resolved = plan.resolve_field(name)?;
+        field_index.get(resolved).copied()
     }
 
     /// Advance the row counter without null-fill, filter, or dirty-mask clear.
@@ -501,62 +585,127 @@ impl TableBuilder {
     }
 
     // Predicate-first helpers
-    fn ensure_predicate_fields(&mut self) {
-        if self.predicate_fields.is_some() || self.plan.filter.is_none() {
-            return;
+    /// Build the predicate bitmask from field_index. Called lazily on first
+    /// `is_predicate_slot` call when the mask is still empty.
+    fn build_predicate_mask(&mut self) {
+        let buf = match self.row_buf {
+            Some(ref mut b) => b,
+            None => return,
+        };
+        if !buf.pred_names.is_empty() {
+            return; // already built (pred_names populated)
         }
-        let mut set = HashSet::default();
+        // Collect predicate field names (one-time clone of the filter).
+        let mut names: SmallVec<[String; 4]> = SmallVec::new();
         if let Some(ref f) = self.plan.filter.clone() {
-            Self::collect_predicate_fields(f, &self.plan, &mut set);
+            Self::collect_predicate_field_names(f, &self.plan, &mut names);
         }
-        self.predicate_fields = Some(set);
+        // Cache the names so future calls can check without cloning.
+        buf.pred_names.clone_from(&names);
+        // Grow mask to cover all columns.
+        let ncols = self.columns.len();
+        let words = (ncols + 63) / 64.max(1);
+        buf.predicate_mask.resize(words, 0);
+        // Mark slots for predicate fields that already exist.
+        for name in &names {
+            if let Some(&slot) = self.field_index.get(name.as_str()) {
+                let word = slot / 64;
+                let bit = slot % 64;
+                if word < buf.predicate_mask.len() {
+                    buf.predicate_mask[word] |= 1u64 << bit;
+                }
+            }
+        }
     }
 
-    fn collect_predicate_fields(
+    /// Mark a slot as a predicate column by checking cached predicate names.
+    /// Called once per new column to handle fields created after the initial
+    /// mask build (e.g., the predicate column appears in the data after
+    /// `build_predicate_mask` already ran for earlier columns).
+    #[inline]
+    fn mark_predicate_slot(&mut self, slot: u32) {
+        if self.plan.filter.is_none() {
+            return;
+        }
+        // Phase 1: check fast path (already marked) via immutable borrow,
+        // then check if pred_names are populated.  Avoid holding &mut buf
+        // across build_predicate_mask (which needs &mut self).
+        let needs_build = self.row_buf.as_ref().map_or(false, |buf| {
+            let word = slot as usize / 64;
+            let bit = slot as usize % 64;
+            if word < buf.predicate_mask.len() && (buf.predicate_mask[word] >> bit) & 1 == 1 {
+                return false; // already marked — no-op
+            }
+            buf.pred_names.is_empty() // need to build the mask
+        });
+        if needs_build {
+            self.build_predicate_mask();
+        }
+        // Phase 2: check if this slot is now marked after build.
+        if let Some(ref buf) = self.row_buf {
+            let word = slot as usize / 64;
+            let bit = slot as usize % 64;
+            if word < buf.predicate_mask.len() && (buf.predicate_mask[word] >> bit) & 1 == 1 {
+                return; // marked during build or was already marked
+            }
+        }
+        // Phase 3: mask is built but this slot isn't in it. Check if the
+        // column name matches any cached predicate name (no filter clone).
+        if let Some(col_name) = self.column_order.get(slot as usize) {
+            let is_pred = self.row_buf.as_ref().map_or(false, |buf| {
+                buf.pred_names.iter().any(|n| n == col_name)
+            });
+            if is_pred {
+                let buf = self.row_buf.as_mut().unwrap();
+                let word = slot as usize / 64;
+                let bit = slot as usize % 64;
+                if word >= buf.predicate_mask.len() {
+                    buf.predicate_mask.resize(word + 1, 0);
+                }
+                buf.predicate_mask[word] |= 1u64 << bit;
+            }
+        }
+    }
+
+    fn collect_predicate_field_names(
         pred: &FilterPredicate,
         plan: &ExecutionPlan,
-        set: &mut HashSet<String>,
+        names: &mut SmallVec<[String; 4]>,
     ) {
         match pred {
             FilterPredicate::Equal { field, .. } | FilterPredicate::NotEqual { field, .. } => {
-                if let Some(resolved) = plan.resolve_field(field) {
-                    set.insert(resolved.to_string());
-                } else {
-                    // Field is dropped but predicate still references it (via plan.filter
-                    // before drop?); still need to track raw?
-                    set.insert(field.clone());
-                }
+                let resolved = plan.resolve_field(field).unwrap_or(field);
+                names.push(resolved.to_string());
             }
             FilterPredicate::Compare { field_a, field_b, .. } => {
                 for f in [field_a, field_b] {
-                    if let Some(resolved) = plan.resolve_field(f) {
-                        set.insert(resolved.to_string());
-                    } else {
-                        set.insert(f.clone());
-                    }
+                    let resolved = plan.resolve_field(f).unwrap_or(f);
+                    names.push(resolved.to_string());
                 }
             }
             FilterPredicate::And(a, b) | FilterPredicate::Or(a, b) => {
-                Self::collect_predicate_fields(a, plan, set);
-                Self::collect_predicate_fields(b, plan, set);
+                Self::collect_predicate_field_names(a, plan, names);
+                Self::collect_predicate_field_names(b, plan, names);
             }
-            FilterPredicate::Not(inner) => Self::collect_predicate_fields(inner, plan, set),
+            FilterPredicate::Not(inner) => Self::collect_predicate_field_names(inner, plan, names),
         }
     }
 
-    fn is_predicate_field(&mut self, name: &str) -> bool {
-        self.ensure_predicate_fields();
-        if let Some(ref set) = self.predicate_fields {
-            set.contains(name)
-        } else {
-            false
-        }
+    #[inline]
+    fn is_predicate_slot(&self, slot: u32) -> bool {
+        self.row_buf.as_ref().map_or(false, |b| {
+            let word = slot as usize / 64;
+            let bit = slot as usize % 64;
+            word < b.predicate_mask.len() && (b.predicate_mask[word] >> bit) & 1 == 1
+        })
     }
 
     fn get_buffered_value(&self, field: &str) -> Option<&Value<'static>> {
+        let buf = self.row_buf.as_ref()?;
         let resolved = self.plan.resolve_field(field)?;
-        for (n, v) in self.buffered.iter().rev() {
-            if n == resolved {
+        let slot = *self.field_index.get(resolved)? as u32;
+        for (s, v) in buf.fields.iter().rev() {
+            if *s == slot {
                 return Some(v);
             }
         }
@@ -578,7 +727,18 @@ impl TableBuilder {
         let Some(ref pred) = self.plan.filter else {
             return PredicateState::Pass;
         };
-        Self::eval_predicate(pred, self)
+        #[cfg(any(feature = "profiling", feature = "profile"))]
+        {
+            crate::engine::PREDICATE_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        let result = Self::eval_predicate(pred, self);
+        #[cfg(any(feature = "profiling", feature = "profile"))]
+        match result {
+            PredicateState::Fail => { crate::engine::PREDICATE_FAILS.fetch_add(1, Ordering::Relaxed); }
+            PredicateState::Undecided => { crate::engine::PREDICATE_UNDECIDED.fetch_add(1, Ordering::Relaxed); }
+            _ => {}
+        }
+        result
     }
 
     fn eval_predicate(pred: &FilterPredicate, tb: &TableBuilder) -> PredicateState {
@@ -669,81 +829,94 @@ impl TableBuilder {
     }
 
     fn drain_buffered(&mut self, pass: bool) {
+        let buf = match self.row_buf {
+            Some(ref mut b) => b,
+            None => return,
+        };
         if pass {
-            // Deduplicate last-write-wins: keep last occurrence per column
-            let mut seen: HashMap<String, Value<'static>> = HashMap::default();
-            for (name, val) in self.buffered.drain(..) {
-                seen.insert(name, val);
+            // Deduplicate last-write-wins by slot index (u32).
+            // O(n) reverse scan with a u64 bitmask — first hit in reverse is
+            // the last write in forward order (last-write-wins).
+            let ncols = self.columns.len();
+            let words = (ncols + 63) / 64;
+            if self.row_dirty.len() < words {
+                self.row_dirty.resize(words, 0);
             }
-            for (name, val) in seen {
-                // Check frozen unknown (as in push_field_resolved)
-                if self.frozen.is_some() && !self.field_index.contains_key(&name) {
-                    if self.unknown_error.is_none() {
-                        let frozen = self.frozen.as_ref().unwrap();
-                        self.unknown_error = Some(format!(
-                            "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
-                            name,
-                            frozen.num_columns(),
-                            frozen.is_exact()
-                        ));
-                    }
+            let mut seen: u64 = 0;
+            let mut seen_extra: SmallVec<[u64; 1]> = SmallVec::new();
+            if words > 1 {
+                seen_extra.resize(words - 1, 0);
+            }
+            for &(slot, ref val) in buf.fields.iter().rev() {
+                let word = slot as usize / 64;
+                let bit = slot as usize % 64;
+                let mask = 1u64 << bit;
+                let already = if word == 0 {
+                    seen & mask != 0
+                } else {
+                    seen_extra.get(word - 1).map_or(false, |w| w & mask != 0)
+                };
+                if already {
                     continue;
                 }
-                let idx = self.ensure_column_idx(&name);
-                let word = idx / 64;
-                let bit = idx % 64;
-                // Ensure row_dirty covers idx
-                let needed = (self.columns.len() + 63) / 64;
-                if self.row_dirty.len() < needed {
-                    self.row_dirty.resize(needed, 0);
+                if word == 0 {
+                    seen |= mask;
+                } else if let Some(w) = seen_extra.get_mut(word - 1) {
+                    *w |= mask;
                 }
-                self.row_dirty[word] |= 1u64 << bit;
-                let b = &mut self.columns[idx];
+                self.row_dirty[word] |= mask;
+                let b = &mut self.columns[slot as usize];
                 if b.len() > self.row_count {
                     b.pop();
                 }
-                b.push_value(val);
+                b.push_value(*val);
             }
-            // Null-fill missing columns and handle filter/dirty, then increment row_count
-            // Reuse finish_row's null-fill logic but without re-checking filter (already passed)
-            let ncols = self.columns.len();
-            let full_words = ncols / 64;
-            let rem_bits = ncols % 64;
-            let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
-                && (rem_bits == 0
-                    || self.row_dirty.get(full_words).copied().unwrap_or(0)
-                        == (1u64 << rem_bits) - 1);
-            if is_full {
-                for w in &mut self.row_dirty {
-                    *w = 0;
-                }
-            } else {
-                for (i, b) in self.columns.iter_mut().enumerate() {
-                    let word = i / 64;
-                    let bit = i % 64;
-                    let is_set = (self.row_dirty[word] >> bit) & 1 == 1;
-                    if !is_set {
-                        b.push(None);
+            // Null-fill missing columns and handle filter/dirty, then increment row_count.
+            // Skip null-fill when called mid-row (buf.direct = true): the remaining
+            // fields will be pushed via the direct path, and end_row's
+            // null_fill_missing handles any columns that don't appear.
+            if !buf.direct {
+                let ncols = self.columns.len();
+                let full_words = ncols / 64;
+                let rem_bits = ncols % 64;
+                let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
+                    && (rem_bits == 0
+                        || self.row_dirty.get(full_words).copied().unwrap_or(0)
+                            == (1u64 << rem_bits) - 1);
+                if is_full {
+                    for w in &mut self.row_dirty {
+                        *w = 0;
+                    }
+                } else {
+                    for (i, b) in self.columns.iter_mut().enumerate() {
+                        let word = i / 64;
+                        let bit = i % 64;
+                        let is_set = (self.row_dirty[word] >> bit) & 1 == 1;
+                        if !is_set {
+                            b.push(None);
+                        }
+                    }
+                    for w in &mut self.row_dirty {
+                        *w = 0;
                     }
                 }
-                for w in &mut self.row_dirty {
-                    *w = 0;
-                }
+            } else {
+                // Mid-row: keep dirty bits set so null_fill_missing in end_row
+                // can take the is_full fast path when all columns were pushed.
             }
             self.row_count += 1;
         } else {
             // Fail: discard buffered fields, no row increment, clear dirty
-            self.buffered.clear();
+            buf.fields.clear();
             for w in &mut self.row_dirty {
                 *w = 0;
             }
-            // Do not increment row_count, columns already have correct len (no push)
         }
-        // Ensure buffered is cleared for next row (drain already cleared if pass, else clear)
-        if !self.buffered.is_empty() {
-            self.buffered.clear();
+        // Ensure fields are cleared for next row
+        if !buf.fields.is_empty() {
+            buf.fields.clear();
         }
-        self.buffered_state = PredicateState::Undecided;
+        buf.state = PredicateState::Undecided;
     }
 
     fn evaluate_against_null(&self) -> PredicateState {
@@ -811,6 +984,37 @@ impl TableBuilder {
             },
         }
     }
+
+    /// Null-fill any column missing the current row, then clear row_dirty.
+    /// Called when the predicate resolved to Pass mid-row (direct mode).
+    fn null_fill_missing(&mut self) {
+        let ncols = self.columns.len();
+        let full_words = ncols / 64;
+        let rem_bits = ncols % 64;
+        let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
+            && (rem_bits == 0
+                || self.row_dirty.get(full_words).copied().unwrap_or(0)
+                    == (1u64 << rem_bits) - 1);
+        if is_full {
+            for w in &mut self.row_dirty {
+                *w = 0;
+            }
+        } else {
+            for (i, b) in self.columns.iter_mut().enumerate() {
+                let word = i / 64;
+                let bit = i % 64;
+                let is_set = (self.row_dirty[word] >> bit) & 1 == 1;
+                if !is_set {
+                    b.push(None);
+                }
+            }
+            for w in &mut self.row_dirty {
+                *w = 0;
+            }
+        }
+        // Note: row_count was already incremented by drain_buffered(true)
+        // when the predicate resolved to Pass mid-row. Do NOT increment here.
+    }
 }
 
 impl Default for TableBuilder {
@@ -819,15 +1023,31 @@ impl Default for TableBuilder {
     }
 }
 
-impl ColumnarSink for TableBuilder {
-    #[inline]
+impl ColumnarSink for TableBuilder {    #[inline]
     fn begin_row(&mut self) {
-        if self.plan.filter.is_some() {
-            self.buffered.clear();
-            self.buffered_state = PredicateState::Undecided;
-            self.ensure_predicate_fields();
+        if let Some(ref mut buf) = self.row_buf {
+            // Adaptive strategy: after at least one committed row, decide
+            // whether buffering is worthwhile based on the predicate column's
+            // ordinal relative to the total number of columns.  We must wait
+            // until row_count > 0 because early-rejected rows don't create
+            // all columns, making ncols unreliable for the ordinal comparison.
+            if buf.predicate_ordinal.is_some() && buf.buffer_worthwhile && self.row_count > 0 {
+                // Use the most accurate column count available. self.columns.len()
+                // is unreliable for sparse files where not all columns exist yet.
+                let ncols = self.frozen.as_ref().map(|f| f.num_columns() as u32)
+                    .or_else(|| (!self.plan.schema_order.is_empty())
+                        .then(|| self.plan.schema_order.len() as u32))
+                    .unwrap_or(self.columns.len() as u32);
+                if let Some(ordinal) = buf.predicate_ordinal {
+                    if ordinal >= ncols * 4 / 5 {
+                        buf.buffer_worthwhile = false;
+                    }
+                }
+            }
+            buf.fields.clear();
+            buf.state = PredicateState::Undecided;
+            buf.direct = false;
         }
-        // Row boundaries are tracked by `row_count`; no state to set up for non-filter path.
     }
 
     #[inline]
@@ -836,18 +1056,19 @@ impl ColumnarSink for TableBuilder {
             self.push_field(name, value);
             return;
         }
-        // Buffered path: resolve and buffer
+        // Adaptive: late predicate → push directly, pop-on-reject at end_row.
+        let buf_worthwhile = self.row_buf.as_ref().map_or(true, |b| b.buffer_worthwhile);
+        if !buf_worthwhile {
+            self.push_field(name, value);
+            return;
+        }
+        // Buffered path: resolve name → slot, buffer (slot, value).
         let resolved = match self.plan.resolve_field(name) {
             Some(r) => r.to_owned(),
             None => return,
         };
         // Check frozen unknown (as in push_field_resolved)
         if self.frozen.is_some() && !self.field_index.contains_key(&resolved) {
-            // Need to check if resolved is in frozen's column set; field_index already has all frozen cols
-            // If not in field_index, it's unknown (since frozen pre-sized)
-            // But we haven't yet checked predicate_fields; unknown should error even if not predicate
-            // For now, treat as unknown and error on drain (or immediately)
-            // We set unknown_error here to surface early
             if self.unknown_error.is_none() {
                 if let Some(ref frozen) = self.frozen {
                     if !frozen.column_names().iter().any(|n| n.as_ref() == resolved) {
@@ -862,17 +1083,31 @@ impl ColumnarSink for TableBuilder {
                 }
             }
         }
+        let slot = self.ensure_column_idx(&resolved) as u32;
+        self.mark_predicate_slot(slot);
         let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
-        if let Some(pos) = self.buffered.iter().position(|(n, _)| n == &resolved) {
-            self.buffered[pos].1 = val_static;
-        } else {
-            self.buffered.push((resolved.clone(), val_static));
+        let is_pred = self.is_predicate_slot(slot);
+            #[cfg(any(feature = "profiling", feature = "profile"))]
+            if is_pred { crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } else { crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+        // Push value to buffer BEFORE evaluating predicate (value must be findable).
+        if let Some(ref mut buf) = self.row_buf {
+            if let Some(pos) = buf.fields.iter().position(|(s, _)| *s == slot) {
+                buf.fields[pos].1 = val_static;
+            } else {
+                buf.fields.push((slot, val_static));
+            }
         }
-        // If this field is a predicate column, re-evaluate
-        if self.is_predicate_field(&resolved) {
-            self.buffered_state = self.evaluate_predicate_state();
-            // Short-circuit: if Fail, we could keep buffering but will discard at end_row;
-            // The scanner will check row_rejected() to skip remainder.
+        if is_pred {
+            // Record predicate ordinal for adaptive strategy (once)
+            if let Some(ref mut buf) = self.row_buf {
+                if buf.predicate_ordinal.is_none() {
+                    buf.predicate_ordinal = Some(slot);
+                }
+            }
+            let state = self.evaluate_predicate_state();
+            if let Some(ref mut buf) = self.row_buf {
+                buf.state = state;
+            }
         }
     }
 
@@ -882,12 +1117,32 @@ impl ColumnarSink for TableBuilder {
             self.finish_row();
             return;
         }
-        // Buffered path
-        if self.buffered_state == PredicateState::Undecided {
-            // Evaluate against NULL for missing predicate columns
-            self.buffered_state = self.evaluate_against_null();
+        // Check adaptive strategy: if buffering is not worthwhile (late
+        // predicate), use direct push + pop-on-reject (finish_row).
+        let buf_worthwhile = self.row_buf.as_ref().map_or(true, |b| b.buffer_worthwhile);
+        if !buf_worthwhile {
+            // Late predicate: values were pushed directly to columns.
+            // finish_row null-fills missing, evaluates filter against columns,
+            // and pops on reject — exactly the pre-buffering behavior.
+            self.finish_row();
+            return;
         }
-        let pass = self.buffered_state == PredicateState::Pass;
+        // Buffered path
+        let (state, direct) = self.row_buf.as_ref().map_or(
+            (PredicateState::Pass, false),
+            |b| (b.state, b.direct),
+        );
+        if direct {
+            // Already flushed to columns; just null-fill missing columns.
+            self.null_fill_missing();
+            return;
+        }
+        let state = if state == PredicateState::Undecided {
+            self.evaluate_against_null()
+        } else {
+            state
+        };
+        let pass = state == PredicateState::Pass;
         self.drain_buffered(pass);
     }
 
@@ -907,6 +1162,12 @@ impl ColumnarSink for TableBuilder {
             self.push_field_resolved(resolved_name, value);
             return;
         }
+        // Adaptive: late predicate → push directly, pop-on-reject at end_row.
+        let buf_worthwhile = self.row_buf.as_ref().map_or(true, |b| b.buffer_worthwhile);
+        if !buf_worthwhile {
+            self.push_field_resolved(resolved_name, value);
+            return;
+        }
         // Buffered path for already-resolved name (no rename lookup)
         if self.frozen.is_some() && !self.field_index.contains_key(resolved_name) {
             if let Some(ref frozen) = self.frozen {
@@ -923,20 +1184,36 @@ impl ColumnarSink for TableBuilder {
                 }
             }
         }
+        let slot = self.ensure_column_idx(resolved_name) as u32;
+        self.mark_predicate_slot(slot);
         let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
-        if let Some(pos) = self.buffered.iter().position(|(n, _)| n == resolved_name) {
-            self.buffered[pos].1 = val_static;
-        } else {
-            self.buffered.push((resolved_name.to_string(), val_static));
+        let is_pred = self.is_predicate_slot(slot);
+            #[cfg(any(feature = "profiling", feature = "profile"))]
+            if is_pred { crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } else { crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+        if let Some(ref mut buf) = self.row_buf {
+            if let Some(pos) = buf.fields.iter().position(|(s, _)| *s == slot) {
+                buf.fields[pos].1 = val_static;
+            } else {
+                buf.fields.push((slot, val_static));
+            }
         }
-        if self.is_predicate_field(resolved_name) {
-            self.buffered_state = self.evaluate_predicate_state();
+        if is_pred {
+            // Record predicate ordinal for adaptive strategy (once)
+            if let Some(ref mut buf) = self.row_buf {
+                if buf.predicate_ordinal.is_none() {
+                    buf.predicate_ordinal = Some(slot);
+                }
+            }
+            let state = self.evaluate_predicate_state();
+            if let Some(ref mut buf) = self.row_buf {
+                buf.state = state;
+            }
         }
     }
 
     #[inline]
     fn resolve_and_put(&mut self, name: &str, value: Value<'_>) {
-        #[cfg(feature = "profiling")]
+        #[cfg(any(feature = "profiling", feature = "profile"))]
         RESOLVE_AND_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
         if self.plan.filter.is_none() {
             if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
@@ -949,7 +1226,40 @@ impl ColumnarSink for TableBuilder {
             }
             return;
         }
-        // Buffered path
+        // Adaptive: late predicate → push directly, pop-on-reject at end_row.
+        if self.row_buf.as_ref().map_or(false, |b| !b.buffer_worthwhile) {
+            if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+                self.push_field_resolved(name, value);
+            } else {
+                if let Some(resolved) = self.plan.resolve_field(name) {
+                    let owned = resolved.to_owned();
+                    self.push_field_resolved(&owned, value);
+                }
+            }
+            return;
+        }
+        // Direct mode: predicate already passed, push directly to columns.
+        if let Some(ref buf) = self.row_buf {
+            if buf.direct {
+                let resolved = name;
+                if self.frozen.is_some() && !self.field_index.contains_key(resolved) {
+                    if let Some(ref frozen) = self.frozen {
+                        if !frozen.column_names().iter().any(|n| n.as_ref() == resolved) {
+                            if self.unknown_error.is_none() {
+                                self.unknown_error = Some(format!(
+                                    "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
+                                    resolved, frozen.num_columns(), frozen.is_exact()
+                                ));
+                            }
+                            return;
+                        }
+                    }
+                }
+                self.push_field_resolved(resolved, value);
+                return;
+            }
+        }
+        // Buffered path: resolve → slot, buffer (slot, value).
         if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
             // No rename/drop, raw == resolved
             let resolved = name;
@@ -967,20 +1277,41 @@ impl ColumnarSink for TableBuilder {
                         return;
                     }
                 }
-            }
+            }            let slot = self.ensure_column_idx(resolved) as u32;
+            self.mark_predicate_slot(slot);
             let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
-            if let Some(pos) = self.buffered.iter().position(|(n, _)| n == resolved) {
-                self.buffered[pos].1 = val_static;
-            } else {
-                self.buffered.push((resolved.to_string(), val_static));
+            let is_pred = self.is_predicate_slot(slot);
+            #[cfg(any(feature = "profiling", feature = "profile"))]
+            if is_pred { crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } else { crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+            if let Some(ref mut buf) = self.row_buf {
+                if let Some(pos) = buf.fields.iter().position(|(s, _)| *s == slot) {
+                    buf.fields[pos].1 = val_static;
+                } else {
+                    buf.fields.push((slot, val_static));
+                }
             }
-            if self.is_predicate_field(resolved) {
-                self.buffered_state = self.evaluate_predicate_state();
+            if is_pred {
+                // Record predicate ordinal for adaptive strategy (once)
+                if let Some(ref mut buf) = self.row_buf {
+                    if buf.predicate_ordinal.is_none() {
+                        buf.predicate_ordinal = Some(slot);
+                    }
+                }
+                let state = self.evaluate_predicate_state();
+                if let Some(ref mut buf) = self.row_buf {
+                    buf.state = state;
+                    if state == PredicateState::Pass {
+                        buf.direct = true;
+                    }
+                }
+                if state == PredicateState::Pass {
+                    // Predicate passed: drain buffered fields, switch to direct mode.
+                    self.drain_buffered(true);
+                }
             }
         } else {
             if let Some(resolved) = self.plan.resolve_field(name) {
                 let owned = resolved.to_owned();
-                // Check frozen
                 if self.frozen.is_some() && !self.field_index.contains_key(&owned) {
                     if let Some(ref frozen) = self.frozen {
                         if !frozen.column_names().iter().any(|n| n.as_ref() == owned) {
@@ -995,15 +1326,30 @@ impl ColumnarSink for TableBuilder {
                             return;
                         }
                     }
-                }
+                }                let slot = self.ensure_column_idx(&owned) as u32;
+                self.mark_predicate_slot(slot);
                 let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
-                if let Some(pos) = self.buffered.iter().position(|(n, _)| n == &owned) {
-                    self.buffered[pos].1 = val_static;
-                } else {
-                    self.buffered.push((owned.clone(), val_static));
+                let is_pred = self.is_predicate_slot(slot);
+            #[cfg(any(feature = "profiling", feature = "profile"))]
+            if is_pred { crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } else { crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                if let Some(ref mut buf) = self.row_buf {
+                    if let Some(pos) = buf.fields.iter().position(|(s, _)| *s == slot) {
+                        buf.fields[pos].1 = val_static;
+                    } else {
+                        buf.fields.push((slot, val_static));
+                    }
                 }
-                if self.is_predicate_field(&owned) {
-                    self.buffered_state = self.evaluate_predicate_state();
+                if is_pred {
+                    // Record predicate ordinal for adaptive strategy (once)
+                    if let Some(ref mut buf) = self.row_buf {
+                        if buf.predicate_ordinal.is_none() {
+                            buf.predicate_ordinal = Some(slot);
+                        }
+                    }
+                    let state = self.evaluate_predicate_state();
+                    if let Some(ref mut buf) = self.row_buf {
+                        buf.state = state;
+                    }
                 }
             }
         }
@@ -1011,7 +1357,7 @@ impl ColumnarSink for TableBuilder {
 
     #[inline]
     fn row_rejected(&self) -> bool {
-        self.plan.filter.is_some() && self.buffered_state == PredicateState::Fail
+        self.plan.filter.is_some() && self.row_buf.as_ref().map_or(false, |b| b.state == PredicateState::Fail)
     }
 
     #[inline]
@@ -1031,8 +1377,10 @@ impl ColumnarSink for TableBuilder {
 
         let mut fields = Vec::with_capacity(self.column_order.len());
         let mut arrays = Vec::with_capacity(self.column_order.len());
+        // Iterate by index so we can borrow columns mutably for zero-copy export.
         for name in &self.column_order {
-            if let Some(b) = self.get_column(name) {
+            if let Some(&idx) = self.field_index.get(name.as_str()) {
+                let b = &mut self.columns[idx];
                 fields.push(ArrowField::new(name.as_str(), b.arrow_datatype(), true));
                 arrays.push(b.to_arrow_array()?);
             }
@@ -1125,7 +1473,7 @@ mod tests {
     use crate::plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate};
     use crate::value::Value;
     use crate::Result;
-    use arrow::array::AsArray;
+    use arrow::array::{Array, AsArray};
 
     /// Simple newline-delimited parser for test data.
     /// Each line is a row; fields are `key=value` separated by spaces.
@@ -1186,7 +1534,7 @@ mod tests {
     }
 
     fn parse_bytes(bytes: &[u8], plan: ExecutionPlan) -> TableBuilder {
-        let mut sink = TableBuilder::with_plan((bytes.len() / 16).max(4), plan);
+        let mut sink = TableBuilder::with_plan((bytes.len() / 16).max(4), Arc::new(plan));
         LineParser.parse_chunk(bytes, &mut sink).unwrap();
         sink
     }
@@ -1357,7 +1705,7 @@ mod tests {
         plan.auto_dict = true;
         let a = parse_bytes(b"P=x\nP=y\n", plan.clone());
         let b = parse_bytes(b"P=x\nP=y\n", plan.clone());
-        let mut merged = TableBuilder::with_plan(64, plan);
+        let mut merged = TableBuilder::with_plan(64, Arc::new(plan));
         merged.extend(a).unwrap();
         merged.extend(b).unwrap();
         merged.auto_dict_upgrade();
@@ -1457,5 +1805,239 @@ mod tests {
                 assert!(!is_full2, "ncols={ncols} should not be full after clearing one bit");
             }
         }
+    }
+
+    #[test]
+    fn test_finish_twice_does_not_panic() {
+        // L7: zero-copy export (mem::take) leaves builders empty. Calling
+        // finish() twice should return an empty batch, not panic.
+        let mut tb = parse_bytes(b"A=1 B=2\nA=3 B=4\n", ExecutionPlan::new());
+        let batch1 = tb.finish().unwrap();
+        assert_eq!(batch1.num_rows(), 2);
+        // Second call: columns are empty after mem::take.
+        let batch2 = tb.finish().unwrap();
+        assert_eq!(batch2.num_rows(), 0);
+    }
+
+    #[test]
+    fn test_c2_compound_reorder() {
+        // L7: C2 reorder — Field2 == x AND Field1 == y must give the same
+        // result as Field1 == y AND Field2 == x.
+        let data = b"A=1 B=2\nA=2 B=2\nA=1 B=3\nA=2 B=3\n";
+        let make_filter = |a: &str, va: &str, b: &str, vb: &str| -> ExecutionPlan {
+            let mut plan = ExecutionPlan::new();
+            plan.filter = Some(FilterPredicate::And(
+                Box::new(FilterPredicate::Equal { field: a.to_string(), value: va.to_string() }),
+                Box::new(FilterPredicate::Equal { field: b.to_string(), value: vb.to_string() }),
+            ));
+            plan
+        };
+        let r1 = parse_bytes(data, make_filter("A", "1", "B", "2"));
+        let r2 = parse_bytes(data, make_filter("B", "2", "A", "1"));
+        assert_eq!(r1.num_rows(), r2.num_rows(), "C2 reorder must produce identical results");
+        assert_eq!(r1.num_rows(), 1); // A=1 B=2
+    }
+
+    #[test]
+    fn test_c2_or_reorder() {
+        // L7: Or reorder — same result regardless of operand order.
+        // Row 1: A=1 B=2 → A==1 → Pass
+        // Row 2: A=2 B=2 → A!=1, B!=3 → Fail
+        // Row 3: A=3 B=3 → B==3 → Pass
+        let data = b"A=1 B=2\nA=2 B=2\nA=3 B=3\n";
+        let make_filter = |a: &str, va: &str, b: &str, vb: &str| -> ExecutionPlan {
+            let mut plan = ExecutionPlan::new();
+            plan.filter = Some(FilterPredicate::Or(
+                Box::new(FilterPredicate::Equal { field: a.to_string(), value: va.to_string() }),
+                Box::new(FilterPredicate::Equal { field: b.to_string(), value: vb.to_string() }),
+            ));
+            plan
+        };
+        let r1 = parse_bytes(data, make_filter("A", "1", "B", "3"));
+        let r2 = parse_bytes(data, make_filter("B", "3", "A", "1"));
+        assert_eq!(r1.num_rows(), r2.num_rows(), "Or reorder must produce identical results");
+        assert_eq!(r1.num_rows(), 2); // rows 1 and 3
+    }
+
+    #[test]
+    fn test_predicate_slot_created_after_mask_build() {
+        // Regression: when the predicate column appears AFTER other columns
+        // in document order, build_predicate_mask runs before the predicate
+        // column exists in field_index, so its bit is never set. The old
+        // early-return optimization prevented it from being added later.
+        //
+        // Data: A comes first, B is the predicate column (comes second).
+        // Filter: B == "reject" → all rows should be rejected.
+        let data = b"A=1 B=ok\nA=2 B=ok\nA=3 B=ok\n";
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "B".to_string(),
+            value: "reject".to_string(),
+        });
+        let engine = parse_bytes(data, plan);
+        assert_eq!(engine.num_rows(), 0, "all rows should be rejected (B != reject)");
+
+        // Positive case: some rows pass
+        let data2 = b"A=1 B=ok\nA=2 B=reject\nA=3 B=ok\n";
+        let mut plan2 = ExecutionPlan::new();
+        plan2.filter = Some(FilterPredicate::Equal {
+            field: "B".to_string(),
+            value: "ok".to_string(),
+        });
+        let engine2 = parse_bytes(data2, plan2);
+        assert_eq!(engine2.num_rows(), 2, "rows 1 and 3 pass (B == ok)");
+        let col = engine2.get_column("A").unwrap();
+        assert_eq!(col.as_str_vec(), vec![Some("1".into()), Some("3".into())]);
+    }
+
+    #[test]
+    fn test_predicate_first_via_resolve_and_put() {
+        // Uses resolve_and_put (scanner path) instead of put_field (LineParser path)
+        // to verify the predicate machinery works through the scanner's code path.
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "B".to_string(),
+            value: "reject".to_string(),
+        });
+        let mut tb = TableBuilder::with_plan(16, Arc::new(plan));
+        // Row 1: B=ok → should pass
+        tb.begin_row();
+        tb.resolve_and_put("A", Value::Str("1"));
+        tb.resolve_and_put("B", Value::Str("ok"));
+        tb.end_row();
+        // Row 2: B=reject → should fail
+        tb.begin_row();
+        tb.resolve_and_put("A", Value::Str("2"));
+        tb.resolve_and_put("B", Value::Str("reject"));
+        tb.end_row();
+        // Row 3: B=ok → should pass
+        tb.begin_row();
+        tb.resolve_and_put("A", Value::Str("3"));
+        tb.resolve_and_put("B", Value::Str("ok"));
+        tb.end_row();
+        let batch = tb.finish().unwrap();
+        assert_eq!(batch.num_rows(), 1, "only row 2 (B==reject) should pass");
+    }
+
+    #[test]
+    fn test_predicate_first_skip_via_resolve_and_put() {
+        // Test the skip path: predicate on first field, all rows rejected.
+        // This exercises the mark_predicate_slot + row_rejected + end_row path
+        // that the scanner uses via resolve_and_put.
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "A".to_string(),
+            value: "999".to_string(),
+        });
+        let mut tb = TableBuilder::with_plan(16, Arc::new(plan));
+        for _i in 0..100 {
+            tb.begin_row();
+            tb.resolve_and_put("A", Value::Str("0"));
+            tb.resolve_and_put("B", Value::Str("x"));
+            tb.resolve_and_put("C", Value::Str("y"));
+            tb.end_row();
+        }
+        let batch = tb.finish().unwrap();
+        assert_eq!(batch.num_rows(), 0, "all rows should be rejected (A=0 != 999)");
+    }
+
+    #[test]
+    fn test_sparse_column_predicate_skip() {
+        // Regression test for ncols gate: sparse column appears only after
+        // row 50, predicate on early field (A). The adaptive strategy must
+        // not disable buffering because ncols is computed from the incomplete
+        // column set before the sparse column appears.
+        //
+        // Data: 100 rows. Rows 1-50 have A, B, C. Rows 51-100 also have D.
+        // Filter: A == "reject" → all rows rejected.
+        // The skip must fire for all rows, not just the first few.
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "A".to_string(),
+            value: "reject".to_string(),
+        });
+        let mut tb = TableBuilder::with_plan(128, Arc::new(plan));
+        for i in 0..100 {
+            tb.begin_row();
+            tb.resolve_and_put("A", Value::Str("ok"));
+            tb.resolve_and_put("B", Value::Str("x"));
+            tb.resolve_and_put("C", Value::Str("y"));
+            if i >= 50 {
+                tb.resolve_and_put("D", Value::Str("z"));
+            }
+            tb.end_row();
+        }
+        let batch = tb.finish().unwrap();
+        assert_eq!(batch.num_rows(), 0, "all rows rejected (A=ok != reject)");
+    }
+
+    #[test]
+    fn test_sparse_column_predicate_pass() {
+        // Like above, but predicate passes. The sparse column D should appear
+        // only for rows 51-100; rows 1-50 should have D = null.
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "A".to_string(),
+            value: "ok".to_string(),
+        });
+        let mut tb = TableBuilder::with_plan(128, Arc::new(plan));
+        for _i in 0..100 {
+            tb.begin_row();
+            tb.resolve_and_put("A", Value::Str("ok"));
+            tb.resolve_and_put("B", Value::Str("x"));
+            tb.resolve_and_put("C", Value::Str("y"));
+            if _i >= 50 {
+                tb.resolve_and_put("D", Value::Str("z"));
+            }
+            tb.end_row();
+        }
+        let batch = tb.finish().unwrap();
+        assert_eq!(batch.num_rows(), 100, "all rows pass (A=ok == ok)");
+        // D column: null for first 50, "z" for last 50
+        if let Some(col) = batch.column_by_name("D") {
+            let arr = col.as_string::<i32>();
+            for i in 0..50 {
+                assert!(arr.is_null(i), "row {} should have D=null", i);
+            }
+            for i in 50..100 {
+                assert!(!arr.is_null(i), "row {} should not be null (D len={}, total rows={})", i, arr.len(), batch.num_rows());
+                assert_eq!(arr.value(i), "z", "rows 50+ should have D=z");
+            }
+        } else {
+            panic!("D column should exist");
+        }
+    }
+
+    #[test]
+    fn test_sparse_late_predicate_ordinal() {
+        // Regression: predicate on column E that only appears after row 30.
+        // ncols gate must use schema/column count that includes E, not just
+        // the columns seen so far.
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "E".to_string(),
+            value: "999".to_string(),
+        });
+        let mut tb = TableBuilder::with_plan(128, Arc::new(plan));
+        // First 30 rows: only A, B
+        for _i in 0..30 {
+            tb.begin_row();
+            tb.resolve_and_put("A", Value::Str("x"));
+            tb.resolve_and_put("B", Value::Str("y"));
+            tb.end_row();
+        }
+        // Rows 31-100: A, B, C, D, E
+        for _i in 30..100 {
+            tb.begin_row();
+            tb.resolve_and_put("A", Value::Str("x"));
+            tb.resolve_and_put("B", Value::Str("y"));
+            tb.resolve_and_put("C", Value::Str("c"));
+            tb.resolve_and_put("D", Value::Str("d"));
+            tb.resolve_and_put("E", Value::Str("e"));
+            tb.end_row();
+        }
+        let batch = tb.finish().unwrap();
+        // E="e" != "999" → all rows rejected
+        assert_eq!(batch.num_rows(), 0, "all rows rejected (E=\"e\" != 999)");
     }
 }

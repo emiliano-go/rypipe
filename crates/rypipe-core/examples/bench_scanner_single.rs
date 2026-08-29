@@ -19,6 +19,7 @@
 //!   target/release/examples/bench_scanner_single
 //! ```
 
+use std::sync::Arc;
 use std::io::Write;
 use std::time::Instant;
 
@@ -175,7 +176,7 @@ fn bench_build_only(data: &[u8], plan: ExecutionPlan) -> (usize, f64) {
     use rypipe_core::TableBuilder;
     let parser = TsvParser;
     parser.validate(data).unwrap();
-    let mut sink = TableBuilder::with_plan((data.len() / 16).max(64), plan);
+    let mut sink = TableBuilder::with_plan((data.len() / 16).max(64), Arc::new(plan));
     let start = Instant::now();
     parser.parse_chunk(data, &mut sink).unwrap();
     let elapsed = start.elapsed().as_secs_f64();
@@ -190,7 +191,7 @@ fn bench_full_parse(data: &[u8], plan: ExecutionPlan) -> (usize, f64) {
     use rypipe_core::TableBuilder;
     let parser = TsvParser;
     parser.validate(data).unwrap();
-    let mut sink = TableBuilder::with_plan((data.len() / 16).max(64), plan);
+    let mut sink = TableBuilder::with_plan((data.len() / 16).max(64), Arc::new(plan));
     let start = Instant::now();
     parser.parse_chunk(data, &mut sink).unwrap();
     let batch = sink.finish().unwrap();
@@ -242,7 +243,7 @@ fn main() {
     // Tier 4: push_only
     let plan_push = ExecutionPlan::new();
     let mut push_sink = PushOnly {
-        inner: rypipe_core::TableBuilder::with_plan((data.len() / 16).max(64), plan_push),
+        inner: rypipe_core::TableBuilder::with_plan((data.len() / 16).max(64), Arc::new(plan_push)),
     };
     let start4 = Instant::now();
     TsvParser.validate(&data).unwrap();

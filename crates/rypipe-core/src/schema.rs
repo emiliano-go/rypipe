@@ -217,7 +217,7 @@ mod tests {
         use crate::engine::TableBuilder;
         let plan = ExecutionPlan::new();
         let schema = FrozenSchema::from_plan(&["X", "Y", "Z"], &plan);
-        let mut builder = TableBuilder::with_plan(100, plan);
+        let mut builder = TableBuilder::with_plan(100, Arc::new(plan));
         // Pre-add column "X" with a push.
         builder.begin_row();
         builder.put_field("X", crate::value::Value::Str("hello"));

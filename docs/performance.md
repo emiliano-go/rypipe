@@ -137,6 +137,34 @@ Then use `perf`, `cargo flamegraph`, or `samply` to profile.
 - Dictionary encoding could be made incremental across chunks to recover the
   fast path for `auto_dict=True`.
 
+## BlockMasks — negative result (closed)
+
+BlockMasks precomputes 64-byte SIMD bitmasks per delimiter and answers
+multiple byte-search queries via bit operations. The idea: one AVX2/SSE2
+load per block amortized across N delimiter searches in the same span.
+
+**Microbench result (i5-1335U, release build, 500K iterations):**
+
+| Span | n=1 | n=2 | n=3 | n=5 | n=8 |
+|------|-----|-----|-----|-----|-----|
+| 32B | memchr 1.7x | memchr 1.9x | memchr 2.3x | memchr 3.7x | memchr 3.5x |
+| 64B | memchr 1.3x | memchr 1.3x | memchr 1.1x | memchr 1.3x | memchr 1.3x |
+| 128B | memchr 1.0x | memchr 1.1x | memchr 1.8x | **BM 1.2x** | memchr 1.4x |
+| 512B | memchr 1.4x | memchr 1.7x | memchr 1.2x | memchr 1.8x | memchr 1.8x |
+
+**Gate:** BlockMasks must win at n ≥ 4 on 64- and 128-byte spans.
+
+**Result:** Fails the gate. At 64 bytes memchr wins at all query counts.
+At 128 bytes, only n=5 shows a marginal win (1.2x) while n=8 regresses
+(0.73x). The mask-compute overhead (~20 instructions per block) cannot
+amortize across fewer than ~6 queries, and XML field spans rarely exceed
+100 bytes with more than 5 delimiter types active.
+
+**Verdict:** Close permanently. The scalar-loop `memchr`-based scanner
+remains the right choice for XML. If delimiter density increases (e.g.,
+JSON with 8+ active delimiters per 64-byte block), revisit with a
+worst-case microbench first.
+
 ## See also
 
 - [Architecture](./architecture/): engine design and fast/merge paths.

@@ -308,12 +308,28 @@ impl FilterPredicate {
                 }
             }
             FilterPredicate::And(a, b) => {
-                a.check(columns, field_index, row_index, plan)
-                    && b.check(columns, field_index, row_index, plan)
+                // Evaluate the operand with the earlier field first for
+                // short-circuit benefit (C2: reorder by document position).
+                let (first, second) = if pred_ordinal(a, field_index, plan)
+                    <= pred_ordinal(b, field_index, plan)
+                {
+                    (a.as_ref(), b.as_ref())
+                } else {
+                    (b.as_ref(), a.as_ref())
+                };
+                first.check(columns, field_index, row_index, plan)
+                    && second.check(columns, field_index, row_index, plan)
             }
             FilterPredicate::Or(a, b) => {
-                a.check(columns, field_index, row_index, plan)
-                    || b.check(columns, field_index, row_index, plan)
+                let (first, second) = if pred_ordinal(a, field_index, plan)
+                    <= pred_ordinal(b, field_index, plan)
+                {
+                    (a.as_ref(), b.as_ref())
+                } else {
+                    (b.as_ref(), a.as_ref())
+                };
+                first.check(columns, field_index, row_index, plan)
+                    || second.check(columns, field_index, row_index, plan)
             }
             FilterPredicate::Not(inner) => !inner.check(columns, field_index, row_index, plan),
         }
@@ -335,6 +351,8 @@ fn get_column<'a>(
 }
 
 /// Fetch a stored value formatted as a string for Equal/NotEqual checks.
+/// Tries zero-allocation `get_filter_view` first (String/Dict columns);
+/// falls back to `get_filter_value` for typed columns that need formatting.
 fn get_value(
     columns: &[crate::columnar::ColumnBuilder],
     field_index: &HashMap<String, usize>,
@@ -342,7 +360,13 @@ fn get_value(
     plan: &ExecutionPlan,
     row_index: usize,
 ) -> Option<String> {
-    get_column(columns, field_index, resolve(field, plan)).and_then(|b| b.get_filter_value(row_index))
+    let col = get_column(columns, field_index, resolve(field, plan))?;
+    // Fast path: borrowed &str for String/Dictionary columns (no allocation).
+    if let Some(s) = col.get_filter_view(row_index) {
+        return Some(s.to_owned());
+    }
+    // Slow path: typed columns need formatting (allocates).
+    col.get_filter_value(row_index)
 }
 
 /// Native-typed comparison with numeric promotion. Mixed Int64/Float64
@@ -386,5 +410,37 @@ fn apply_op(op: CompareOp, ord: Option<std::cmp::Ordering>) -> bool {
         CompareOp::Le => ord != Greater,
         CompareOp::Eq => ord == Equal,
         CompareOp::Ne => ord != Equal,
+    }
+}
+
+/// Return the minimum field ordinal for a predicate, used to order
+/// `And`/`Or` operands by document position (C2). Higher ordinal = later
+/// in the document. Returns `usize::MAX` for predicates without a
+/// resolvable field (should evaluate last).
+fn pred_ordinal(
+    pred: &FilterPredicate,
+    field_index: &HashMap<String, usize>,
+    plan: &ExecutionPlan,
+) -> usize {
+    match pred {
+        FilterPredicate::Equal { field, .. }
+        | FilterPredicate::NotEqual { field, .. } => {
+            field_index.get(resolve(field, plan))
+                .copied()
+                .unwrap_or(usize::MAX)
+        }
+        FilterPredicate::Compare { field_a, field_b, .. } => {
+            let a = field_index.get(resolve(field_a, plan))
+                .copied()
+                .unwrap_or(usize::MAX);
+            let b = field_index.get(resolve(field_b, plan))
+                .copied()
+                .unwrap_or(usize::MAX);
+            a.min(b)
+        }
+        FilterPredicate::And(a, b) | FilterPredicate::Or(a, b) => {
+            pred_ordinal(a, field_index, plan).min(pred_ordinal(b, field_index, plan))
+        }
+        FilterPredicate::Not(inner) => pred_ordinal(inner, field_index, plan),
     }
 }
