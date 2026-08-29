@@ -1,5 +1,6 @@
 #[cfg(feature = "mmap")]
 use std::fs::File;
+use std::sync::Arc;
 #[cfg(feature = "mmap")]
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -79,7 +80,7 @@ impl BoundedExecutor {
         bytes: &[u8],
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         consumer: &mut C,
     ) -> Result<()>
     where
@@ -92,14 +93,14 @@ impl BoundedExecutor {
 
         let (chunks, rows_per_batch, bytes_per_row) = self.plan_chunks(bytes, splitter);
 
-        let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), plan.clone());
+        let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
         let mut rows_in_batch = 0usize;
 
         for chunk in &chunks {
             let chunk_bytes = &bytes[chunk.start..chunk.end];
             let mut chunk_engine = TableBuilder::with_plan(
                 (chunk.len() / bytes_per_row.max(512)).max(64),
-                plan.clone(),
+                Arc::clone(&plan),
             );
             parser.validate(chunk_bytes)?;
             parser.parse_chunk_generic(chunk_bytes, &mut chunk_engine)?;
@@ -155,7 +156,7 @@ impl BoundedExecutor {
         bytes: &[u8],
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
     ) -> Result<Vec<RecordBatch>>
     where
         P: RecordParser + Clone + Send + Sync,
@@ -176,7 +177,7 @@ impl BoundedExecutor {
         path: &Path,
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         prefault: bool,
         consumer: &mut C,
     ) -> Result<()>
@@ -210,7 +211,7 @@ impl BoundedExecutor {
         path: &Path,
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         prefault: bool,
     ) -> Result<Vec<RecordBatch>>
     where
@@ -231,7 +232,7 @@ impl BoundedExecutor {
         input: InputBuffer,
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         consumer: &mut C,
     ) -> Result<()>
     where
@@ -246,7 +247,7 @@ impl BoundedExecutor {
         let (chunks, rows_per_batch, bytes_per_row) = self.plan_chunks(bytes, splitter);
         drop(input);
 
-        let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), plan.clone());
+        let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
         let mut rows_in_batch = 0usize;
 
         let mut file = File::open(path)?;
@@ -261,7 +262,7 @@ impl BoundedExecutor {
             file.read_exact(&mut chunk_buf)?;
             let mut chunk_engine = TableBuilder::with_plan(
                 (chunk.len() / bytes_per_row.max(512)).max(64),
-                plan.clone(),
+                Arc::clone(&plan),
             );
             parser.validate(&chunk_buf)?;
             parser.parse_chunk_generic(&chunk_buf, &mut chunk_engine)?;
@@ -316,7 +317,7 @@ impl BoundedExecutor {
         input: InputBuffer,
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
     ) -> Result<Vec<RecordBatch>>
     where
         P: RecordParser + Clone + Send + Sync,

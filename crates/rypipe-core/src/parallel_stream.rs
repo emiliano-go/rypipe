@@ -1,5 +1,6 @@
 //! Parallel streaming executor: multi-core parsing with bounded memory.
 
+use std::sync::Arc;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -211,7 +212,7 @@ impl ParallelStreamingExecutor {
         path: &Path,
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         prefault: bool,
         opts: ParallelStreamOpts,
         consumer: &mut C,
@@ -236,7 +237,7 @@ impl ParallelStreamingExecutor {
         input: std::sync::Arc<InputBuffer>,
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         opts: ParallelStreamOpts,
         consumer: &mut C,
     ) -> Result<()>
@@ -257,7 +258,7 @@ impl ParallelStreamingExecutor {
         bytes: &[u8],
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         opts: ParallelStreamOpts,
         consumer: &mut C,
     ) -> Result<()>
@@ -275,7 +276,7 @@ impl ParallelStreamingExecutor {
         input: Option<std::sync::Arc<InputBuffer>>,
         splitter: &dyn Splitter,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         opts: ParallelStreamOpts,
         consumer: &mut C,
     ) -> Result<()>
@@ -327,7 +328,7 @@ impl ParallelStreamingExecutor {
         let (sender, receiver) = sync_channel(self.max_in_flight);
         let mut handles: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(n);
         let chunk_queue = std::sync::Arc::new(std::sync::Mutex::new(chunks_with_seq));
-        let plan_arc = std::sync::Arc::new(plan);
+        let plan_arc = plan;
         let schema_arc = schema.map(std::sync::Arc::new);
         let est_row = splitter.estimate_bytes_per_row(&bytes[..bytes.len().min(65536)]).max(512);
 
@@ -337,7 +338,7 @@ impl ParallelStreamingExecutor {
             let queue = std::sync::Arc::clone(&chunk_queue);
             let sender_clone: SyncSender<(usize, Result<RecordBatch>)> = sender.clone();
             let parser_clone = parser.clone();
-            let plan_clone = (*plan_arc).clone();
+            let plan_clone = std::sync::Arc::clone(&plan_arc);
             let schema_clone = schema_arc.clone();
             let input_clone = input.clone();
             let fallback_clone = bytes_fallback.clone();
@@ -444,7 +445,7 @@ impl ParallelStreamingBatchIterator {
         path: PathBuf,
         splitter: S,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         budget: MemoryBudget,
         prefault: bool,
         opts: ParallelStreamOpts,

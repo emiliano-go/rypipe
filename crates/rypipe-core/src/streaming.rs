@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use arrow::record_batch::RecordBatch;
@@ -47,7 +48,7 @@ impl StreamingBatchIterator {
         path: PathBuf,
         splitter: S,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         budget: MemoryBudget,
         prefault: bool,
     ) -> Self
@@ -79,7 +80,7 @@ impl StreamingBatchIterator {
         bytes: Vec<u8>,
         splitter: S,
         parser: P,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
         budget: MemoryBudget,
     ) -> Self
     where
@@ -217,7 +218,7 @@ mod tests {
             data.to_vec(),
             LineSplitter,
             LineParser,
-            ExecutionPlan::new(),
+            Arc::new(ExecutionPlan::new()),
             budget,
         );
         let batches: Vec<_> = iter.collect::<Result<Vec<_>>>().unwrap();
@@ -232,7 +233,7 @@ mod tests {
         let data = b"A=1 B=2\nA=3 B=4\n";
         let budget = MemoryBudget::new(1024);
         let expected = BoundedExecutor::new(budget)
-            .run_bytes(data, &LineSplitter, LineParser, ExecutionPlan::new())
+            .run_bytes(data, &LineSplitter, LineParser, Arc::new(ExecutionPlan::new()))
             .unwrap();
         let expected_rows: usize = expected.iter().map(|b| b.num_rows()).sum();
 
@@ -240,7 +241,7 @@ mod tests {
             data.to_vec(),
             LineSplitter,
             LineParser,
-            ExecutionPlan::new(),
+            Arc::new(ExecutionPlan::new()),
             budget,
         );
         let streamed: Vec<_> = iter.collect::<Result<Vec<_>>>().unwrap();

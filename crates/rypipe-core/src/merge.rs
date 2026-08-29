@@ -167,11 +167,11 @@ pub fn engines_to_record_batches(
     let schema = Arc::new(Schema::new(fields));
 
     let batches: Result<Vec<RecordBatch>> = engines
-        .par_iter()
-        .map(|e| {
+        .into_par_iter()
+        .map(|mut e| {
             let mut arrays = Vec::with_capacity(order.len());
             for name in &order {
-                match e.get_column(name) {
+                match e.get_column_mut(name) {
                     Some(b) => arrays.push(b.to_arrow_array()?),
                     None => arrays.push(null_array(&types[name], e.row_count)),
                 }

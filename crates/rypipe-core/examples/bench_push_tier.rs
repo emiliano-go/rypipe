@@ -10,6 +10,7 @@
 //!   target/release/examples/bench_push_tier /path/to/file.xml
 //! ```
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use rypipe_core::decoder::ColumnarSink;
@@ -61,7 +62,7 @@ fn main() {
         let plan = ExecutionPlan::new();
         let est_row = splitter.estimate_bytes_per_row(&data[..data.len().min(65536)]).max(512);
         let est = (data.len() / est_row).max(64);
-        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, plan) };
+        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)) };
         decoder.parse_chunk_generic(&data, &mut sink).unwrap();
     }
 
@@ -73,7 +74,7 @@ fn main() {
         let plan = ExecutionPlan::new();
         let est_row = splitter.estimate_bytes_per_row(&data[..data.len().min(65536)]).max(512);
         let est = (data.len() / est_row).max(64);
-        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, plan) };
+        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)) };
         let t0 = Instant::now();
         decoder.parse_chunk_generic(&data, &mut sink).unwrap();
         let dt = t0.elapsed().as_secs_f64();

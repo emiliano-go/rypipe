@@ -1,5 +1,6 @@
 //! Error-path tests for table/merge operations.
 
+use std::sync::Arc;
 use arrow::array::AsArray;
 use arrow::datatypes::{DataType, Int32Type};
 
@@ -7,13 +8,13 @@ use rypipe_core::{ColumnarSink, ExecutionPlan, FieldType, TableBuilder, Value};
 
 #[test]
 fn test_extend_string_vs_int64_returns_error() {
-    let mut e1 = TableBuilder::with_plan(1, ExecutionPlan::new());
+    let mut e1 = TableBuilder::with_plan(1, Arc::new(ExecutionPlan::new()));
     ColumnarSink::put_field(&mut e1, "N", Value::Str("1"));
     ColumnarSink::end_row(&mut e1);
 
     let mut plan = ExecutionPlan::new();
     plan.field_types.insert("N".to_string(), FieldType::Int64);
-    let mut e2 = TableBuilder::with_plan(1, plan);
+    let mut e2 = TableBuilder::with_plan(1, Arc::new(plan));
     ColumnarSink::put_field(&mut e2, "N", Value::Str("2"));
     ColumnarSink::end_row(&mut e2);
 
@@ -32,7 +33,7 @@ fn test_extend_string_vs_int64_returns_error() {
 
 #[test]
 fn test_extend_string_vs_dictionary_promotes() {
-    let mut e1 = TableBuilder::with_plan(4, ExecutionPlan::new());
+    let mut e1 = TableBuilder::with_plan(4, Arc::new(ExecutionPlan::new()));
     for v in ["x", "y"] {
         ColumnarSink::put_field(&mut e1, "P", Value::Str(v));
         ColumnarSink::end_row(&mut e1);
@@ -40,7 +41,7 @@ fn test_extend_string_vs_dictionary_promotes() {
 
     let mut plan = ExecutionPlan::new();
     plan.dictionary_columns.insert("P".to_string());
-    let mut e2 = TableBuilder::with_plan(4, plan);
+    let mut e2 = TableBuilder::with_plan(4, Arc::new(plan));
     for v in ["y", "z"] {
         ColumnarSink::put_field(&mut e2, "P", Value::Str(v));
         ColumnarSink::end_row(&mut e2);
@@ -66,7 +67,7 @@ fn test_extend_string_vs_dictionary_promotes() {
 fn test_extend_int64_vs_float64_promotes() {
     let mut plan1 = ExecutionPlan::new();
     plan1.field_types.insert("N".to_string(), FieldType::Int64);
-    let mut e1 = TableBuilder::with_plan(2, plan1);
+    let mut e1 = TableBuilder::with_plan(2, Arc::new(plan1));
     for v in ["1", "2"] {
         ColumnarSink::put_field(&mut e1, "N", Value::Str(v));
         ColumnarSink::end_row(&mut e1);
@@ -74,7 +75,7 @@ fn test_extend_int64_vs_float64_promotes() {
 
     let mut plan = ExecutionPlan::new();
     plan.field_types.insert("N".to_string(), FieldType::Float64);
-    let mut e2 = TableBuilder::with_plan(2, plan);
+    let mut e2 = TableBuilder::with_plan(2, Arc::new(plan));
     ColumnarSink::put_field(&mut e2, "N", Value::Str("3.5"));
     ColumnarSink::end_row(&mut e2);
 

@@ -1,5 +1,6 @@
 //! Sanity tests for `BoundedExecutor`.
 
+use std::sync::Arc;
 use arrow::array::{Array, AsArray};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
@@ -81,7 +82,7 @@ fn build_file() -> (PathBuf, Vec<u8>) {
 }
 
 fn parse_single(bytes: &[u8]) -> RecordBatch {
-    let mut sink = TableBuilder::with_plan(bytes.len() / 4, ExecutionPlan::new());
+    let mut sink = TableBuilder::with_plan(bytes.len() / 4, Arc::new(ExecutionPlan::new()));
     LineParser.parse_chunk(bytes, &mut sink).unwrap();
     sink.finish().unwrap()
 }
@@ -97,7 +98,7 @@ fn test_bounded_executor_produces_matching_batches() {
             &path,
             &LineSplitter,
             LineParser,
-            ExecutionPlan::new(),
+            Arc::new(ExecutionPlan::new()),
             false,
         )
         .unwrap();

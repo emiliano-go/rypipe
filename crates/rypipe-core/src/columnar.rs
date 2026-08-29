@@ -137,15 +137,23 @@ impl StrColumn {
         (0..self.len()).map(move |i| self.get(i))
     }
 
-    fn to_arrow(&self) -> Result<ArrayRef> {
+    /// Convert to Arrow StringArray by moving buffers (zero-copy).
+    /// Takes `&mut self` so we can `std::mem::take` the Vecs and preserve
+    /// their capacity for reuse by the streaming path.
+    fn to_arrow(&mut self) -> Result<ArrayRef> {
         use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
-        let offsets = OffsetBuffer::new(ScalarBuffer::from(self.offsets.clone()));
-        let data = Buffer::from_slice_ref(&self.data);
-        let nulls = if self.validity.iter().all(|&v| v) {
+        // Move the Vecs out, leaving zero-capacity replacements.
+        // The streaming path preserves capacity via mem::replace in batch boundaries.
+        let offsets = std::mem::take(&mut self.offsets);
+        let data = std::mem::take(&mut self.data);
+        let validity = std::mem::take(&mut self.validity);
+        let nulls = if validity.iter().all(|&v| v) {
             None
         } else {
-            Some(NullBuffer::from(self.validity.clone()))
+            Some(NullBuffer::from(validity))
         };
+        let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets));
+        let data = Buffer::from_vec(data);
         let arr = StringArray::try_new(offsets, data, nulls)?;
         Ok(Arc::new(arr))
     }
@@ -569,6 +577,19 @@ impl ColumnBuilder {
         }
     }
 
+    /// Borrowed string at `index` for zero-allocation filter comparison.
+    /// Returns `Some(&str)` for String and Dictionary columns only;
+    /// typed columns return `None` (caller falls back to `get_filter_value`).
+    pub(crate) fn get_filter_view(&self, index: usize) -> Option<&str> {
+        match self {
+            ColumnBuilder::String(v) => v.get(index),
+            ColumnBuilder::Dictionary { codes, dict, .. } => {
+                codes.get(index).and_then(|code| code.map(|idx| dict[idx as usize].as_str()))
+            }
+            _ => None,
+        }
+    }
+
     /// Value at `index` formatted as a string for filter comparison.
     /// Date/timestamp columns format as ISO-8601.
     pub(crate) fn get_filter_value(&self, index: usize) -> Option<String> {
@@ -729,43 +750,67 @@ impl ColumnBuilder {
     }
 
     /// Build a native Arrow array from the column builder.
-    pub(crate) fn to_arrow_array(&self) -> Result<ArrayRef> {
+    /// Build a native Arrow array from the column builder.
+    /// Takes `&mut self` to move buffers instead of copying (zero-copy export).
+    pub(crate) fn to_arrow_array(&mut self) -> Result<ArrayRef> {
+        // Handle empty columns (after mem::take from a previous export).
+        if self.len() == 0 {
+            return Ok(match self {
+                ColumnBuilder::String(_) => {
+                    Arc::new(StringArray::from(vec![None::<&str>; 0]))
+                }
+                ColumnBuilder::Int64(_) => Arc::new(Int64Array::from(vec![None::<i64>; 0])),
+                ColumnBuilder::Float64(_) => Arc::new(Float64Array::from(vec![None::<f64>; 0])),
+                ColumnBuilder::Boolean(_) => Arc::new(BooleanArray::from(vec![None::<bool>; 0])),
+                ColumnBuilder::Date32(_) => Arc::new(Date32Array::from(vec![None::<i32>; 0])),
+                ColumnBuilder::Timestamp(unit, _) => match unit {
+                    TimeUnit::Second => Arc::new(PrimitiveArray::<TimestampSecondType>::from(vec![None::<i64>; 0])),
+                    TimeUnit::Millisecond => Arc::new(PrimitiveArray::<TimestampMillisecondType>::from(vec![None::<i64>; 0])),
+                    TimeUnit::Microsecond => Arc::new(PrimitiveArray::<TimestampMicrosecondType>::from(vec![None::<i64>; 0])),
+                    TimeUnit::Nanosecond => Arc::new(PrimitiveArray::<TimestampNanosecondType>::from(vec![None::<i64>; 0])),
+                },
+                ColumnBuilder::Dictionary { .. } => {
+                    let keys: Int32Array = vec![None::<i32>; 0].into_iter().collect();
+                    let values: ArrayRef = Arc::new(StringArray::from(vec![None::<&str>; 0]));
+                    Arc::new(DictionaryArray::<Int32Type>::try_new(keys, values)?)
+                }
+            });
+        }
         Ok(match self {
             ColumnBuilder::String(v) => v.to_arrow()?,
-            ColumnBuilder::Int64(v) => Arc::new(v.iter().copied().collect::<Int64Array>()),
-            ColumnBuilder::Float64(v) => Arc::new(v.iter().copied().collect::<Float64Array>()),
-            ColumnBuilder::Boolean(v) => Arc::new(v.iter().copied().collect::<BooleanArray>()),
-            ColumnBuilder::Date32(v) => Arc::new(v.iter().copied().collect::<Date32Array>()),
-            ColumnBuilder::Timestamp(unit, v) => match unit {
-                TimeUnit::Second => Arc::new(
-                    v.iter()
-                        .copied()
-                        .collect::<PrimitiveArray<TimestampSecondType>>(),
-                ),
-                TimeUnit::Millisecond => Arc::new(
-                    v.iter()
-                        .copied()
-                        .collect::<PrimitiveArray<TimestampMillisecondType>>(),
-                ),
-                TimeUnit::Microsecond => Arc::new(
-                    v.iter()
-                        .copied()
-                        .collect::<PrimitiveArray<TimestampMicrosecondType>>(),
-                ),
-                TimeUnit::Nanosecond => Arc::new(
-                    v.iter()
-                        .copied()
-                        .collect::<PrimitiveArray<TimestampNanosecondType>>(),
-                ),
-            },
+            ColumnBuilder::Int64(v) => {
+                let vals = std::mem::take(v);
+                Arc::new(vals.into_iter().collect::<Int64Array>())
+            }
+            ColumnBuilder::Float64(v) => {
+                let vals = std::mem::take(v);
+                Arc::new(vals.into_iter().collect::<Float64Array>())
+            }
+            ColumnBuilder::Boolean(v) => {
+                let vals = std::mem::take(v);
+                Arc::new(vals.into_iter().collect::<BooleanArray>())
+            }
+            ColumnBuilder::Date32(v) => {
+                let vals = std::mem::take(v);
+                Arc::new(vals.into_iter().collect::<Date32Array>())
+            }
+            ColumnBuilder::Timestamp(unit, v) => {
+                let vals = std::mem::take(v);
+                match unit {
+                    TimeUnit::Second => Arc::new(vals.into_iter().collect::<PrimitiveArray<TimestampSecondType>>()),
+                    TimeUnit::Millisecond => Arc::new(vals.into_iter().collect::<PrimitiveArray<TimestampMillisecondType>>()),
+                    TimeUnit::Microsecond => Arc::new(vals.into_iter().collect::<PrimitiveArray<TimestampMicrosecondType>>()),
+                    TimeUnit::Nanosecond => Arc::new(vals.into_iter().collect::<PrimitiveArray<TimestampNanosecondType>>()),
+                }
+            }
             ColumnBuilder::Dictionary { codes, dict, .. } => {
-                let keys: Int32Array = codes.iter().copied().collect();
+                let codes_arr: Int32Array = std::mem::take(codes).into_iter().collect();
                 let values: ArrayRef = Arc::new(
                     dict.iter()
                         .map(|s| Some(s.as_str()))
                         .collect::<StringArray>(),
                 );
-                let arr = DictionaryArray::<Int32Type>::try_new(keys, values)?;
+                let arr = DictionaryArray::<Int32Type>::try_new(codes_arr, values)?;
                 Arc::new(arr)
             }
         })
