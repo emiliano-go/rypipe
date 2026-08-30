@@ -19,6 +19,7 @@
 //!   target/release/examples/bench_scanner_single
 //! ```
 
+use std::borrow::Cow;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,14 +69,9 @@ impl RecordParser for TsvParser {
                     if sink.needs_resolve() && !sink.wants(k) {
                         continue;
                     }
-                    sink.put_field(
-                        k,
-                        if sink.needs_value() {
-                            Value::Str(v)
-                        } else {
-                            Value::Null
-                        },
-                    );
+                    if sink.needs_value() {
+                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
+                    }
                 }
             }
             sink.end_row();

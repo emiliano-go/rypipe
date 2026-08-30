@@ -3,6 +3,8 @@
 //! Uses a tiny newline-delimited parser so the tests exercise the core engine
 //! without any XML-specific logic.
 
+use std::borrow::Cow;
+
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
@@ -33,7 +35,7 @@ impl RecordParser for LineParser {
             sink.begin_row();
             for token in line.split_whitespace() {
                 if let Some((k, v)) = token.split_once('=') {
-                    sink.put_field(k, Value::Str(v));
+                    sink.put_field(k, Value::Str(Cow::Borrowed(v)));
                 }
             }
             sink.end_row();
@@ -629,7 +631,7 @@ impl RecordParser for ResolveAndPutParser {
             sink.begin_row();
             for token in line.split_whitespace() {
                 if let Some((k, v)) = token.split_once('=') {
-                    sink.resolve_and_put(k, Value::Str(v));
+                    sink.resolve_and_put(k, Value::Str(Cow::Borrowed(v)));
                     if sink.row_rejected() {
                         break;
                     }

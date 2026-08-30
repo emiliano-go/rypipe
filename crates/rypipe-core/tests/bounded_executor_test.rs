@@ -1,5 +1,7 @@
 //! Sanity tests for `BoundedExecutor`.
 
+use std::borrow::Cow;
+
 use arrow::array::{Array, AsArray};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
@@ -29,7 +31,7 @@ impl RecordParser for LineParser {
             }
             sink.begin_row();
             if let Some((k, v)) = line.split_once('=') {
-                sink.put_field(k, Value::Str(v));
+                sink.put_field(k, Value::Str(Cow::Borrowed(v)));
             }
             sink.end_row();
         }

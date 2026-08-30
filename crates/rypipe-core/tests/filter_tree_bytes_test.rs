@@ -5,6 +5,8 @@
 //! - `Pipeline::read_bytes_par` / `read_bytes_stream` and `BoundedExecutor::run_bytes`
 //! - magic-byte decompression in `InputBuffer::open`
 
+use std::borrow::Cow;
+
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
@@ -61,7 +63,7 @@ impl RecordParser for LineParser {
             sink.begin_row();
             for token in line.split_whitespace() {
                 if let Some((k, v)) = token.split_once('=') {
-                    sink.put_field(k, Value::Str(v));
+                    sink.put_field(k, Value::Str(Cow::Borrowed(v)));
                 }
             }
             sink.end_row();
