@@ -1,14 +1,17 @@
+use std::borrow::Cow;
+
 /// A logical value produced by a decoder.
 ///
 /// Decoders can emit borrowed strings when possible, or native typed values
 /// for formats like JSON that already distinguish numbers/booleans.
+///
+/// `Str` is a `Cow` so that adapters needing owned storage (e.g. XML entity
+/// unescaping) can move an owned `String` into the value without a dangling
+/// borrow.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value<'a> {
-    /// UTF-8 string borrowed from the input buffer.
-    Str(&'a str),
-    /// Owned UTF-8 string. Used when the source data does not outlive the
-    /// buffer (e.g. XML entity-decoded values).
-    Owned(String),
+    /// UTF-8 string, borrowed from the input buffer or owned.
+    Str(Cow<'a, str>),
     /// 64-bit signed integer.
     Int64(i64),
     /// 64-bit floating point number.
@@ -26,12 +29,11 @@ pub enum Value<'a> {
 }
 
 impl<'a> Value<'a> {
-    /// Borrow the string content, whether from `Str` or `Owned`.
+    /// Borrow the string content.
     #[inline]
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::Str(s) => Some(s),
-            Value::Owned(s) => Some(s.as_str()),
+            Value::Str(s) => Some(s.as_ref()),
             _ => None,
         }
     }
@@ -39,8 +41,7 @@ impl<'a> Value<'a> {
     /// Convert into a `Value<'static>` by cloning any borrowed string data.
     pub fn into_static(self) -> Value<'static> {
         match self {
-            Value::Str(s) => Value::Owned(s.to_owned()),
-            Value::Owned(s) => Value::Owned(s),
+            Value::Str(s) => Value::Str(Cow::Owned(s.into_owned())),
             Value::Int64(i) => Value::Int64(i),
             Value::Float64(f) => Value::Float64(f),
             Value::Bool(b) => Value::Bool(b),

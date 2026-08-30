@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -452,8 +454,7 @@ impl ColumnBuilder {
     pub(crate) fn push_value(&mut self, value: Value<'_>) {
         match value {
             Value::Null => self.push(None),
-            Value::Str(s) => self.push_str(Some(s)),
-            Value::Owned(ref s) => self.push_str(Some(s.as_str())),
+            Value::Str(ref s) => self.push_str(Some(s.as_ref())),
             Value::Int64(i) => match self {
                 ColumnBuilder::Int64(v) => v.push(Some(i)),
                 ColumnBuilder::Float64(v) => v.push(Some(i as f64)),
@@ -1069,8 +1070,8 @@ mod tests {
     #[test]
     fn test_push_value_str_parsing() {
         let mut b = ColumnBuilder::with_capacity(4, &FieldType::Int64);
-        b.push_value(Value::Str("42"));
-        b.push_value(Value::Str("bad"));
+        b.push_value(Value::Str(Cow::Borrowed("42")));
+        b.push_value(Value::Str(Cow::Borrowed("bad")));
         b.push_value(Value::Null);
         if let ColumnBuilder::Int64(v) = &b {
             assert_eq!(
@@ -1150,8 +1151,8 @@ mod tests {
         // Boolean column: native Bool, Str parsed, Int64 becomes null.
         let mut b = ColumnBuilder::with_capacity(4, &FieldType::Boolean);
         b.push_value(Value::Bool(true));
-        b.push_value(Value::Str("false"));
-        b.push_value(Value::Str("not_bool"));
+        b.push_value(Value::Str(Cow::Borrowed("false")));
+        b.push_value(Value::Str(Cow::Borrowed("not_bool")));
         b.push_value(Value::Int64(1));
         if let ColumnBuilder::Boolean(v) = &b {
             assert_eq!(
