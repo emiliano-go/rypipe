@@ -819,9 +819,69 @@ impl TableBuilder {
                     .and_then(|value| normalize(field_b, value));
                 match (va, vb) {
                     (Some(a), Some(b)) => {
-                        let ord = match (&a, &b) {
-                            (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => {
-                                Some(ai.cmp(bi))
+                        let ord = match (a, b) {
+                            (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => Some(ai.cmp(bi).into()),
+                            (crate::value::Value::Float64(af), crate::value::Value::Float64(bf)) => af.partial_cmp(bf),
+                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => (*ai as f64).partial_cmp(bf),
+                            (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => af.partial_cmp(&(*bi as f64)),
+                            (crate::value::Value::Str(a), crate::value::Value::Str(b)) => {
+                                let resolved_a = tb.plan.resolve_field(field_a).unwrap_or(field_a.as_str());
+                                let resolved_b = tb.plan.resolve_field(field_b).unwrap_or(field_b.as_str());
+                                let type_a = tb.plan.field_types.get(resolved_a);
+                                let type_b = tb.plan.field_types.get(resolved_b);
+                                match (type_a, type_b) {
+                                    (Some(crate::plan::FieldType::Int64), Some(crate::plan::FieldType::Int64)) => {
+                                        let ai: i64 = lexical::parse(a.as_bytes()).ok().unwrap_or(0);
+                                        let bi: i64 = lexical::parse(b.as_bytes()).ok().unwrap_or(0);
+                                        Some(ai.cmp(&bi).into())
+                                    }
+                                    (Some(crate::plan::FieldType::Float64), Some(crate::plan::FieldType::Float64)) => {
+                                        let af: f64 = lexical::parse(a.as_bytes()).ok().unwrap_or(0.0);
+                                        let bf: f64 = lexical::parse(b.as_bytes()).ok().unwrap_or(0.0);
+                                        af.partial_cmp(&bf)
+                                    }
+                                    (Some(crate::plan::FieldType::Int64), Some(crate::plan::FieldType::Float64)) => {
+                                        let ai: f64 = lexical::parse::<i64, _>(a.as_bytes()).ok().unwrap_or(0) as f64;
+                                        let bf: f64 = lexical::parse(b.as_bytes()).ok().unwrap_or(0.0);
+                                        ai.partial_cmp(&bf)
+                                    }
+                                    (Some(crate::plan::FieldType::Float64), Some(crate::plan::FieldType::Int64)) => {
+                                        let af: f64 = lexical::parse(a.as_bytes()).ok().unwrap_or(0.0);
+                                        let bi: f64 = lexical::parse::<i64, _>(b.as_bytes()).ok().unwrap_or(0) as f64;
+                                        af.partial_cmp(&bi)
+                                    }
+                                    // Mixed typed/untyped or String vs non-numeric type:
+                                    // type mismatch — fail the comparison.
+                                    (Some(_), None) | (None, Some(_)) => None,
+                                    // Both untyped (String): fall back to lexicographic.
+                                    (None, None) => Some(a.cmp(b).into()),
+                                    // Both Timestamp: parse and compare as i64.
+                                    (Some(crate::plan::FieldType::Timestamp(ua)), Some(crate::plan::FieldType::Timestamp(ub))) => {
+                                        let ta = crate::columnar::parse_timestamp(a, *ua);
+                                        let tb_val = crate::columnar::parse_timestamp(b, *ub);
+                                        match (ta, tb_val) {
+                                            (Some(ai), Some(bi)) => Some(ai.cmp(&bi).into()),
+                                            _ => None,
+                                        }
+                                    }
+                                    // Both Date32: parse and compare as i32.
+                                    (Some(crate::plan::FieldType::Date32), Some(crate::plan::FieldType::Date32)) => {
+                                        let da = crate::columnar::parse_date32(a);
+                                        let db = crate::columnar::parse_date32(b);
+                                        match (da, db) {
+                                            (Some(ai), Some(bi)) => Some(ai.cmp(&bi).into()),
+                                            _ => None,
+                                        }
+                                    }
+                                    // Different non-numeric types (e.g. String vs Bool): fail.
+                                    _ => None,
+                                }
+                            }
+                            (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => Some(a.cmp(b).into()),
+                            _ => {
+                                let av = format!("{:?}", a);
+                                let bv = format!("{:?}", b);
+                                Some(av.cmp(&bv).into())
                             }
                             (
                                 crate::value::Value::Float64(af),
