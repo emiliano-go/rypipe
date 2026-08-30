@@ -5,6 +5,8 @@
 //! which is the correctness guarantee that makes parallel streaming safe:
 //! chunk 1 cannot discover a column that chunk 7 later introduces.
 
+#[cfg(test)]
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -217,7 +219,7 @@ mod tests {
         let mut builder = TableBuilder::with_plan(100, Arc::new(plan));
         // Pre-add column "X" with a push.
         builder.begin_row();
-        builder.put_field("X", crate::value::Value::Str("hello"));
+        builder.put_field("X", crate::value::Value::Str(Cow::Borrowed("hello")));
         builder.end_row();
         let rows_before = builder.num_rows();
         let cols_before = builder.num_columns();

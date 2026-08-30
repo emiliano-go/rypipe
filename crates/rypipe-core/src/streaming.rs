@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
@@ -205,7 +207,7 @@ mod tests {
                 sink.begin_row();
                 for token in line.split_whitespace() {
                     if let Some((k, v)) = token.split_once('=') {
-                        sink.put_field(k, Value::Str(v));
+                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
                     }
                 }
                 sink.end_row();
