@@ -1,6 +1,8 @@
 //! Schema-unification tests for the parallel fast-path export
 //! (`engines_to_record_batches`) and end-to-end heterogeneous chunks.
 
+use std::borrow::Cow;
+
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Float64Type};
 use std::sync::Arc;
@@ -19,7 +21,7 @@ fn one_col(name: &str, ty: Option<FieldType>, values: &[&str]) -> TableBuilder {
     }
     let mut b = TableBuilder::with_plan(values.len().max(1), Arc::new(plan));
     for v in values {
-        ColumnarSink::put_field(&mut b, name, Value::Str(v));
+        ColumnarSink::put_field(&mut b, name, Value::Str(Cow::Borrowed(v)));
         ColumnarSink::end_row(&mut b);
     }
     b
@@ -61,7 +63,7 @@ fn test_export_string_vs_dictionary_unifies_to_dictionary() {
     plan.dictionary_columns.insert("P".to_string());
     let mut e2 = TableBuilder::with_plan(4, Arc::new(plan));
     for v in ["a", "c"] {
-        ColumnarSink::put_field(&mut e2, "P", Value::Str(v));
+        ColumnarSink::put_field(&mut e2, "P", Value::Str(Cow::Borrowed(v)));
         ColumnarSink::end_row(&mut e2);
     }
 
@@ -100,8 +102,8 @@ fn test_export_missing_columns_null_filled() {
     plan.field_types.insert("A".to_string(), FieldType::Int64);
     plan.field_types.insert("B".to_string(), FieldType::String);
     let mut e2 = TableBuilder::with_plan(4, Arc::new(plan));
-    ColumnarSink::put_field(&mut e2, "A", Value::Str("2"));
-    ColumnarSink::put_field(&mut e2, "B", Value::Str("hello"));
+    ColumnarSink::put_field(&mut e2, "A", Value::Str(Cow::Borrowed("2")));
+    ColumnarSink::put_field(&mut e2, "B", Value::Str(Cow::Borrowed("hello")));
     ColumnarSink::end_row(&mut e2);
 
     let batches =
@@ -136,7 +138,7 @@ impl RecordParser for SparseLineParser {
             sink.begin_row();
             for token in line.split_whitespace() {
                 if let Some((k, v)) = token.split_once('=') {
-                    sink.put_field(k, Value::Str(v));
+                    sink.put_field(k, Value::Str(Cow::Borrowed(v)));
                 }
             }
             sink.end_row();

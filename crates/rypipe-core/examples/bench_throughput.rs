@@ -5,6 +5,7 @@
 //!
 //!     cargo run --release -p rypipe-core --example bench_throughput
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufRead, Write};
 use std::time::Instant;
@@ -79,7 +80,7 @@ impl RecordParser for TsvParser {
             for token in line.split('\t') {
                 if let Some((k, v)) = token.split_once('=') {
                     if sink.wants(k) {
-                        sink.put_field(k, Value::Str(v));
+                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
                     }
                 }
             }

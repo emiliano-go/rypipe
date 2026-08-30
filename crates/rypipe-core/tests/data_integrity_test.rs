@@ -3,6 +3,8 @@
 //! ColumnarSink resolve/put_field_resolved produce bit-identical results
 //! across all execution modes and plans.
 
+use std::borrow::Cow;
+
 use arrow::array::{Array, AsArray};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
@@ -60,7 +62,7 @@ impl RecordParser for LineParser {
             sink.begin_row();
             for token in line.split_whitespace() {
                 if let Some((k, v)) = token.split_once('=') {
-                    sink.put_field(k, Value::Str(v));
+                    sink.put_field(k, Value::Str(Cow::Borrowed(v)));
                 }
             }
             sink.end_row();
@@ -91,7 +93,7 @@ impl RecordParser for LineParserResolved {
                     if let Some(resolved) = sink.resolve(k).map(|s| s.to_owned()) {
                         // Simulate expensive work between resolve and put
                         let _ = resolved.len();
-                        sink.put_field_resolved(&resolved, Value::Str(v));
+                        sink.put_field_resolved(&resolved, Value::Str(Cow::Borrowed(v)));
                     }
                 }
             }
@@ -107,6 +109,62 @@ fn pipeline() -> Pipeline<LineSplitter, LineParser> {
 #[expect(dead_code)]
 fn pipeline_resolved() -> Pipeline<LineSplitter, LineParserResolved> {
     Pipeline::new(LineSplitter, LineParserResolved)
+}
+
+/// Parser that mirrors the XML scanner's resolve_and_put + row_rejected path.
+#[derive(Clone, Debug, Default)]
+struct LineParserResolveAndPut;
+
+impl RecordParser for LineParserResolveAndPut {
+    fn validate(&self, bytes: &[u8]) -> rypipe_core::Result<()> {
+        simdutf8::basic::from_utf8(bytes)?;
+        Ok(())
+    }
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
+        let text = std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            sink.begin_row();
+            for token in line.split_whitespace() {
+                if let Some((k, v)) = token.split_once('=') {
+                    let _ = sink.resolve(k);
+                    sink.resolve_and_put(k, Value::Str(Cow::Borrowed(v)));
+                    if sink.row_rejected() {
+                        break;
+                    }
+                }
+            }
+            sink.end_row();
+        }
+        Ok(())
+    }
+    #[inline]
+    fn parse_chunk_generic<S: ColumnarSink>(&self, bytes: &[u8], sink: &mut S) -> rypipe_core::Result<()> {
+        let text = std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            sink.begin_row();
+            for token in line.split_whitespace() {
+                if let Some((k, v)) = token.split_once('=') {
+                    let _ = sink.resolve(k);
+                    sink.resolve_and_put(k, Value::Str(Cow::Borrowed(v)));
+                    if sink.row_rejected() {
+                        break;
+                    }
+                }
+            }
+            sink.end_row();
+        }
+        Ok(())
+    }
+}
+
+fn pipeline_resolve_and_put() -> Pipeline<LineSplitter, LineParserResolveAndPut> {
+    Pipeline::new(LineSplitter, LineParserResolveAndPut)
 }
 
 fn batches_to_rows(batches: &[RecordBatch]) -> Vec<Vec<Option<String>>> {
@@ -388,6 +446,32 @@ fn plan_filter_no_data_loss() {
 }
 
 #[test]
+fn plan_filter_six_rows_no_data_loss() {
+    let plan = ExecutionPlan::new().filter_eq("S", "keep");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = b"S=keep V=1\nS=drop V=2\nS=keep V=3\nS=keep V=4\nS=drop V=5\nS=keep V=6\n";
+    let single = p.read_bytes(data).unwrap();
+    assert_eq!(single.num_rows(), 4, "single");
+    let par = p.read_bytes_par(data, 2).unwrap();
+    assert_batches_equal(&[single.clone()], &par);
+    let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
+    assert_batches_equal(&[single], &stream);
+}
+
+#[test]
+fn plan_filter_resolve_and_put_six_rows() {
+    let plan = ExecutionPlan::new().filter_eq("S", "keep");
+    let p = pipeline_resolve_and_put().with_plan(plan);
+    let data = b"S=keep V=1\nS=drop V=2\nS=keep V=3\nS=keep V=4\nS=drop V=5\nS=keep V=6\n";
+    let single = p.read_bytes(data).unwrap();
+    assert_eq!(single.num_rows(), 4, "single resolve_and_put");
+    let par = p.read_bytes_par(data, 2).unwrap();
+    assert_batches_equal(&[single.clone()], &par);
+    let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
+    assert_batches_equal(&[single], &stream);
+}
+
+#[test]
 fn plan_filter_and_or_not_no_data_loss() {
     let plan = ExecutionPlan {
         filter: Some(FilterPredicate::any(
@@ -581,18 +665,17 @@ fn direct_table_builder_extend_preserves_all_rows_and_columns() {
     // Build two tables with disjoint column sets and merge
     let mut t1 = TableBuilder::with_plan(4, Arc::new(ExecutionPlan::new()));
     for (k, v) in [("A", "1"), ("B", "2")] {
-        t1.put_field(k, Value::Str(v));
+        t1.put_field(k, Value::Str(Cow::Borrowed(v)));
     }
     t1.end_row();
-    {
-        let (k, v) = ("A", "3");
-        t1.put_field(k, Value::Str(v));
+    for (k, v) in [("A", "3")] {
+        t1.put_field(k, Value::Str(Cow::Borrowed(v)));
     }
     t1.end_row();
 
     let mut t2 = TableBuilder::with_plan(4, Arc::new(ExecutionPlan::new()));
     for (k, v) in [("B", "4"), ("C", "5")] {
-        t2.put_field(k, Value::Str(v));
+        t2.put_field(k, Value::Str(Cow::Borrowed(v)));
     }
     t2.end_row();
 
