@@ -1733,10 +1733,9 @@ mod tests {
         let engine = parse_bytes(b"X=42\nX=bad\nX=100\n", plan);
         assert_eq!(engine.num_rows(), 3);
         if let ColumnBuilder::Int64(v) = engine.get_column("X").unwrap() {
-            assert_eq!(
-                v.iter().map(|o| o.copied()).collect::<Vec<_>>(),
-                vec![Some(42), None, Some(100)]
-            );
+            assert_eq!(v.get(0), Some(42));
+            assert_eq!(v.get(1), None);
+            assert_eq!(v.get(2), Some(100));
         } else {
             panic!("expected Int64 builder");
         }
@@ -1748,7 +1747,7 @@ mod tests {
         plan.field_types.insert("X".to_string(), FieldType::Float64);
         let engine = parse_bytes(b"X=1.5\n", plan);
         if let ColumnBuilder::Float64(v) = engine.get_column("X").unwrap() {
-            assert!((*v.get(0).unwrap() - 1.5).abs() < 1e-9);
+            assert!((v.get(0).unwrap() - 1.5).abs() < 1e-9);
         } else {
             panic!("expected Float64 builder");
         }

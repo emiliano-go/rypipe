@@ -333,17 +333,105 @@ impl StrColumn {
     }
 }
 
+/// Flat primitive-column storage: one contiguous data array + a validity
+/// bitmap (1 byte per row, upgradeable to bitpacked later). Mirrors
+/// [`StrColumn`] layout but for `Copy` types.
+#[derive(Clone)]
+pub(crate) struct PrimColumn<T: Copy> {
+    data: Vec<T>,
+    validity: Vec<bool>,
+}
+
+impl<T: Copy + Default> PrimColumn<T> {
+    fn with_capacity(cap: usize) -> Self {
+        PrimColumn {
+            data: Vec::with_capacity(cap),
+            validity: Vec::with_capacity(cap),
+        }
+    }
+
+    fn push(&mut self, v: Option<T>) {
+        self.data.push(v.unwrap_or_default());
+        self.validity.push(v.is_some());
+    }
+
+    fn pop(&mut self) {
+        self.data.pop();
+        self.validity.pop();
+    }
+
+    fn len(&self) -> usize {
+        self.validity.len()
+    }
+
+    fn split_off(&mut self, n: usize) -> Self {
+        assert!(n <= self.len());
+        let other_data = self.data[..n].to_vec();
+        let other_validity = self.validity[..n].to_vec();
+        self.data.drain(..n);
+        self.validity.drain(..n);
+        PrimColumn { data: other_data, validity: other_validity }
+    }
+
+    pub(crate) fn get(&self, i: usize) -> Option<T> {
+        if *self.validity.get(i)? { Some(self.data[i]) } else { None }
+    }
+
+    /// Move all values from `other` onto the end of `self`.
+    fn append(&mut self, other: &PrimColumn<T>) {
+        self.data.extend_from_slice(&other.data);
+        self.validity.extend_from_slice(&other.validity);
+    }
+}
+
+impl<T: Copy + Default> Default for PrimColumn<T> {
+    fn default() -> Self {
+        PrimColumn { data: Vec::new(), validity: Vec::new() }
+    }
+}
+
+impl<T: Copy> PrimColumn<T> {
+    fn bytes_used(&self) -> usize {
+        self.data.len() * std::mem::size_of::<T>() + self.validity.len()
+    }
+
+    fn capacity_bytes(&self) -> usize {
+        self.data.capacity() * std::mem::size_of::<T>() + self.validity.capacity()
+    }
+
+    /// Zero-copy Arrow export: moves data and validity buffers into a
+    /// `PrimitiveArray` via `ScalarBuffer` and `NullBuffer`.
+    fn to_arrow<A: arrow::array::ArrowPrimitiveType>(
+        &mut self,
+    ) -> Result<ArrayRef>
+    where
+        A::Native: From<T>,
+    {
+        use arrow::buffer::{BooleanBuffer, NullBuffer, ScalarBuffer};
+        let data = std::mem::take(&mut self.data);
+        let validity = std::mem::take(&mut self.validity);
+        let nulls = if validity.iter().all(|&v| v) {
+            None
+        } else {
+            Some(NullBuffer::new(BooleanBuffer::from(validity)))
+        };
+        let buf: ScalarBuffer<A::Native> = data.into_iter().map(A::Native::from).collect();
+        let arr = PrimitiveArray::<A>::try_new(buf, nulls)?;
+        Ok(Arc::new(arr))
+    }
+}
+
 /// Per-column builder: stores all values.  The variant determines the storage
 /// type (String, Int64, Float64, Boolean, Date32, Timestamp, or Dictionary).
 pub(crate) enum ColumnBuilder {
     String(StrColumn),
-    Int64(NullableColumn<i64>),
-    Float64(NullableColumn<f64>),
-    Boolean(NullableColumn<bool>),
+    Int64(PrimColumn<i64>),
+    Float64(PrimColumn<f64>),
+    Boolean(PrimColumn<bool>),
     /// Days since the Unix epoch.
-    Date32(NullableColumn<i32>),
+    Date32(PrimColumn<i32>),
     /// Raw integers in `unit` since the Unix epoch.
-    Timestamp(TimeUnit, NullableColumn<i64>),
+    Timestamp(TimeUnit, PrimColumn<i64>),
     Dictionary {
         codes: NullableColumn<i32>,
         dict: Vec<String>,
@@ -430,12 +518,12 @@ impl ColumnBuilder {
     pub(crate) fn with_capacity(cap: usize, field_type: &FieldType) -> Self {
         match field_type {
             FieldType::String => ColumnBuilder::String(StrColumn::with_capacity(cap)),
-            FieldType::Int64 => ColumnBuilder::Int64(NullableColumn::with_capacity(cap)),
-            FieldType::Float64 => ColumnBuilder::Float64(NullableColumn::with_capacity(cap)),
-            FieldType::Boolean => ColumnBuilder::Boolean(NullableColumn::with_capacity(cap)),
-            FieldType::Date32 => ColumnBuilder::Date32(NullableColumn::with_capacity(cap)),
+            FieldType::Int64 => ColumnBuilder::Int64(PrimColumn::with_capacity(cap)),
+            FieldType::Float64 => ColumnBuilder::Float64(PrimColumn::with_capacity(cap)),
+            FieldType::Boolean => ColumnBuilder::Boolean(PrimColumn::with_capacity(cap)),
+            FieldType::Date32 => ColumnBuilder::Date32(PrimColumn::with_capacity(cap)),
             FieldType::Timestamp(unit) => {
-                ColumnBuilder::Timestamp(*unit, NullableColumn::with_capacity(cap))
+                ColumnBuilder::Timestamp(*unit, PrimColumn::with_capacity(cap))
             }
             FieldType::Dictionary => ColumnBuilder::Dictionary {
                 codes: NullableColumn::with_capacity(cap),
@@ -569,9 +657,8 @@ impl ColumnBuilder {
                     "cannot promote column to unified variant '{target}'"
                 )));
             }
-            *self = ColumnBuilder::Float64(NullableColumn::from_options(
-                v.iter().map(|o| o.map(|n| *n as f64)),
-            ));
+            let float_data: Vec<f64> = v.data.into_iter().map(|n| n as f64).collect();
+            *self = ColumnBuilder::Float64(PrimColumn { data: float_data, validity: v.validity });
             return Ok(());
         }
 
@@ -668,11 +755,11 @@ impl ColumnBuilder {
     pub(crate) fn pop(&mut self) {
         match self {
             ColumnBuilder::String(v) => v.pop(),
-            ColumnBuilder::Int64(v) => drop(v.pop()),
-            ColumnBuilder::Float64(v) => drop(v.pop()),
-            ColumnBuilder::Boolean(v) => drop(v.pop()),
-            ColumnBuilder::Date32(v) => drop(v.pop()),
-            ColumnBuilder::Timestamp(_, v) => drop(v.pop()),
+            ColumnBuilder::Int64(v) => v.pop(),
+            ColumnBuilder::Float64(v) => v.pop(),
+            ColumnBuilder::Boolean(v) => v.pop(),
+            ColumnBuilder::Date32(v) => v.pop(),
+            ColumnBuilder::Timestamp(_, v) => v.pop(),
             ColumnBuilder::Dictionary { codes, .. } => drop(codes.pop()),
         }
     }
@@ -697,7 +784,9 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => v.bytes_used(),
             ColumnBuilder::Date32(v) => v.bytes_used(),
             ColumnBuilder::Timestamp(_, v) => v.bytes_used(),
-            ColumnBuilder::Dictionary { codes, dict, .. } => codes.bytes_used() + dict.len() * 16,
+            ColumnBuilder::Dictionary { codes, dict, .. } => {
+                codes.len() * 4 + dict.len() * 16
+            }
         }
     }
 
@@ -720,26 +809,11 @@ impl ColumnBuilder {
         assert!(n <= self.len());
         match self {
             ColumnBuilder::String(s) => ColumnBuilder::String(s.split_off(n)),
-            ColumnBuilder::Int64(v) => {
-                let other = v.split_off(n);
-                ColumnBuilder::Int64(other)
-            }
-            ColumnBuilder::Float64(v) => {
-                let other = v.split_off(n);
-                ColumnBuilder::Float64(other)
-            }
-            ColumnBuilder::Boolean(v) => {
-                let other = v.split_off(n);
-                ColumnBuilder::Boolean(other)
-            }
-            ColumnBuilder::Date32(v) => {
-                let other = v.split_off(n);
-                ColumnBuilder::Date32(other)
-            }
-            ColumnBuilder::Timestamp(unit, v) => {
-                let other = v.split_off(n);
-                ColumnBuilder::Timestamp(*unit, other)
-            }
+            ColumnBuilder::Int64(v) => ColumnBuilder::Int64(v.split_off(n)),
+            ColumnBuilder::Float64(v) => ColumnBuilder::Float64(v.split_off(n)),
+            ColumnBuilder::Boolean(v) => ColumnBuilder::Boolean(v.split_off(n)),
+            ColumnBuilder::Date32(v) => ColumnBuilder::Date32(v.split_off(n)),
+            ColumnBuilder::Timestamp(unit, v) => ColumnBuilder::Timestamp(*unit, v.split_off(n)),
             ColumnBuilder::Dictionary { codes, dict, index } => {
                 let other_codes = codes.split_off(n);
                 ColumnBuilder::Dictionary {
@@ -772,10 +846,10 @@ impl ColumnBuilder {
             ColumnBuilder::Int64(v) => v.get(index).map(|n| n.to_string()),
             ColumnBuilder::Float64(v) => v.get(index).map(|n| n.to_string()),
             ColumnBuilder::Boolean(v) => v.get(index).map(|n| n.to_string()),
-            ColumnBuilder::Date32(v) => v.get(index).map(|o| format_date32(*o)),
+            ColumnBuilder::Date32(v) => v.get(index).map(format_date32),
             ColumnBuilder::Timestamp(unit, v) => {
                 let unit = *unit;
-                v.get(index).map(|ts| format_timestamp(*ts, unit))
+                v.get(index).map(|ts| format_timestamp(ts, unit))
             }
             ColumnBuilder::Dictionary { codes, dict, .. } => {
                 codes.get(index).map(|code| dict[*code as usize].clone())
@@ -788,14 +862,14 @@ impl ColumnBuilder {
     pub(crate) fn get_typed_value(&self, index: usize) -> Option<TypedValue<'_>> {
         match self {
             ColumnBuilder::String(v) => v.get(index).map(TypedValue::Str),
-            ColumnBuilder::Int64(v) => v.get(index).map(|n| TypedValue::Int64(*n)),
-            ColumnBuilder::Float64(v) => v.get(index).map(|n| TypedValue::Float64(*n)),
-            ColumnBuilder::Boolean(v) => v.get(index).map(|n| TypedValue::Bool(*n)),
-            ColumnBuilder::Date32(v) => v.get(index).map(|n| TypedValue::Date32(*n)),
-            ColumnBuilder::Timestamp(_, v) => v.get(index).map(|n| TypedValue::Timestamp(*n)),
+            ColumnBuilder::Int64(v) => v.get(index).map(TypedValue::Int64),
+            ColumnBuilder::Float64(v) => v.get(index).map(TypedValue::Float64),
+            ColumnBuilder::Boolean(v) => v.get(index).map(TypedValue::Bool),
+            ColumnBuilder::Date32(v) => v.get(index).map(TypedValue::Date32),
+            ColumnBuilder::Timestamp(_, v) => v.get(index).map(TypedValue::Timestamp),
             ColumnBuilder::Dictionary { codes, dict, .. } => codes
                 .get(index)
-                .map(|idx| TypedValue::Str(dict[*idx as usize].as_str())),
+                .and_then(|code| code.map(|idx| TypedValue::Str(dict[idx as usize].as_str()))),
         }
     }
 
@@ -806,26 +880,26 @@ impl ColumnBuilder {
             (ColumnBuilder::String(a), ColumnBuilder::String(b)) => {
                 a.append(&b);
             }
-            (ColumnBuilder::Int64(a), ColumnBuilder::Int64(mut b)) => {
-                a.append(&mut b);
+            (ColumnBuilder::Int64(a), ColumnBuilder::Int64(b)) => {
+                a.append(&b);
             }
-            (ColumnBuilder::Float64(a), ColumnBuilder::Float64(mut b)) => {
-                a.append(&mut b);
+            (ColumnBuilder::Float64(a), ColumnBuilder::Float64(b)) => {
+                a.append(&b);
             }
-            (ColumnBuilder::Boolean(a), ColumnBuilder::Boolean(mut b)) => {
-                a.append(&mut b);
+            (ColumnBuilder::Boolean(a), ColumnBuilder::Boolean(b)) => {
+                a.append(&b);
             }
-            (ColumnBuilder::Date32(a), ColumnBuilder::Date32(mut b)) => {
-                a.append(&mut b);
+            (ColumnBuilder::Date32(a), ColumnBuilder::Date32(b)) => {
+                a.append(&b);
             }
-            (ColumnBuilder::Timestamp(ua, a), ColumnBuilder::Timestamp(ub, mut b)) => {
+            (ColumnBuilder::Timestamp(ua, a), ColumnBuilder::Timestamp(ub, b)) => {
                 let unit_a: TimeUnit = *ua;
                 if unit_a != ub {
                     return Err(crate::Error::Merge(format!(
                         "extend_owned: timestamp unit mismatch ({unit_a:?} vs {ub:?})"
                     )));
                 }
-                a.append(&mut b);
+                a.append(&b);
             }
             (
                 ColumnBuilder::Dictionary {
@@ -973,39 +1047,25 @@ impl ColumnBuilder {
         }
         Ok(match self {
             ColumnBuilder::String(v) => v.to_arrow()?,
-            ColumnBuilder::Int64(v) => {
-                Arc::new(std::mem::take(v).into_options().collect::<Int64Array>())
-            }
-            ColumnBuilder::Float64(v) => {
-                Arc::new(std::mem::take(v).into_options().collect::<Float64Array>())
-            }
+            ColumnBuilder::Int64(v) => v.to_arrow::<arrow::datatypes::Int64Type>()?,
+            ColumnBuilder::Float64(v) => v.to_arrow::<arrow::datatypes::Float64Type>()?,
             ColumnBuilder::Boolean(v) => {
-                Arc::new(std::mem::take(v).into_options().collect::<BooleanArray>())
+                use arrow::buffer::{BooleanBuffer, NullBuffer};
+                let data = std::mem::take(&mut v.data);
+                let validity = std::mem::take(&mut v.validity);
+                let nulls = if validity.iter().all(|&v| v) {
+                    None
+                } else {
+                    Some(NullBuffer::new(BooleanBuffer::from(validity)))
+                };
+                Arc::new(BooleanArray::new(BooleanBuffer::from(data), nulls))
             }
-            ColumnBuilder::Date32(v) => {
-                Arc::new(std::mem::take(v).into_options().collect::<Date32Array>())
-            }
+            ColumnBuilder::Date32(v) => v.to_arrow::<arrow::datatypes::Date32Type>()?,
             ColumnBuilder::Timestamp(unit, v) => match unit {
-                TimeUnit::Second => Arc::new(
-                    std::mem::take(v)
-                        .into_options()
-                        .collect::<PrimitiveArray<TimestampSecondType>>(),
-                ),
-                TimeUnit::Millisecond => Arc::new(
-                    std::mem::take(v)
-                        .into_options()
-                        .collect::<PrimitiveArray<TimestampMillisecondType>>(),
-                ),
-                TimeUnit::Microsecond => Arc::new(
-                    std::mem::take(v)
-                        .into_options()
-                        .collect::<PrimitiveArray<TimestampMicrosecondType>>(),
-                ),
-                TimeUnit::Nanosecond => Arc::new(
-                    std::mem::take(v)
-                        .into_options()
-                        .collect::<PrimitiveArray<TimestampNanosecondType>>(),
-                ),
+                TimeUnit::Second => v.to_arrow::<TimestampSecondType>()?,
+                TimeUnit::Millisecond => v.to_arrow::<TimestampMillisecondType>()?,
+                TimeUnit::Microsecond => v.to_arrow::<TimestampMicrosecondType>()?,
+                TimeUnit::Nanosecond => v.to_arrow::<TimestampNanosecondType>()?,
             },
             ColumnBuilder::Dictionary { codes, dict, .. } => {
                 let codes_arr: Int32Array = std::mem::take(codes).into_options().collect();
@@ -1074,10 +1134,9 @@ mod tests {
         b.push_value(Value::Str(Cow::Borrowed("bad")));
         b.push_value(Value::Null);
         if let ColumnBuilder::Int64(v) = &b {
-            assert_eq!(
-                v.iter().map(|o| o.copied()).collect::<Vec<_>>(),
-                vec![Some(42), None, None]
-            );
+            assert_eq!(v.get(0), Some(42));
+            assert_eq!(v.get(1), None);
+            assert_eq!(v.get(2), None);
         } else {
             panic!("expected Int64");
         }
@@ -1089,8 +1148,8 @@ mod tests {
         b.push_value(Value::Int64(7));
         b.push_value(Value::Float64(3.5)); // widened to i64
         if let ColumnBuilder::Int64(v) = &b {
-            assert_eq!(v.get(0), Some(&7));
-            assert_eq!(v.get(1), Some(&3));
+            assert_eq!(v.get(0), Some(7));
+            assert_eq!(v.get(1), Some(3));
         } else {
             panic!("expected Int64");
         }
@@ -1099,8 +1158,8 @@ mod tests {
         f.push_value(Value::Float64(2.5));
         f.push_value(Value::Int64(1));
         if let ColumnBuilder::Float64(v) = &f {
-            assert!((*v.get(0).unwrap() - 2.5).abs() < 1e-9);
-            assert!((*v.get(1).unwrap() - 1.0).abs() < 1e-9);
+            assert!((v.get(0).unwrap() - 2.5).abs() < 1e-9);
+            assert!((v.get(1).unwrap() - 1.0).abs() < 1e-9);
         } else {
             panic!("expected Float64");
         }
@@ -1127,10 +1186,10 @@ mod tests {
         i.push_value(Value::Bool(true)); // unsupported -> null
         i.push_value(Value::Null);
         if let ColumnBuilder::Int64(v) = &i {
-            assert_eq!(
-                v.iter().map(|o| o.copied()).collect::<Vec<_>>(),
-                vec![Some(7), Some(3), None, None]
-            );
+            assert_eq!(v.get(0), Some(7));
+            assert_eq!(v.get(1), Some(3));
+            assert_eq!(v.get(2), None);
+            assert_eq!(v.get(3), None);
         } else {
             panic!("expected Int64 builder");
         }
@@ -1141,8 +1200,8 @@ mod tests {
         f.push_value(Value::Int64(1));
         f.push_value(Value::Bool(false));
         if let ColumnBuilder::Float64(v) = &f {
-            assert!((*v.get(0).unwrap() - 2.5).abs() < 1e-9);
-            assert!((*v.get(1).unwrap() - 1.0).abs() < 1e-9);
+            assert!((v.get(0).unwrap() - 2.5).abs() < 1e-9);
+            assert!((v.get(1).unwrap() - 1.0).abs() < 1e-9);
             assert_eq!(v.get(2), None);
         } else {
             panic!("expected Float64 builder");
@@ -1155,10 +1214,10 @@ mod tests {
         b.push_value(Value::Str(Cow::Borrowed("not_bool")));
         b.push_value(Value::Int64(1));
         if let ColumnBuilder::Boolean(v) = &b {
-            assert_eq!(
-                v.iter().map(|o| o.copied()).collect::<Vec<_>>(),
-                vec![Some(true), Some(false), None, None]
-            );
+            assert_eq!(v.get(0), Some(true));
+            assert_eq!(v.get(1), Some(false));
+            assert_eq!(v.get(2), None);
+            assert_eq!(v.get(3), None);
         } else {
             panic!("expected Boolean builder");
         }
