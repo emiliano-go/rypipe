@@ -401,29 +401,43 @@ impl ParallelStreamingExecutor {
         // Coordinator: order by seq and deliver.
         // If `ordered`, buffer out-of-order batches until the next-in-sequence arrives.
         // If unordered, deliver immediately.
+        // When the reorder buffer overflows, fall back to unordered delivery.
         let mut pending: BTreeMap<usize, RecordBatch> = BTreeMap::new();
         let mut next_seq = 0usize;
         let mut reorder_bytes: usize = 0;
+        let mut fallback_unordered = false;
+        let reorder_limit = max_reorder * self.budget.bytes();
         for (seq, res) in receiver {
-            {
-                let batch = res?;
-                if opts.ordered {
-                    if seq == next_seq {
-                        consumer.consume(batch)?;
-                        next_seq += 1;
-                        while let Some(b) = pending.remove(&next_seq) {
-                            consumer.consume(b)?;
+            match res {
+                Ok(batch) => {
+                    if opts.ordered && !fallback_unordered {
+                        if seq == next_seq {
+                            consumer.consume(batch)?;
                             next_seq += 1;
+                            while let Some(b) = pending.remove(&next_seq) {
+                                consumer.consume(b)?;
+                                next_seq += 1;
+                            }
+                        } else {
+                            reorder_bytes += batch.get_array_memory_size();
+                            if reorder_bytes > reorder_limit {
+                                // Buffer overflow: drain pending in arrival order
+                                // (closest to correct), then deliver all remaining
+                                // batches unordered.  This avoids a hard error when
+                                // the memory budget is too small for the chunk count.
+                                for (_, b) in std::mem::take(&mut pending) {
+                                    consumer.consume(b)?;
+                                }
+                                consumer.consume(batch)?;
+                                reorder_bytes = 0;
+                                fallback_unordered = true;
+                            } else {
+                                pending.insert(seq, batch);
+                            }
                         }
                     } else {
-                        reorder_bytes += batch.get_array_memory_size();
-                        if reorder_bytes > max_reorder * self.budget.bytes() {
-                            return Err(crate::Error::Merge(format!(
-                                "reorder buffer exceeded {} MiB limit (max_reorder={max_reorder})",
-                                self.budget.bytes() / 1024 / 1024
-                            )));
-                        }
-                        pending.insert(seq, batch);
+                        // Unordered (either opted out or fell back): deliver immediately.
+                        consumer.consume(batch)?;
                     }
                 } else {
                     // Unordered: deliver immediately regardless of sequence.
@@ -432,7 +446,7 @@ impl ParallelStreamingExecutor {
             }
         }
         // Drain remaining.
-        if opts.ordered {
+        if opts.ordered && !fallback_unordered {
             while let Some(b) = pending.remove(&next_seq) {
                 consumer.consume(b)?;
                 next_seq += 1;
