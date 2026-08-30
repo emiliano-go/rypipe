@@ -1,64 +1,50 @@
 //! Isolated push-tier benchmark for `perf stat`.
 //!
 //! Runs only the push path (scan + per-field push, no finish_row, no Arrow export)
-//! on a Crystal Reports XML file. Feed through perf stat to get instruction/stall
-//! counts for the 47% phase.
+//! on a TSV file. Feed through perf stat to get instruction/stall counts for the
+//! push phase.
 //!
 //! ```sh
-//! cargo run --release -p rypipe-core --example bench_push_tier -- /path/to/file.xml
+//! cargo run --release -p rypipe-core --example bench_push_tier -- /path/to/file.tsv
 //! perf stat -e cycles,instructions,branch-misses,L1-dcache-load-misses \
-//!   target/release/examples/bench_push_tier /path/to/file.xml
+//!   target/release/examples/bench_push_tier /path/to/file.tsv
 //! ```
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rypipe_core::{ColumnarSink, ExecutionPlan, RecordParser, Splitter, Value};
+use rypipe_core::decoder::ColumnarSink;
+use rypipe_core::decoder::RecordParser;
+use rypipe_core::plan::ExecutionPlan;
+use rypipe_core::value::Value;
+use rypipe_core::Result;
 
-#[derive(Clone, Copy)]
-struct LineSplitter;
+#[derive(Clone, Debug, Default)]
+struct TsvParser;
 
-impl Splitter for LineSplitter {
-    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
-        if max_chunks <= 1 || bytes.is_empty() {
-            return vec![0, bytes.len()];
-        }
-        let stride = (bytes.len() / max_chunks).max(1);
-        let mut points = vec![0];
-        let mut next = stride;
-        for (i, &byte) in bytes.iter().enumerate().skip(1) {
-            if i >= next && byte == b'\n' && points.len() < max_chunks {
-                points.push(i + 1);
-                next += stride;
-            }
-        }
-        if *points.last().unwrap() != bytes.len() {
-            points.push(bytes.len());
-        }
-        points
-    }
-
-    fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
-        (sample.len() / sample.iter().filter(|&&b| b == b'\n').count().max(1)).max(1)
-    }
-}
-
-struct LineParser;
-
-impl RecordParser for LineParser {
-    fn validate(&self, bytes: &[u8]) -> rypipe_core::Result<()> {
+impl RecordParser for TsvParser {
+    fn validate(&self, bytes: &[u8]) -> Result<()> {
         simdutf8::basic::from_utf8(bytes)?;
         Ok(())
     }
 
-    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
         let text =
             std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
-        for line in text.lines().filter(|line| !line.is_empty()) {
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
             sink.begin_row();
-            for token in line.split_whitespace() {
-                if let Some((name, value)) = token.split_once('=') {
-                    sink.put_field(name, Value::Str(value));
+            for token in line.split('\t') {
+                if let Some((k, v)) = token.split_once('=') {
+                    if sink.needs_resolve() && !sink.wants(k) {
+                        continue;
+                    }
+                    if sink.needs_value() {
+                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
+                    }
                 }
             }
             sink.end_row();
@@ -107,27 +93,32 @@ impl ColumnarSink for PushOnly {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).expect("usage: bench_push_tier <file.txt>");
+    let path = args.get(1).expect("usage: bench_push_tier <file.tsv>");
     let data = std::fs::read(path).expect("failed to read file");
     let mb = data.len() as f64 / 1_048_576.0;
 
-    let splitter = LineSplitter;
-    let decoder = LineParser;
+    let parser = TsvParser;
+    parser.validate(&data).unwrap();
 
-    // Validate
-    decoder.validate(&data).unwrap();
+    let est_row = {
+        let newline_count = data.iter().filter(|&&b| b == b'\n').count().max(1);
+        (data.len() / newline_count).max(512)
+    };
+    let est = (data.len() / est_row).max(64);
+    let fields_per_row = {
+        let first_line_end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
+        data[..first_line_end]
+            .split(|&b| b == b'\t')
+            .filter(|t| t.iter().any(|&b| b == b'='))
+            .count()
+            .max(1)
+    };
 
     // Warmup
     {
         let plan = ExecutionPlan::new();
-        let est_row = splitter
-            .estimate_bytes_per_row(&data[..data.len().min(65536)])
-            .max(512);
-        let est = (data.len() / est_row).max(64);
-        let mut sink = PushOnly {
-            inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)),
-        };
-        decoder.parse_chunk_generic(&data, &mut sink).unwrap();
+        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)) };
+        parser.parse_chunk(&data, &mut sink).unwrap();
     }
 
     // Benchmark: 7 iterations, report median
@@ -136,15 +127,9 @@ fn main() {
     let mut last_rows = 0usize;
     for _ in 0..n {
         let plan = ExecutionPlan::new();
-        let est_row = splitter
-            .estimate_bytes_per_row(&data[..data.len().min(65536)])
-            .max(512);
-        let est = (data.len() / est_row).max(64);
-        let mut sink = PushOnly {
-            inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)),
-        };
+        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)) };
         let t0 = Instant::now();
-        decoder.parse_chunk_generic(&data, &mut sink).unwrap();
+        parser.parse_chunk(&data, &mut sink).unwrap();
         let dt = t0.elapsed().as_secs_f64();
         times.push(dt);
         last_rows = sink.inner.num_rows();
@@ -157,16 +142,11 @@ fn main() {
     let mean = times.iter().sum::<f64>() / n as f64;
     let stdev = (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
     let cov = stdev / mean;
+    let fields_total = last_rows * fields_per_row;
 
-    println!(
-        "push_only {median:.4}s median ({best:.4}-{worst:.4}, CoV {:.1}%)",
-        cov * 100.0
-    );
+    println!("push_only {median:.4}s median ({best:.4}-{worst:.4}, CoV {:.1}%)", cov * 100.0);
     println!("  {last_rows} rows, {mb:.1} MB, {:.0} MB/s", mb / median);
-    println!(
-        "  ns/field: {:.0}",
-        median * 1e9 / (last_rows as f64 * 10.0)
-    );
+    println!("  ns/field: {:.0}", median * 1e9 / fields_total as f64);
     println!();
     println!("Run with:");
     println!("  perf stat -e cycles,instructions,branch-misses,L1-dcache-load-misses \\");
