@@ -79,6 +79,7 @@ Rules:
 ## Implement `RecordParser`
 
 ```rust
+use std::borrow::Cow;
 use rypipe_core::{RecordParser, ColumnarSink, Value, Result};
 
 pub struct CsvDecoder {
@@ -100,7 +101,7 @@ impl RecordParser for CsvDecoder {
             sink.begin_row();
             for (col, value) in self.header.iter().zip(line.split(',')) {
                 if sink.wants(col) {
-                    sink.put_field(col, Value::Str(value));
+                    sink.put_field(col, Value::Str(Cow::Borrowed(value)));
                 }
             }
             sink.end_row();
@@ -120,7 +121,7 @@ impl RecordParser for CsvDecoder {
             for (col, value) in self.header.iter().zip(line.split(',')) {
                 if let Some(resolved) = sink.resolve(col) {
                     // ... expensive unescaping / decoding of `value` here ...
-                    sink.put_field_resolved(resolved, Value::Str(value));
+                    sink.put_field_resolved(resolved, Value::Str(Cow::Borrowed(value)));
                 }
             }
             sink.end_row();
@@ -137,7 +138,11 @@ Key points:
   zero-copy pair `sink.resolve(name)` + `sink.put_field_resolved(resolved, value)`
   to pay the `rename→drop` hash only once instead of twice.
 - Emit `Value::Str` for stringly formats; emit typed `Value` variants when the
-  format has native numbers/booleans.
+  format has native numbers/booleans. `Value::Str` wraps a `Cow<'_, str>`:
+  borrow from the input buffer when possible, and move an owned `String` in
+  when extraction allocates (entity unescaping, base64 decode, …) — the
+  buffered filter path may hold values past the end of your parse function,
+  so a borrow of a temporary would dangle.
 - Do not call `end_row()` for partial trailing rows; the engine will discard
   them.
 - Columns are now stored as `Vec<ColumnBuilder>` with a `field_index: FxHashMap<String,usize>`
