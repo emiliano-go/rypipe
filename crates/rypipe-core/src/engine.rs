@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::borrow::Cow;
 use std::sync::Arc;
 
 #[cfg(feature = "profile")]
@@ -720,7 +722,6 @@ impl TableBuilder {
     fn get_buffered_str(&self, field: &str) -> Option<String> {
         match self.get_buffered_value(field) {
             Some(Value::Str(s)) => Some(s.to_string()),
-            Some(Value::Owned(s)) => Some(s.clone()),
             Some(Value::Int64(i)) => Some(i.to_string()),
             Some(Value::Float64(f)) => Some(f.to_string()),
             Some(Value::Bool(b)) => Some(b.to_string()),
@@ -1581,7 +1582,7 @@ mod tests {
                 sink.begin_row();
                 for token in line.split_whitespace() {
                     if let Some((k, v)) = token.split_once('=') {
-                        sink.put_field(k, Value::Str(v));
+                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
                     }
                 }
                 sink.end_row();
@@ -2028,21 +2029,54 @@ mod tests {
         let mut tb = TableBuilder::with_plan(16, Arc::new(plan));
         // Row 1: B=ok → should pass
         tb.begin_row();
-        tb.resolve_and_put("A", Value::Str("1"));
-        tb.resolve_and_put("B", Value::Str("ok"));
+        tb.resolve_and_put("A", Value::Str(Cow::Borrowed("1")));
+        tb.resolve_and_put("B", Value::Str(Cow::Borrowed("ok")));
         tb.end_row();
         // Row 2: B=reject → should fail
         tb.begin_row();
-        tb.resolve_and_put("A", Value::Str("2"));
-        tb.resolve_and_put("B", Value::Str("reject"));
+        tb.resolve_and_put("A", Value::Str(Cow::Borrowed("2")));
+        tb.resolve_and_put("B", Value::Str(Cow::Borrowed("reject")));
         tb.end_row();
         // Row 3: B=ok → should pass
         tb.begin_row();
-        tb.resolve_and_put("A", Value::Str("3"));
-        tb.resolve_and_put("B", Value::Str("ok"));
+        tb.resolve_and_put("A", Value::Str(Cow::Borrowed("3")));
+        tb.resolve_and_put("B", Value::Str(Cow::Borrowed("ok")));
         tb.end_row();
         let batch = tb.finish().unwrap();
         assert_eq!(batch.num_rows(), 1, "only row 2 (B==reject) should pass");
+    }
+
+    #[test]
+    fn test_owned_cow_values_survive_buffered_filter() {
+        // Regression for the use-after-free behind this change: Value::Str
+        // used to be `&'a str`, and the buffered filtered path transmutes
+        // `Value<'a>` to `Value<'static>` to hold values until the predicate
+        // is decided. Adapters that unescape entities produce owned Strings;
+        // the owned buffer was dropped at the end of the scan function and
+        // the transmuted reference dangled, so heap reuse corrupted accepted
+        // rows after enough rejections. With `Str(Cow<'a, str>)` the owned
+        // buffer moves into the row buffer.
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "B".to_string(),
+            value: "ok".to_string(),
+        });
+        let mut tb = TableBuilder::with_plan(16, Arc::new(plan));
+        for i in 0..50 {
+            tb.begin_row();
+            // Owned values, as produced by entity unescaping in an adapter.
+            let a = Cow::Owned(format!("value-{i}-unescaped"));
+            let b = Cow::Owned(if i % 2 == 0 { "ok".to_string() } else { "no".to_string() });
+            tb.resolve_and_put("A", Value::Str(a));
+            tb.resolve_and_put("B", Value::Str(b));
+            tb.end_row();
+        }
+        assert_eq!(tb.num_rows(), 25, "even rows pass (B == ok)");
+        let col = tb.get_column("A").unwrap();
+        let vals = col.as_str_vec();
+        assert_eq!(vals.len(), 25);
+        assert_eq!(vals[0], Some("value-0-unescaped".to_string()));
+        assert_eq!(vals[24], Some("value-48-unescaped".to_string()));
     }
 
     #[test]
@@ -2058,9 +2092,9 @@ mod tests {
         let mut tb = TableBuilder::with_plan(16, Arc::new(plan));
         for _i in 0..100 {
             tb.begin_row();
-            tb.resolve_and_put("A", Value::Str("0"));
-            tb.resolve_and_put("B", Value::Str("x"));
-            tb.resolve_and_put("C", Value::Str("y"));
+            tb.resolve_and_put("A", Value::Str(Cow::Borrowed("0")));
+            tb.resolve_and_put("B", Value::Str(Cow::Borrowed("x")));
+            tb.resolve_and_put("C", Value::Str(Cow::Borrowed("y")));
             tb.end_row();
         }
         let batch = tb.finish().unwrap();
@@ -2089,11 +2123,11 @@ mod tests {
         let mut tb = TableBuilder::with_plan(128, Arc::new(plan));
         for i in 0..100 {
             tb.begin_row();
-            tb.resolve_and_put("A", Value::Str("ok"));
-            tb.resolve_and_put("B", Value::Str("x"));
-            tb.resolve_and_put("C", Value::Str("y"));
+            tb.resolve_and_put("A", Value::Str(Cow::Borrowed("ok")));
+            tb.resolve_and_put("B", Value::Str(Cow::Borrowed("x")));
+            tb.resolve_and_put("C", Value::Str(Cow::Borrowed("y")));
             if i >= 50 {
-                tb.resolve_and_put("D", Value::Str("z"));
+                tb.resolve_and_put("D", Value::Str(Cow::Borrowed("z")));
             }
             tb.end_row();
         }
@@ -2113,11 +2147,11 @@ mod tests {
         let mut tb = TableBuilder::with_plan(128, Arc::new(plan));
         for _i in 0..100 {
             tb.begin_row();
-            tb.resolve_and_put("A", Value::Str("ok"));
-            tb.resolve_and_put("B", Value::Str("x"));
-            tb.resolve_and_put("C", Value::Str("y"));
+            tb.resolve_and_put("A", Value::Str(Cow::Borrowed("ok")));
+            tb.resolve_and_put("B", Value::Str(Cow::Borrowed("x")));
+            tb.resolve_and_put("C", Value::Str(Cow::Borrowed("y")));
             if _i >= 50 {
-                tb.resolve_and_put("D", Value::Str("z"));
+                tb.resolve_and_put("D", Value::Str(Cow::Borrowed("z")));
             }
             tb.end_row();
         }
@@ -2158,18 +2192,18 @@ mod tests {
         // First 30 rows: only A, B
         for _i in 0..30 {
             tb.begin_row();
-            tb.resolve_and_put("A", Value::Str("x"));
-            tb.resolve_and_put("B", Value::Str("y"));
+            tb.resolve_and_put("A", Value::Str(Cow::Borrowed("x")));
+            tb.resolve_and_put("B", Value::Str(Cow::Borrowed("y")));
             tb.end_row();
         }
         // Rows 31-100: A, B, C, D, E
         for _i in 30..100 {
             tb.begin_row();
-            tb.resolve_and_put("A", Value::Str("x"));
-            tb.resolve_and_put("B", Value::Str("y"));
-            tb.resolve_and_put("C", Value::Str("c"));
-            tb.resolve_and_put("D", Value::Str("d"));
-            tb.resolve_and_put("E", Value::Str("e"));
+            tb.resolve_and_put("A", Value::Str(Cow::Borrowed("x")));
+            tb.resolve_and_put("B", Value::Str(Cow::Borrowed("y")));
+            tb.resolve_and_put("C", Value::Str(Cow::Borrowed("c")));
+            tb.resolve_and_put("D", Value::Str(Cow::Borrowed("d")));
+            tb.resolve_and_put("E", Value::Str(Cow::Borrowed("e")));
             tb.end_row();
         }
         let batch = tb.finish().unwrap();
