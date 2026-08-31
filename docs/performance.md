@@ -137,7 +137,7 @@ Then use `perf`, `cargo flamegraph`, or `samply` to profile.
 - Dictionary encoding could be made incremental across chunks to recover the
   fast path for `auto_dict=True`.
 
-## BlockMasks — negative result (closed)
+## BlockMasks: negative result (closed)
 
 BlockMasks precomputes 64-byte SIMD bitmasks per delimiter and answers
 multiple byte-search queries via bit operations. The idea: one AVX2/SSE2

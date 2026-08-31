@@ -408,15 +408,16 @@ PAGE: https://rypipe.emiliano-go.com/advanced/execution-modes/
 
 # Execution modes
 
-`rypipe` adapters can expose up to three execution strategies. Choosing the right one is usually the biggest single decision for memory and throughput.
+`rypipe` adapters can expose up to four execution strategies. Choosing the right one is the biggest single decision for memory and throughput.
 
-| Mode | Best for | Memory | Parallelism | Output |
-|------|----------|--------|-------------|--------|
-| `stream` | Huge files, unknown schema, row-at-a-time consumers | bounded by batch size | single-threaded parse | iterator / batched record batches |
-| `columnar` | Medium files that fit in RAM, table output | holds full table | single-threaded parse, vectorized builders | one `RecordBatch` |
-| `parallel` | Large files that fit in RAM, many cores | holds full table | chunked multi-threaded parse | one `RecordBatch` or `Vec<RecordBatch>` |
+| Mode | Memory | Parallelism | Speed (1 GB, 5800X) | Best for |
+|------|--------|-------------|---------------------|----------|
+| `columnar` | Full table in RAM | Single | 714 MB/s | <100 MB, single `Table`, `auto_dict` |
+| `parallel` | Full table in RAM | Multi-core | ~3 GB/s | >100 MB, fits RAM, max speed |
+| `bounded` (streaming) | Budget + one batch | Single | 625 MB/s 64KB | Huge files, 64KB-256 MB budget |
+| `parallel streaming` | Budget + small in-flight set | Multi-core | 1.5-2.5 GB/s (256 MB) | Huge files, ≥256 MB budget, speed + bounded |
 
-`auto` lets the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows; otherwise stream. Adapters should document their own heuristic because format split boundaries affect chunk safety.
+`auto` lets the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows and budget is large; otherwise bounded/parallel streaming. Adapters should document their own heuristic because format split boundaries affect chunk safety.
 
 ## Stream mode
 
@@ -468,6 +469,30 @@ Use parallel mode when:
 - the parser is CPU-bound (heavy XML, complex field extraction, many columns);
 - you can tolerate higher peak memory for shorter wall-clock time;
 - `auto_dict` and compare filters are off, so the fast path applies.
+
+## Parallel streaming mode
+
+Parallel streaming (`ParallelStreamingExecutor` `crates/rypipe-core/src/parallel_stream.rs`) parses chunks concurrently with bounded memory:
+
+1. `chunk_size = budget / (threads * 2)` (e.g. 256 MB / 16 threads → 8 MB/chunk, 2 chunks/thread → 256 MB peak).
+2. `Splitter::find_split_points` creates `num_chunks` ranges.
+3. Worker pool (`std::thread` or `rayon` `ThreadPool`) pulls `Range` + `seq` from a queue, parses into `TableBuilder`, sends `(seq, Result<RecordBatch>)` via `sync_channel(max_in_flight)` (backpressure).
+4. Coordinator orders by `seq` via `BTreeMap` pending and delivers to `BatchConsumer` in file order.
+
+Use parallel streaming when:
+
+- the file is large and you want bounded memory, but have ≥256 MB budget and multiple cores;
+- you need higher throughput than sequential streaming (`bounded` 625 MB/s) while avoiding full-table materialization (`parallel` 3 GB/s needs full RAM);
+- schema is fixed (first chunk defines schema, later chunks `unify_variants` or `Error::Merge`).
+
+Example:
+
+```python
+for batch in rypipe.iter_record_batches_parallel("huge.xml", memory="256MB", threads=8, format="crxml"):
+    writer.write_batch(batch)
+```
+
+Small budgets (`64KB`) are faster single-threaded; use `parallel streaming` for `≥256MB`.
 
 ## Auto engine selection
 
@@ -1184,21 +1209,21 @@ PAGE: https://rypipe.emiliano-go.com/advanced/streaming/
 
 # Streaming with constant memory
 
-`rypipe` can stream arbitrarily large files with **constant memory** — even a 50 GB file on a 2 GB Raspberry Pi — by yielding `RecordBatch` objects one at a time and dropping each after the consumer returns.
+`rypipe` can stream arbitrarily large files with **constant memory**: even a 50 GB file on a 2 GB Raspberry Pi: by yielding `RecordBatch` objects one at a time and dropping each after the consumer returns.
 
 ## Bounded vs streaming
 
 | Mode | API | Peak memory | When to use |
 |---|---|---|---|
-| `bounded` (collecting) | `BoundedExecutor::run` / `Pipeline::read_path_stream` → `Vec<RecordBatch>` | `budget + sum(batches)` — still grows with file size if you collect | `source.to_arrow()` with `memory="256MB"` for a single table |
-| `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | `budget + one batch` — constant | `for batch in rypipe.iter_record_batches(..., memory="64KB"):` + `ParquetWriter` |
+| `bounded` (collecting) | `BoundedExecutor::run` / `Pipeline::read_path_stream` → `Vec<RecordBatch>` | `budget + sum(batches)`: still grows with file size if you collect | `source.to_arrow()` with `memory="256MB"` for a single table |
+| `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | `budget + one batch`: constant | `for batch in rypipe.iter_record_batches(..., memory="64KB"):` + `ParquetWriter` |
 
 The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs:19`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs:30`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine.rs:75`) to keep RSS at `budget + batch`.
 
 ## Memory guarantee
 
 * **Rust-only:** `budget + batch + export buffer`. With `batch_size=1` and `memory="64KB"` and small rows (~1 KB for `crxml` `Details`), peak is a few tens of KB plus the `mmap` mapping (dropped after `plan_chunks` `bounded.rs:52`). This is the **64 KB** target in the spec.
-* **Python:** `pyarrow.RecordBatch` + interpreter overhead make true 64 KB impossible, but `iter_record_batches` is still bounded — `benchmarks/bench_extended.py` `bounded 64MB` 494 MB/s vs `bounded 64KB` 607 MB/s on 1 GB, and `50 GB` extrapolates to `~84s` at `64KB` vs `18s` `par32` full-RAM.
+* **Python:** `pyarrow.RecordBatch` + interpreter overhead make true 64 KB impossible, but `iter_record_batches` is still bounded: `benchmarks/bench_extended.py` `bounded 64MB` 494 MB/s vs `bounded 64KB` 607 MB/s on 1 GB, and `50 GB` extrapolates to `~84s` at `64KB` vs `18s` `par32` full-RAM.
 
 ## Rust API
 
@@ -1260,7 +1285,7 @@ for batch in pipe.iter_record_batches(memory="256MB"):
 
 ## When streaming falls back
 
-`Pipeline.iter_record_batches` checks `plan_split` `rypipe/fusion.py:130`; if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented — it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` constant).
+`Pipeline.iter_record_batches` checks `plan_split` `rypipe/fusion.py:130`; if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented: it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` constant).
 
 ## Testing
 
@@ -1608,6 +1633,8 @@ pub trait ColumnarSink {
     fn wants(&self, _name: &str) -> bool { true }
     fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> { Some(name) }
     fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) { self.put_field(resolved_name, value) }
+    fn needs_value(&self) -> bool { true }
+    fn needs_resolve(&self) -> bool { true }
     fn finish(&mut self) -> Result<RecordBatch>;
 }
 ```
@@ -1623,6 +1650,10 @@ This is the event sink that decoders drive.
 * `resolve<'a>(&'a self, name: &'a str) -> Option<&'a str>` is the single lookup version. Default returns `Some(name)` (keep as is). `TableBuilder` overrides to `self.plan.resolve_field(name)` which returns `Some(resolved)` or `None` for dropped, borrowing from `field_map` where possible. This lets adapters do `if let Some(r) = sink.resolve(k) { /* expensive decode */ sink.put_field_resolved(r, v) }` with one hash instead of two (`wants` plus `put_field`).
 
 * `put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>)` pushes a field that is already resolved. Default delegates to `put_field` (which will resolve again). `TableBuilder` overrides to `push_field_resolved` which calls `ensure_column_idx` directly and sets `row_dirty[idx] = true` without re hashing `field_map`/`drop_fields`. This is the fast path for adapters that already called `resolve`.
+
+* `needs_value(&self) -> bool` controls whether the parser decodes values. Default is `true`. When `false`, the parser skips value extraction entirely (e.g. `raw_text_until` in XML scanners) and does not call `put_field`. Adapters must NOT decode values when `needs_value()` returns `false`; the parser will emit `put_field` with an empty value or skip the call entirely. This enables locate-only and traversal-only tiers for profiling.
+
+* `needs_resolve(&self) -> bool` controls whether the parser resolves field names. Default is `true`. When `false`, the parser skips `wants()` and `resolve()` calls entirely; it only locates the byte extents of each field within a row. Adapters must NOT call `wants()` or `resolve()` when `needs_resolve()` returns `false`. Combined with `needs_value() = false`, this gives a pure traversal tier that measures XML tree walking cost without any sink interaction.
 
 * `finish(&mut self) -> Result<RecordBatch>` finalizes the sink. For `TableBuilder` it does `normalize`, early `new_empty` if no columns, `auto_dict_upgrade`, `sort_columns`, and builds `Schema` plus arrays.
 
@@ -1673,6 +1704,65 @@ fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
 ```
 
 Either pattern is correct. The second saves one `ExecutionPlan::resolve_field` hash per field when a filter or rename is active.
+
+## Performance decomposition (measured)
+
+The six-tier scanner ladder isolates each cost layer additively. Measured on `test_1gb.xml` (1024 MB, 926k rows, 10 cols, ~116 bytes/field) in release mode with lto, median-of-7. All times are cumulative; deltas are derived from consecutive tiers to avoid double-counting:
+
+```
+scan_only    0.066 ms/MB  (15,188 MB/s)  ─ row boundary scan
+traverse     0.634         (1,578 MB/s)  ─ +0.568 = XML walk + field extents
+locate       0.645         (1,550 MB/s)  ─ +0.011 (noise) = field-name resolution
+push_only    1.267         (  789 MB/s)  ─ +0.622 = per-field push (ensure_column_idx + push_value)
+build_only   1.343         (  745 MB/s)  ─ +0.076 = finish_row (null-fill, dirty mask, filter)
+full_parse   1.417         (  723 MB/s)  ─ +0.074 = Arrow export (finish → to_arrow memcpy)
+```
+
+Derived shares (against measured 1.417 ms/MB total):
+
+| Phase | ms/MB | cycles/field | cycles/byte | Share |
+|---|---|---|---|---|
+| scan | 0.066 | 28 | 0.2 | 4.7% |
+| traverse | 0.568 | 238 | 2.1 | 40.1% |
+| locate | ≤0 (noise) | ≤5 | ≤0.04 | 0.8% |
+| **per-field push** | **0.622** | **261** | **2.3** | **43.9%** |
+| finish_row | 0.076 | 32 | 0.3 | 5.4% |
+| Arrow export | 0.074 | 31 | 0.3 | 5.2% |
+| **total** | **1.417** | **595** | **5.1** | **100%** |
+
+### The sixth rung: per-field push vs per-row finalization
+
+The `push_only` tier runs the full push path (`ensure_column_idx` + `push_value`) but skips `finish_row` (null-fill, dirty-mask clear, filter check). The sixth rung splits the old "extract+sink" 52% into:
+- **Per-field push (44%, 261 cyc/f):** `ensure_column_idx` FxHash probe + `push_value` into `StrColumn` (data.extend_from_slice + offsets.push + validity.push)
+- **finish_row (5%, 32 cyc/f):** null-fill + dirty-mask clear + filter check
+- **Arrow export (5%, 31 cyc/f):** `finish()` → `to_arrow` memcpy
+
+The 261 cycles/field in per-field push is the dominant unexplained cost. Expected from first principles: ~25 cycles/field. **235 cycles/field unaccounted for**; a 10× gap, likely L1 cache thrashing from 30 concurrent write streams (10 columns × 3 buffers). Column diagnostics confirm no reallocation (production `estimated_rows = bytes.len() / 512` over-allocates by 2.3×), but 440 MB allocated for 100 MB used means data buffers are spread across many pages.
+
+### Why FieldId perfect hash is off the roadmap permanently
+
+Field-name resolution (`wants` + `resolve`, two `FxHashMap` probes per field) is ≤3% of parse time on real data; below the measurement noise floor. The locate tier's delta is zero within noise. The ceiling is too low for a perfect hash to measurably improve.
+
+### Tier design via `needs_value()` / `needs_resolve()`
+
+The `ColumnarSink` trait exposes two opt-out knobs:
+
+| Tier | `needs_value()` | `needs_resolve()` | What the parser does |
+|------|----------------|-------------------|---------------------|
+| scan_only | | | Pure `memmem` row boundary scan, no parser |
+| traverse | `false` | `false` | Walk XML tree, find field extents, skip resolve + sink |
+| locate | `false` | `true` | + `wants()` + `resolve()` via `ExecutionPlan`, no `put_field` |
+| push_only | `true` | `true` | + extract text, `put_field` with push_value, skip finish_row |
+| build_only | `true` | `true` | + `finish_row` (null-fill, dirty mask, filter) |
+| full | `true` | `true` | + extract text, `put_field`, Arrow sink via `finish()` |
+
+Each tier is a strict superset of the one above. Cross-tier assertions verify that `row_count` and `field_count` match across all tiers.
+
+### Caveats
+
+- The scan_only tier uses `memmem::find(row_tag)`, which is a different algorithm from the parser's row scan. It measures the theoretical floor for row-boundary detection.
+- The synthetic test (90 MB, 5 fields/row, ~22 bytes/field) produces different shares than real data (~116 bytes/field, 10 cols). Field-dense synthetics exaggerate per-field traversal costs.
+- `needs_resolve()` is `#[doc(hidden)]`; it has exactly one consumer (the benchmark harness) and no stable public use case yet.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/architecture/engine/
@@ -2308,7 +2398,7 @@ PAGE: https://rypipe.emiliano-go.com/crxml-adapter/
 
 Crystal Reports exports tabular data inside XML elements like `<Field Name="X"><Value>123</Value></Field>` and `<Text Name="Y"><TextValue>abc</TextValue></Text>`. `crxml` reads these exports and turns them into Arrow tables or DataFrames.
 
-On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6–3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, now also scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB (was 251/234 `quick-xml`), within 30% of columnar (was 174% gap). The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O — `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine.rs:16`, `row_dirty` `engine.rs:26`) keeps up without being the bottleneck.
+On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6-3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, now also scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB (was 251/234 `quick-xml`), within 30% of columnar (was 174% gap). The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O: `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine.rs:16`, `row_dirty` `engine.rs:26`) keeps up without being the bottleneck.
 
 ## How it fits into rypipe
 
@@ -2374,7 +2464,7 @@ impl Splitter for CrystalXmlSplitter {
 
 ### Record parser
 
-`CrystalXmlDecoder` implements `rypipe_core::RecordParser` in `src/xml/decoder.rs`. Since `crxml 1.2` it uses a hand-rolled `memchr`/`memmem` scanner `src/xml/scanner.rs` (not `quick_xml`) — the same scanner backs both the columnar and the super-optimized streaming path (`lib.rs:534` `RowParser`+`RowSink`+`scan_one_row` `scanner.rs:81`).
+`CrystalXmlDecoder` implements `rypipe_core::RecordParser` in `src/xml/decoder.rs`. Since `crxml 1.2` it uses a hand-rolled `memchr`/`memmem` scanner `src/xml/scanner.rs` (not `quick_xml`): the same scanner backs both the columnar and the super-optimized streaming path (`lib.rs:534` `RowParser`+`RowSink`+`scan_one_row` `scanner.rs:81`).
 
 For each row element it:
 
@@ -2455,9 +2545,9 @@ The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from
 2. **Find split points cheaply**: one `memmem` `splitter.rs:27` + `find_special_regions` `splitter.rs:61` with `is_empty` fast path beats byte-by-byte; `estimate_bytes_per_row` `splitter.rs:41` sizes `TableBuilder` `lib.rs:275`.
 3. **Handle boundary cases**: chunks can start inside a row; `scan_one_row` `scanner.rs:81` (`Recover` → `pos+1`) and `wants`-driven `find_close_after` keep parallel correct.
 4. **Borrow strings into the engine**: `Value::Str(&str)` slices via `utf8_unchecked` `scanner.rs:39` + conditional `&` `scanner.rs:662` avoids `Cow` alloc (94% of values are plain ASCII). `RowSink` `lib.rs:564` pushes directly without `TableBuilder` hash/arena for streaming.
-5. **Skip dropped fields in the scanner**: check `wants`/`resolve` *before* visiting `<Value>` children — `field_element` `scanner.rs:210` byte-jumps to `</Field>` via `Finder` (drop_all 4183 MB/s, 66% win).
+5. **Skip dropped fields in the scanner**: check `wants`/`resolve` *before* visiting `<Value>` children: `field_element` `scanner.rs:210` byte-jumps to `</Field>` via `Finder` (drop_all 4183 MB/s, 66% win).
 6. **Reuse the scanner for both engines**: columnar `scan_chunk` `scanner.rs:54` and streaming `scan_one_row` `scanner.rs:81` share `parse_row` `scanner.rs:73`, so one optimization benefits `stream`/`columnar`/`parallel`/`bounded`.
-7. **Measure first**: `perf` `scan_open_tag` 8.3% + `field_element` 8.6% + `push_field_resolved` 2.76% vs `rep_movs` 3% tells you `mmap` is 3% but scanner is 35% — focus there. `benchmarks/bench_extended.py` (104 benchmarks/file) covers all engines×sinks×pushdowns×chunk/bounded/batch/pipeline.
+7. **Measure first**: `perf` `scan_open_tag` 8.3% + `field_element` 8.6% + `push_field_resolved` 2.76% vs `rep_movs` 3% tells you `mmap` is 3% but scanner is 35%: focus there. `benchmarks/bench_extended.py` (104 benchmarks/file) covers all engines×sinks×pushdowns×chunk/bounded/batch/pipeline.
 8. **Register with `rypipe`**: thin `CrystalXMLAdapter` keeps `rypipe.read(format="crxml")` while Rust stays fast.
 
 ## Source
@@ -2722,6 +2812,8 @@ HTML, or any other row-oriented format once you provide a small adapter.
 `rypipe` itself does **not** ship parsers for any format. Adapters live in
 separate packages. Install the engine plus the adapters you need.
 
+> **Origin:** `rypipe` was born as the engine inside [`crxml`](https://github.com/emiliano-go/crxml): a high-throughput Crystal Reports XML parser. The `crxml` adapter was the original idea and the first production user; the engine was then separated and abstracted into `rypipe` so any row-oriented format (CSV, JSON, XML, HTML, …) could reuse the same `Splitter` + `RecordParser` + `ColumnarSink` + `TableBuilder` + `ExecutionPlan` machinery. `crxml` now lives as a thin adapter crate (`crxml-core`) on top of `rypipe-core`.
+
 ## What rypipe is
 
 - A Rust workspace with two crates:
@@ -2848,10 +2940,10 @@ Hardware: Linux workstation, AMD Ryzen 9 5900X, DDR4-3200, release build.
 
 | Path | Rows | Time | Rows/s | MB/s | RSS |
 |------|------|------|--------|------|-----|
-| `Pipeline::read_path` | 5,000,000 | 1.31 s | 3.83 M | 229 | 290 MB |
-| `Pipeline::read_path_par` (4 chunks) | 5,000,000 | 1.46 s | 3.43 M | 205 | 432 MB |
-| `Pipeline::read_path_par` (8 chunks) | 5,000,000 | 1.49 s | 3.35 M | 200 | 529 MB |
-| `Pipeline::read_path_stream` (64 MiB) | 5,000,000 | 1.98 s | 2.53 M | 151 | 629 MB |
+| `Pipeline::read_path` | 5,000,000 | 1.18 s | 4.23 M | 253 | 290 MB |
+| `Pipeline::read_path_par` (4 chunks) | 5,000,000 | 1.33 s | 3.76 M | 225 | 388 MB |
+| `Pipeline::read_path_par` (8 chunks) | 5,000,000 | 1.35 s | 3.71 M | 222 | 486 MB |
+| `Pipeline::read_path_stream` (64 MiB) | 5,000,000 | 1.92 s | 2.61 M | 156 | 693 MB |
 
 Single-thread parse is fastest for this simple TSV adapter because chunk
 overhead dominates. Parallel mode trades a small throughput drop for much
@@ -2956,13 +3048,41 @@ Then use `perf`, `cargo flamegraph`, or `samply` to profile.
 
 ## Example: `crxml` adapter
 
-`crxml` (Crystal Reports XML, at `docs/crxml-adapter.md`) is the reference for what a good adapter looks like: hand-rolled `memchr` scanner `crxml-core/src/xml/scanner.rs` instead of `quick-xml`, shared between columnar `scan_chunk` and streaming `scan_one_row` + `RowSink` `crxml-core/src/lib.rs:564`, `Vec<ColumnBuilder>`+`field_index` + `row_dirty` bitmask in `engine.rs:16`, `InputBuffer` `mmap` auto for >50 MB (`crxml-core` `auto_mmap`), and `wants`-driven skip-bytes. On a Ryzen 5800X it holds **714 MB/s single / 2.6–3.0 GB/s parallel** (1 GB, 926k rows) and **4183 MB/s** with `drop_all` pushdown, with streaming now **508 MB/s** (2× over `quick-xml`'s 251). See `benchmarks/bench_extended.py` (104 benchmarks/file) for the full matrix (native, source×sink, pushdowns, chunk/bounded/batch/pipeline).
+`crxml` (Crystal Reports XML, at `docs/crxml-adapter.md`) is the reference for what a good adapter looks like: hand-rolled `memchr` scanner `crxml-core/src/xml/scanner.rs` instead of `quick-xml`, shared between columnar `scan_chunk` and streaming `scan_one_row` + `RowSink` `crxml-core/src/lib.rs:564`, `Vec<ColumnBuilder>`+`field_index` + `row_dirty` bitmask in `engine.rs:16`, `InputBuffer` `mmap` auto for >50 MB (`crxml-core` `auto_mmap`), and `wants`-driven skip-bytes. On a Ryzen 5800X it holds **714 MB/s single / 2.6-3.0 GB/s parallel** (1 GB, 926k rows) and **4183 MB/s** with `drop_all` pushdown, with streaming now **508 MB/s** (2× over `quick-xml`'s 251). See `benchmarks/bench_extended.py` (104 benchmarks/file) for the full matrix (native, source×sink, pushdowns, chunk/bounded/batch/pipeline).
 
 ## Future work
 
 - A generic streaming `RecordParser` could support chunked async input.
 - Dictionary encoding could be made incremental across chunks to recover the
   fast path for `auto_dict=True`.
+
+## BlockMasks: negative result (closed)
+
+BlockMasks precomputes 64-byte SIMD bitmasks per delimiter and answers
+multiple byte-search queries via bit operations. The idea: one AVX2/SSE2
+load per block amortized across N delimiter searches in the same span.
+
+**Microbench result (i5-1335U, release build, 500K iterations):**
+
+| Span | n=1 | n=2 | n=3 | n=5 | n=8 |
+|------|-----|-----|-----|-----|-----|
+| 32B | memchr 1.7x | memchr 1.9x | memchr 2.3x | memchr 3.7x | memchr 3.5x |
+| 64B | memchr 1.3x | memchr 1.3x | memchr 1.1x | memchr 1.3x | memchr 1.3x |
+| 128B | memchr 1.0x | memchr 1.1x | memchr 1.8x | **BM 1.2x** | memchr 1.4x |
+| 512B | memchr 1.4x | memchr 1.7x | memchr 1.2x | memchr 1.8x | memchr 1.8x |
+
+**Gate:** BlockMasks must win at n ≥ 4 on 64- and 128-byte spans.
+
+**Result:** Fails the gate. At 64 bytes memchr wins at all query counts.
+At 128 bytes, only n=5 shows a marginal win (1.2x) while n=8 regresses
+(0.73x). The mask-compute overhead (~20 instructions per block) cannot
+amortize across fewer than ~6 queries, and XML field spans rarely exceed
+100 bytes with more than 5 delimiter types active.
+
+**Verdict:** Close permanently. The scalar-loop `memchr`-based scanner
+remains the right choice for XML. If delimiter density increases (e.g.,
+JSON with 8+ active delimiters per 64-byte block), revisit with a
+worst-case microbench first.
 
 ## See also
 
@@ -3628,7 +3748,7 @@ A pure-Rust engine would still need to export Arrow : and then every downstream 
 
 * `field_element` / `scan_open_tag` ~17% : XML scanning (Rust)
 * `push_field_resolved` 2.76% + `field_index.get` 1.64% : column dispatch (Rust, Vec+map after 0.1.2)
-* `rep_movs` 3–10% : the un-avoidable `file → page cache` copy
+* `rep_movs` 3-10% : the un-avoidable `file → page cache` copy
 
 Python time is **orchestration only**: `ExecutionPlan` construction, `Pipeline` `|` chaining, and the final `Table.to_pandas()` conversion : microseconds per row. The GIL is released for the entire `Pipeline::read_*` call (`py.allow_threads` in `crates/rypipe-python`), so multi-core parsing is not gated.
 
@@ -3680,7 +3800,7 @@ Modern data work is **data-driven development**: the shape of the output dictate
 3. **Freeze the pipeline** (commit the `ExecutionPlan`).
 4. **Scale it** (same pipeline via `read_stream` with `memory="1GiB"` on 100 GB of files).
 
-Steps 1–2 demand a REPL. Step 4 demands Rust speed. rypipe gives both from the same object. A pure-Rust engine would optimize step 4 by pessimizing steps 1–3 : the 80% of time where humans, not CPUs, are the bottleneck.
+Steps 1-2 demand a REPL. Step 4 demands Rust speed. rypipe gives both from the same object. A pure-Rust engine would optimize step 4 by pessimizing steps 1-3 : the 80% of time where humans, not CPUs, are the bottleneck.
 
 > **Analogy:** `polars` didn’t win by being “pure Rust.” It won by putting a Rust engine behind `pl.DataFrame` : a Python/Rust hybrid that feels like pandas but runs at Rust speed. `rypipe` does the same for ingestion.
 
@@ -3696,7 +3816,7 @@ Yes. See [Rust API](./rust-api.md) and [Writing a format adapter](./writing-adap
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.
 
 **“Will you maintain both APIs?”**
-Yes. `rypipe-core` is versioned independently (`0.1.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10–3.14. Breaking adapter APIs bumps the minor version.
+Yes. `rypipe-core` is versioned independently (`0.1.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
 
 ---
 
@@ -3977,6 +4097,31 @@ fusion layer pushes them into `_read_arrow`. Your Rust `read_csv` receives the
 merged kwargs and applies them in the parse loop. Non-fusable stages (custom
 callables, stateful transforms) run over the returned table automatically.
 
+## Fast delimiter scanning with `BlockMasks` (engine asset)
+
+36.5% of parse is `memchr` on 50-100 byte spans (5-7 searches per field). `BlockMasks`
+computes delimiter positions once per 64-byte block and answers all queries from
+cached bitmasks - an engine asset, not a crxml trick.
+
+```rust
+use rypipe_core::block_masks::BlockMasks;
+
+const DELIMS: &[u8] = &[b',', b'"', b'\n', b'\r']; // CSV
+let mut masks = BlockMasks::new(buf, DELIMS);
+let comma = masks.next(pos, b',');
+let quote = masks.next_any(pos, &[b'"', b'\'']);
+let far = masks.next_far(pos, b'\n', 400); // >256 → memchr fallback
+```
+
+* `BlockMasks::new(buf, delims)` - `delims` static ≤8, e.g. crxml `&[b'<',b'>',b'"',b'\'',b'=']` (MAX_DELIMS=8 covers CSV `, " \n \r` and JSONL `{ } " \n \ \`)
+* Lazy per-delimiter: first query for `','` costs 2×AVX2 loads (64B), next 4 queries reuse the cached mask (`tzcnt` only). 5 searches → 20 instr vs 5× memchr prologue.
+* `next_any` ORs masks, one `tzcnt` for `memchr3` replacement (`scan_open_tag`).
+* Tail: final partial block copied to 64B stack array, masked off.
+* AVX2 (`_mm256_cmpeq_epi8`+`movemask`) → SSE2 (4×16B) → scalar, runtime dispatch via `is_x86_feature_detected!("avx2")` cached in `OnceLock` (same as `memchr`, no manylinux question).
+* `next_far(hint>256)` falls back to `memchr` for long spans (between rows).
+
+Crxml prototype (P2 `next_lt` only) measured **-68% on traverse** (0.574→0.968 ms/MB) - short 50B spans don't amortize; `memchr` already optimal there. Full integration (P3-P4 `scan_open_tag`/`raw_text_until` candidate+verify) is available but gated. For CSV/JSONL with 1KB rows and 5-7 searches per field on the same block, the win should appear; use the P1 microbench (`cargo test -p rypipe-core block_masks -lib`) to gate.
+
 ## Testing an adapter
 
 Recommended tests:
@@ -3989,6 +4134,7 @@ Recommended tests:
 - Multi-chunk equivalence: parse whole file vs. split + merge.
 - Partial trailing row discarded cleanly.
 - `Pipeline::read_path`, `read_path_par`, and `read_path_stream` agree.
+- `BlockMasks` equivalence: `masks.next(pos,d) == memchr(d, &buf[pos..])` (property test in `block_masks.rs`).
 
 See the `rypipe-core` tests and the `bench_throughput` example for small
 self-contained splitter/parser samples.
