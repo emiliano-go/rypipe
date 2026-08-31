@@ -5,14 +5,188 @@ use arrow::array::{
     PrimitiveArray, StringArray,
 };
 use arrow::datatypes::{
-    DataType, Int32Type, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType, TimeUnit,
+    DataType, Int32Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType,
 };
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::plan::FieldType;
 use crate::value::Value;
 use crate::Result;
+
+/// Compact one-bit-per-row validity storage.
+#[derive(Default, Debug)]
+struct ValidityBitmap {
+    bits: Vec<u8>,
+    len: usize,
+    null_count: usize,
+}
+
+impl ValidityBitmap {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            bits: Vec::with_capacity(cap.div_ceil(8)),
+            len: 0,
+            null_count: 0,
+        }
+    }
+
+    fn push(&mut self, valid: bool) {
+        if self.len % 8 == 0 {
+            self.bits.push(0);
+        }
+        if valid {
+            self.bits[self.len / 8] |= 1 << (self.len % 8);
+        } else {
+            self.null_count += 1;
+        }
+        self.len += 1;
+    }
+
+    fn pop(&mut self) -> Option<bool> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        let byte = &mut self.bits[self.len / 8];
+        let valid = (*byte & (1 << (self.len % 8))) != 0;
+        if !valid {
+            self.null_count -= 1;
+        }
+        *byte &= !(1 << (self.len % 8));
+        if self.len % 8 == 0 {
+            self.bits.pop();
+        }
+        Some(valid)
+    }
+
+    fn is_valid(&self, i: usize) -> bool {
+        i < self.len && (self.bits[i / 8] & (1 << (i % 8))) != 0
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn bytes_used(&self) -> usize {
+        self.bits.len()
+    }
+    fn capacity_bytes(&self) -> usize {
+        self.bits.capacity()
+    }
+
+    fn append(&mut self, other: &Self) {
+        if self.len % 8 == 0 {
+            self.bits.extend_from_slice(&other.bits);
+            self.len += other.len;
+            self.null_count += other.null_count;
+            if self.len % 8 != 0 {
+                let mask = (1u8 << (self.len % 8)) - 1;
+                if let Some(last) = self.bits.last_mut() {
+                    *last &= mask;
+                }
+            }
+            return;
+        }
+        for i in 0..other.len {
+            self.push(other.is_valid(i));
+        }
+    }
+
+    fn into_arrow(self) -> Option<arrow::buffer::NullBuffer> {
+        if self.null_count == 0 {
+            return None;
+        }
+        let buffer = arrow::buffer::BooleanBuffer::new(
+            arrow::buffer::Buffer::from_vec(self.bits),
+            0,
+            self.len,
+        );
+        Some(arrow::buffer::NullBuffer::new(buffer))
+    }
+
+    fn split_off(&mut self, n: usize) -> Self {
+        let mut other = Self::with_capacity(n);
+        for i in 0..n {
+            other.push(self.is_valid(i));
+        }
+        let remaining: Vec<bool> = (n..self.len).map(|i| self.is_valid(i)).collect();
+        *self = Self::with_capacity(remaining.len());
+        for valid in remaining {
+            self.push(valid);
+        }
+        other
+    }
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct NullableColumn<T> {
+    values: Vec<T>,
+    validity: ValidityBitmap,
+}
+
+impl<T: Default + Clone> NullableColumn<T> {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(cap),
+            validity: ValidityBitmap::with_capacity(cap),
+        }
+    }
+
+    fn push(&mut self, value: Option<T>) {
+        let valid = value.is_some();
+        self.values.push(value.unwrap_or_default());
+        self.validity.push(valid);
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.validity.pop()?;
+        self.values.pop()
+    }
+
+    fn len(&self) -> usize {
+        self.validity.len()
+    }
+    pub(crate) fn get(&self, i: usize) -> Option<&T> {
+        self.validity.is_valid(i).then(|| &self.values[i])
+    }
+    fn bytes_used(&self) -> usize {
+        self.values.len() * std::mem::size_of::<T>() + self.validity.bytes_used()
+    }
+    fn capacity_bytes(&self) -> usize {
+        self.values.capacity() * std::mem::size_of::<T>() + self.validity.capacity_bytes()
+    }
+    fn append(&mut self, other: &mut Self) {
+        self.values.append(&mut other.values);
+        self.validity.append(&other.validity);
+    }
+    fn split_off(&mut self, n: usize) -> Self {
+        let values = self.values[..n].to_vec();
+        self.values.drain(..n);
+        let validity = self.validity.split_off(n);
+        Self { values, validity }
+    }
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Option<&T>> {
+        (0..self.len()).map(|i| self.get(i))
+    }
+}
+
+impl<T: Default + Clone> NullableColumn<T> {
+    fn from_options(values: impl IntoIterator<Item = Option<T>>) -> Self {
+        let mut result = Self::with_capacity(0);
+        for value in values {
+            result.push(value);
+        }
+        result
+    }
+
+    fn into_options(self) -> impl Iterator<Item = Option<T>> {
+        let validity = self.validity;
+        self.values
+            .into_iter()
+            .enumerate()
+            .map(move |(i, value)| validity.is_valid(i).then_some(value))
+    }
+}
 
 /// A borrowed, typed view of a single stored value, used for native-typed
 /// filter evaluation without allocating.
@@ -36,7 +210,7 @@ pub(crate) struct StrColumn {
     data: Vec<u8>,
     /// len + 1 entries; offsets[i]..offsets[i+1] is value i.
     offsets: Vec<i32>,
-    validity: Vec<bool>,
+    validity: ValidityBitmap,
 }
 
 impl StrColumn {
@@ -46,7 +220,7 @@ impl StrColumn {
         StrColumn {
             data: Vec::with_capacity(cap * 16),
             offsets,
-            validity: Vec::with_capacity(cap),
+            validity: ValidityBitmap::with_capacity(cap),
         }
     }
 
@@ -81,19 +255,17 @@ impl StrColumn {
         other_data.extend_from_slice(&self.data[..split_offset]);
         let mut other_offsets = Vec::with_capacity(n + 1);
         other_offsets.extend_from_slice(&self.offsets[..=n]);
-        let mut other_validity = Vec::with_capacity(n);
-        other_validity.extend_from_slice(&self.validity[..n]);
+        let other_validity = self.validity.split_off(n);
 
         // Adjust self: drop prefix
         self.data.drain(..split_offset);
         // Rebase offsets: subtract split_offset and drop first n
-        let mut new_offsets = Vec::with_capacity(self.validity.len() - n + 1);
+        let mut new_offsets = Vec::with_capacity(self.validity.len() + 1);
         new_offsets.push(0);
         for &off in &self.offsets[n + 1..] {
             new_offsets.push(off - split_offset as i32);
         }
         self.offsets = new_offsets;
-        self.validity.drain(..n);
 
         Self {
             data: other_data,
@@ -107,16 +279,16 @@ impl StrColumn {
     }
 
     fn bytes_used(&self) -> usize {
-        self.data.len() + self.offsets.len() * 4 + self.validity.len()
+        self.data.len() + self.offsets.len() * 4 + self.validity.bytes_used()
     }
 
     /// Total allocated capacity in bytes (data + offsets + validity).
     fn capacity_bytes(&self) -> usize {
-        self.data.capacity() + self.offsets.capacity() * 4 + self.validity.capacity()
+        self.data.capacity() + self.offsets.capacity() * 4 + self.validity.capacity_bytes()
     }
 
     fn get(&self, i: usize) -> Option<&str> {
-        if !*self.validity.get(i)? {
+        if !self.validity.is_valid(i) {
             return None;
         }
         let start = self.offsets[i] as usize;
@@ -130,7 +302,7 @@ impl StrColumn {
         self.data.extend_from_slice(&other.data);
         self.offsets
             .extend(other.offsets[1..].iter().map(|o| o + base));
-        self.validity.extend_from_slice(&other.validity);
+        self.validity.append(&other.validity);
     }
 
     fn iter(&self) -> impl Iterator<Item = Option<&str>> {
@@ -141,17 +313,13 @@ impl StrColumn {
     /// Takes `&mut self` so we can `std::mem::take` the Vecs and preserve
     /// their capacity for reuse by the streaming path.
     fn to_arrow(&mut self) -> Result<ArrayRef> {
-        use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
+        use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
         // Move the Vecs out, leaving zero-capacity replacements.
         // The streaming path preserves capacity via mem::replace in batch boundaries.
         let offsets = std::mem::take(&mut self.offsets);
         let data = std::mem::take(&mut self.data);
         let validity = std::mem::take(&mut self.validity);
-        let nulls = if validity.iter().all(|&v| v) {
-            None
-        } else {
-            Some(NullBuffer::from(validity))
-        };
+        let nulls = validity.into_arrow();
         let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets));
         let data = Buffer::from_vec(data);
         let arr = StringArray::try_new(offsets, data, nulls)?;
@@ -163,15 +331,15 @@ impl StrColumn {
 /// type (String, Int64, Float64, Boolean, Date32, Timestamp, or Dictionary).
 pub(crate) enum ColumnBuilder {
     String(StrColumn),
-    Int64(Vec<Option<i64>>),
-    Float64(Vec<Option<f64>>),
-    Boolean(Vec<Option<bool>>),
+    Int64(NullableColumn<i64>),
+    Float64(NullableColumn<f64>),
+    Boolean(NullableColumn<bool>),
     /// Days since the Unix epoch.
-    Date32(Vec<Option<i32>>),
+    Date32(NullableColumn<i32>),
     /// Raw integers in `unit` since the Unix epoch.
-    Timestamp(TimeUnit, Vec<Option<i64>>),
+    Timestamp(TimeUnit, NullableColumn<i64>),
     Dictionary {
-        codes: Vec<Option<i32>>,
+        codes: NullableColumn<i32>,
         dict: Vec<String>,
         /// value → code side-index.
         index: HashMap<String, i32>,
@@ -233,12 +401,18 @@ fn format_date32(days: i32) -> String {
 fn format_timestamp(v: i64, unit: TimeUnit) -> String {
     let (secs, subsec_nanos) = match unit {
         TimeUnit::Second => (v, 0u32),
-        TimeUnit::Millisecond => (v.div_euclid(1_000), (v.rem_euclid(1_000) * 1_000_000) as u32),
+        TimeUnit::Millisecond => (
+            v.div_euclid(1_000),
+            (v.rem_euclid(1_000) * 1_000_000) as u32,
+        ),
         TimeUnit::Microsecond => (
             v.div_euclid(1_000_000),
             (v.rem_euclid(1_000_000) * 1_000) as u32,
         ),
-        TimeUnit::Nanosecond => (v.div_euclid(1_000_000_000), v.rem_euclid(1_000_000_000) as u32),
+        TimeUnit::Nanosecond => (
+            v.div_euclid(1_000_000_000),
+            v.rem_euclid(1_000_000_000) as u32,
+        ),
     };
     match chrono::DateTime::from_timestamp(secs, subsec_nanos) {
         Some(dt) => dt.naive_utc().to_string(),
@@ -250,15 +424,15 @@ impl ColumnBuilder {
     pub(crate) fn with_capacity(cap: usize, field_type: &FieldType) -> Self {
         match field_type {
             FieldType::String => ColumnBuilder::String(StrColumn::with_capacity(cap)),
-            FieldType::Int64 => ColumnBuilder::Int64(Vec::with_capacity(cap)),
-            FieldType::Float64 => ColumnBuilder::Float64(Vec::with_capacity(cap)),
-            FieldType::Boolean => ColumnBuilder::Boolean(Vec::with_capacity(cap)),
-            FieldType::Date32 => ColumnBuilder::Date32(Vec::with_capacity(cap)),
+            FieldType::Int64 => ColumnBuilder::Int64(NullableColumn::with_capacity(cap)),
+            FieldType::Float64 => ColumnBuilder::Float64(NullableColumn::with_capacity(cap)),
+            FieldType::Boolean => ColumnBuilder::Boolean(NullableColumn::with_capacity(cap)),
+            FieldType::Date32 => ColumnBuilder::Date32(NullableColumn::with_capacity(cap)),
             FieldType::Timestamp(unit) => {
-                ColumnBuilder::Timestamp(*unit, Vec::with_capacity(cap))
+                ColumnBuilder::Timestamp(*unit, NullableColumn::with_capacity(cap))
             }
             FieldType::Dictionary => ColumnBuilder::Dictionary {
-                codes: Vec::with_capacity(cap),
+                codes: NullableColumn::with_capacity(cap),
                 dict: Vec::new(),
                 index: HashMap::default(),
             },
@@ -389,7 +563,9 @@ impl ColumnBuilder {
                     "cannot promote column to unified variant '{target}'"
                 )));
             }
-            *self = ColumnBuilder::Float64(v.into_iter().map(|o| o.map(|n| n as f64)).collect());
+            *self = ColumnBuilder::Float64(NullableColumn::from_options(
+                v.iter().map(|o| o.map(|n| *n as f64)),
+            ));
             return Ok(());
         }
 
@@ -407,7 +583,7 @@ impl ColumnBuilder {
             }
             let mut dict: Vec<String> = Vec::new();
             let mut index: HashMap<String, i32> = HashMap::default();
-            let mut codes: Vec<Option<i32>> = Vec::with_capacity(old.len());
+            let mut codes = NullableColumn::with_capacity(old.len());
             for val in old.iter() {
                 match val {
                     Some(s) => codes.push(Some(dict_code(&mut dict, &mut index, s))),
@@ -510,14 +686,12 @@ impl ColumnBuilder {
     pub(crate) fn bytes_used(&self) -> usize {
         match self {
             ColumnBuilder::String(s) => s.bytes_used(),
-            ColumnBuilder::Int64(v) => v.len() * 8 + v.capacity() * 0,
-            ColumnBuilder::Float64(v) => v.len() * 8,
-            ColumnBuilder::Boolean(v) => v.len(),
-            ColumnBuilder::Date32(v) => v.len() * 4,
-            ColumnBuilder::Timestamp(_, v) => v.len() * 8,
-            ColumnBuilder::Dictionary { codes, dict, .. } => {
-                codes.len() * 4 + dict.len() * 16 + codes.capacity() * 0
-            }
+            ColumnBuilder::Int64(v) => v.bytes_used(),
+            ColumnBuilder::Float64(v) => v.bytes_used(),
+            ColumnBuilder::Boolean(v) => v.bytes_used(),
+            ColumnBuilder::Date32(v) => v.bytes_used(),
+            ColumnBuilder::Timestamp(_, v) => v.bytes_used(),
+            ColumnBuilder::Dictionary { codes, dict, .. } => codes.bytes_used() + dict.len() * 16,
         }
     }
 
@@ -525,13 +699,13 @@ impl ColumnBuilder {
     pub(crate) fn capacity_bytes(&self) -> usize {
         match self {
             ColumnBuilder::String(s) => s.capacity_bytes(),
-            ColumnBuilder::Int64(v) => v.capacity() * 8,
-            ColumnBuilder::Float64(v) => v.capacity() * 8,
-            ColumnBuilder::Boolean(v) => v.capacity(),
-            ColumnBuilder::Date32(v) => v.capacity() * 4,
-            ColumnBuilder::Timestamp(_, v) => v.capacity() * 8,
+            ColumnBuilder::Int64(v) => v.capacity_bytes(),
+            ColumnBuilder::Float64(v) => v.capacity_bytes(),
+            ColumnBuilder::Boolean(v) => v.capacity_bytes(),
+            ColumnBuilder::Date32(v) => v.capacity_bytes(),
+            ColumnBuilder::Timestamp(_, v) => v.capacity_bytes(),
             ColumnBuilder::Dictionary { codes, dict, .. } => {
-                codes.capacity() * 4 + dict.capacity() * 16
+                codes.capacity_bytes() + dict.capacity() * 16
             }
         }
     }
@@ -541,33 +715,27 @@ impl ColumnBuilder {
         match self {
             ColumnBuilder::String(s) => ColumnBuilder::String(s.split_off(n)),
             ColumnBuilder::Int64(v) => {
-                let other = v[..n].to_vec();
-                v.drain(..n);
+                let other = v.split_off(n);
                 ColumnBuilder::Int64(other)
             }
             ColumnBuilder::Float64(v) => {
-                let other = v[..n].to_vec();
-                v.drain(..n);
+                let other = v.split_off(n);
                 ColumnBuilder::Float64(other)
             }
             ColumnBuilder::Boolean(v) => {
-                let other = v[..n].to_vec();
-                v.drain(..n);
+                let other = v.split_off(n);
                 ColumnBuilder::Boolean(other)
             }
             ColumnBuilder::Date32(v) => {
-                let other = v[..n].to_vec();
-                v.drain(..n);
+                let other = v.split_off(n);
                 ColumnBuilder::Date32(other)
             }
             ColumnBuilder::Timestamp(unit, v) => {
-                let other = v[..n].to_vec();
-                v.drain(..n);
+                let other = v.split_off(n);
                 ColumnBuilder::Timestamp(*unit, other)
             }
             ColumnBuilder::Dictionary { codes, dict, index } => {
-                let other_codes = codes[..n].to_vec();
-                codes.drain(..n);
+                let other_codes = codes.split_off(n);
                 ColumnBuilder::Dictionary {
                     codes: other_codes,
                     dict: dict.clone(),
@@ -584,7 +752,7 @@ impl ColumnBuilder {
         match self {
             ColumnBuilder::String(v) => v.get(index),
             ColumnBuilder::Dictionary { codes, dict, .. } => {
-                codes.get(index).and_then(|code| code.map(|idx| dict[idx as usize].as_str()))
+                codes.get(index).map(|code| dict[*code as usize].as_str())
             }
             _ => None,
         }
@@ -595,21 +763,17 @@ impl ColumnBuilder {
     pub(crate) fn get_filter_value(&self, index: usize) -> Option<String> {
         match self {
             ColumnBuilder::String(v) => v.get(index).map(|s| s.to_owned()),
-            ColumnBuilder::Int64(v) => v.get(index).and_then(|o| o.map(|n| n.to_string())),
-            ColumnBuilder::Float64(v) => v.get(index).and_then(|o| o.map(|n| n.to_string())),
-            ColumnBuilder::Boolean(v) => v.get(index).and_then(|o| o.map(|n| n.to_string())),
-            ColumnBuilder::Date32(v) => {
-                v.get(index).and_then(|o| *o).map(format_date32)
-            }
+            ColumnBuilder::Int64(v) => v.get(index).map(|n| n.to_string()),
+            ColumnBuilder::Float64(v) => v.get(index).map(|n| n.to_string()),
+            ColumnBuilder::Boolean(v) => v.get(index).map(|n| n.to_string()),
+            ColumnBuilder::Date32(v) => v.get(index).map(|o| format_date32(*o)),
             ColumnBuilder::Timestamp(unit, v) => {
                 let unit = *unit;
-                v.get(index)
-                    .and_then(|o| *o)
-                    .map(|ts| format_timestamp(ts, unit))
+                v.get(index).map(|ts| format_timestamp(*ts, unit))
             }
-            ColumnBuilder::Dictionary { codes, dict, .. } => codes
-                .get(index)
-                .and_then(|code| code.map(|idx| dict[idx as usize].clone())),
+            ColumnBuilder::Dictionary { codes, dict, .. } => {
+                codes.get(index).map(|code| dict[*code as usize].clone())
+            }
         }
     }
 
@@ -618,14 +782,14 @@ impl ColumnBuilder {
     pub(crate) fn get_typed_value(&self, index: usize) -> Option<TypedValue<'_>> {
         match self {
             ColumnBuilder::String(v) => v.get(index).map(TypedValue::Str),
-            ColumnBuilder::Int64(v) => v.get(index)?.map(TypedValue::Int64),
-            ColumnBuilder::Float64(v) => v.get(index)?.map(TypedValue::Float64),
-            ColumnBuilder::Boolean(v) => v.get(index)?.map(TypedValue::Bool),
-            ColumnBuilder::Date32(v) => v.get(index)?.map(TypedValue::Date32),
-            ColumnBuilder::Timestamp(_, v) => v.get(index)?.map(TypedValue::Timestamp),
+            ColumnBuilder::Int64(v) => v.get(index).map(|n| TypedValue::Int64(*n)),
+            ColumnBuilder::Float64(v) => v.get(index).map(|n| TypedValue::Float64(*n)),
+            ColumnBuilder::Boolean(v) => v.get(index).map(|n| TypedValue::Bool(*n)),
+            ColumnBuilder::Date32(v) => v.get(index).map(|n| TypedValue::Date32(*n)),
+            ColumnBuilder::Timestamp(_, v) => v.get(index).map(|n| TypedValue::Timestamp(*n)),
             ColumnBuilder::Dictionary { codes, dict, .. } => codes
-                .get(index)?
-                .map(|idx| TypedValue::Str(dict[idx as usize].as_str())),
+                .get(index)
+                .map(|idx| TypedValue::Str(dict[*idx as usize].as_str())),
         }
     }
 
@@ -674,7 +838,9 @@ impl ColumnBuilder {
                     .iter()
                     .map(|val| dict_code(a_dict, a_index, val))
                     .collect();
-                a_codes.extend(b_codes.iter().map(|c| c.map(|idx| remap[idx as usize])));
+                for c in b_codes.iter() {
+                    a_codes.push(c.map(|code| remap[*code as usize]));
+                }
             }
             _ => {
                 return Err(crate::Error::Merge(
@@ -691,12 +857,7 @@ impl ColumnBuilder {
     /// `max_ratio` is the maximum fraction of rows allowed as distinct values
     /// (default `0.05`); `max_size` caps the dictionary length (default `256`).
     /// The effective threshold is clamped to at least 16 entries.
-    pub(crate) fn try_upgrade_to_dict(
-        &mut self,
-        min_rows: usize,
-        max_ratio: f64,
-        max_size: usize,
-    ) {
+    pub(crate) fn try_upgrade_to_dict(&mut self, min_rows: usize, max_ratio: f64, max_size: usize) {
         let old = match self {
             ColumnBuilder::String(v) => std::mem::take(v),
             _ => return,
@@ -721,7 +882,7 @@ impl ColumnBuilder {
         // Upgrade: build dictionary + codes.
         let mut dict: Vec<String> = Vec::new();
         let mut index: HashMap<String, i32> = HashMap::default();
-        let mut codes: Vec<Option<i32>> = Vec::with_capacity(old.len());
+        let mut codes = NullableColumn::with_capacity(old.len());
         for v in old.iter() {
             match v {
                 Some(s) => {
@@ -756,18 +917,42 @@ impl ColumnBuilder {
         // Handle empty columns (after mem::take from a previous export).
         if self.len() == 0 {
             return Ok(match self {
-                ColumnBuilder::String(_) => {
-                    Arc::new(StringArray::from(vec![None::<&str>; 0]))
-                }
+                ColumnBuilder::String(_) => Arc::new(StringArray::from(vec![None::<&str>; 0])),
                 ColumnBuilder::Int64(_) => Arc::new(Int64Array::from(vec![None::<i64>; 0])),
                 ColumnBuilder::Float64(_) => Arc::new(Float64Array::from(vec![None::<f64>; 0])),
                 ColumnBuilder::Boolean(_) => Arc::new(BooleanArray::from(vec![None::<bool>; 0])),
                 ColumnBuilder::Date32(_) => Arc::new(Date32Array::from(vec![None::<i32>; 0])),
                 ColumnBuilder::Timestamp(unit, _) => match unit {
-                    TimeUnit::Second => Arc::new(PrimitiveArray::<TimestampSecondType>::from(vec![None::<i64>; 0])),
-                    TimeUnit::Millisecond => Arc::new(PrimitiveArray::<TimestampMillisecondType>::from(vec![None::<i64>; 0])),
-                    TimeUnit::Microsecond => Arc::new(PrimitiveArray::<TimestampMicrosecondType>::from(vec![None::<i64>; 0])),
-                    TimeUnit::Nanosecond => Arc::new(PrimitiveArray::<TimestampNanosecondType>::from(vec![None::<i64>; 0])),
+                    TimeUnit::Second => {
+                        Arc::new(PrimitiveArray::<TimestampSecondType>::from(vec![
+                            None::<i64>;
+                            0
+                        ]))
+                    }
+                    TimeUnit::Millisecond => {
+                        Arc::new(PrimitiveArray::<TimestampMillisecondType>::from(vec![
+                            None::<
+                                i64,
+                            >;
+                            0
+                        ]))
+                    }
+                    TimeUnit::Microsecond => {
+                        Arc::new(PrimitiveArray::<TimestampMicrosecondType>::from(vec![
+                            None::<
+                                i64,
+                            >;
+                            0
+                        ]))
+                    }
+                    TimeUnit::Nanosecond => {
+                        Arc::new(PrimitiveArray::<TimestampNanosecondType>::from(vec![
+                            None::<
+                                i64,
+                            >;
+                            0
+                        ]))
+                    }
                 },
                 ColumnBuilder::Dictionary { .. } => {
                     let keys: Int32Array = vec![None::<i32>; 0].into_iter().collect();
@@ -779,32 +964,41 @@ impl ColumnBuilder {
         Ok(match self {
             ColumnBuilder::String(v) => v.to_arrow()?,
             ColumnBuilder::Int64(v) => {
-                let vals = std::mem::take(v);
-                Arc::new(vals.into_iter().collect::<Int64Array>())
+                Arc::new(std::mem::take(v).into_options().collect::<Int64Array>())
             }
             ColumnBuilder::Float64(v) => {
-                let vals = std::mem::take(v);
-                Arc::new(vals.into_iter().collect::<Float64Array>())
+                Arc::new(std::mem::take(v).into_options().collect::<Float64Array>())
             }
             ColumnBuilder::Boolean(v) => {
-                let vals = std::mem::take(v);
-                Arc::new(vals.into_iter().collect::<BooleanArray>())
+                Arc::new(std::mem::take(v).into_options().collect::<BooleanArray>())
             }
             ColumnBuilder::Date32(v) => {
-                let vals = std::mem::take(v);
-                Arc::new(vals.into_iter().collect::<Date32Array>())
+                Arc::new(std::mem::take(v).into_options().collect::<Date32Array>())
             }
-            ColumnBuilder::Timestamp(unit, v) => {
-                let vals = std::mem::take(v);
-                match unit {
-                    TimeUnit::Second => Arc::new(vals.into_iter().collect::<PrimitiveArray<TimestampSecondType>>()),
-                    TimeUnit::Millisecond => Arc::new(vals.into_iter().collect::<PrimitiveArray<TimestampMillisecondType>>()),
-                    TimeUnit::Microsecond => Arc::new(vals.into_iter().collect::<PrimitiveArray<TimestampMicrosecondType>>()),
-                    TimeUnit::Nanosecond => Arc::new(vals.into_iter().collect::<PrimitiveArray<TimestampNanosecondType>>()),
-                }
-            }
+            ColumnBuilder::Timestamp(unit, v) => match unit {
+                TimeUnit::Second => Arc::new(
+                    std::mem::take(v)
+                        .into_options()
+                        .collect::<PrimitiveArray<TimestampSecondType>>(),
+                ),
+                TimeUnit::Millisecond => Arc::new(
+                    std::mem::take(v)
+                        .into_options()
+                        .collect::<PrimitiveArray<TimestampMillisecondType>>(),
+                ),
+                TimeUnit::Microsecond => Arc::new(
+                    std::mem::take(v)
+                        .into_options()
+                        .collect::<PrimitiveArray<TimestampMicrosecondType>>(),
+                ),
+                TimeUnit::Nanosecond => Arc::new(
+                    std::mem::take(v)
+                        .into_options()
+                        .collect::<PrimitiveArray<TimestampNanosecondType>>(),
+                ),
+            },
             ColumnBuilder::Dictionary { codes, dict, .. } => {
-                let codes_arr: Int32Array = std::mem::take(codes).into_iter().collect();
+                let codes_arr: Int32Array = std::mem::take(codes).into_options().collect();
                 let values: ArrayRef = Arc::new(
                     dict.iter()
                         .map(|s| Some(s.as_str()))
@@ -870,7 +1064,10 @@ mod tests {
         b.push_value(Value::Str("bad"));
         b.push_value(Value::Null);
         if let ColumnBuilder::Int64(v) = &b {
-            assert_eq!(v, &vec![Some(42), None, None]);
+            assert_eq!(
+                v.iter().map(|o| o.copied()).collect::<Vec<_>>(),
+                vec![Some(42), None, None]
+            );
         } else {
             panic!("expected Int64");
         }
@@ -882,8 +1079,8 @@ mod tests {
         b.push_value(Value::Int64(7));
         b.push_value(Value::Float64(3.5)); // widened to i64
         if let ColumnBuilder::Int64(v) = &b {
-            assert_eq!(v[0], Some(7));
-            assert_eq!(v[1], Some(3));
+            assert_eq!(v.get(0), Some(&7));
+            assert_eq!(v.get(1), Some(&3));
         } else {
             panic!("expected Int64");
         }
@@ -892,8 +1089,8 @@ mod tests {
         f.push_value(Value::Float64(2.5));
         f.push_value(Value::Int64(1));
         if let ColumnBuilder::Float64(v) = &f {
-            assert!((v[0].unwrap() - 2.5).abs() < 1e-9);
-            assert!((v[1].unwrap() - 1.0).abs() < 1e-9);
+            assert!((*v.get(0).unwrap() - 2.5).abs() < 1e-9);
+            assert!((*v.get(1).unwrap() - 1.0).abs() < 1e-9);
         } else {
             panic!("expected Float64");
         }
@@ -920,7 +1117,10 @@ mod tests {
         i.push_value(Value::Bool(true)); // unsupported -> null
         i.push_value(Value::Null);
         if let ColumnBuilder::Int64(v) = &i {
-            assert_eq!(v, &vec![Some(7), Some(3), None, None]);
+            assert_eq!(
+                v.iter().map(|o| o.copied()).collect::<Vec<_>>(),
+                vec![Some(7), Some(3), None, None]
+            );
         } else {
             panic!("expected Int64 builder");
         }
@@ -931,9 +1131,9 @@ mod tests {
         f.push_value(Value::Int64(1));
         f.push_value(Value::Bool(false));
         if let ColumnBuilder::Float64(v) = &f {
-            assert!((v[0].unwrap() - 2.5).abs() < 1e-9);
-            assert!((v[1].unwrap() - 1.0).abs() < 1e-9);
-            assert_eq!(v[2], None);
+            assert!((*v.get(0).unwrap() - 2.5).abs() < 1e-9);
+            assert!((*v.get(1).unwrap() - 1.0).abs() < 1e-9);
+            assert_eq!(v.get(2), None);
         } else {
             panic!("expected Float64 builder");
         }
@@ -945,7 +1145,10 @@ mod tests {
         b.push_value(Value::Str("not_bool"));
         b.push_value(Value::Int64(1));
         if let ColumnBuilder::Boolean(v) = &b {
-            assert_eq!(v, &vec![Some(true), Some(false), None, None]);
+            assert_eq!(
+                v.iter().map(|o| o.copied()).collect::<Vec<_>>(),
+                vec![Some(true), Some(false), None, None]
+            );
         } else {
             panic!("expected Boolean builder");
         }
@@ -974,9 +1177,134 @@ mod tests {
         d.push_value(Value::Null);
         if let ColumnBuilder::Dictionary { codes, dict, .. } = &d {
             assert_eq!(dict, &["7", "true"]);
-            assert_eq!(codes, &vec![Some(0), Some(0), Some(1), None]);
+            assert_eq!(
+                codes.iter().map(|o| o.copied()).collect::<Vec<_>>(),
+                vec![Some(0), Some(0), Some(1), None]
+            );
         } else {
             panic!("expected Dictionary builder");
+        }
+    }
+
+    /// Helper: build a ValidityBitmap with `n` rows, alternating valid/invalid
+    /// starting with valid. Pattern: row 0 = valid, row 1 = invalid, etc.
+    fn bitmap_alternating(n: usize) -> ValidityBitmap {
+        let mut b = ValidityBitmap::with_capacity(n);
+        for i in 0..n {
+            b.push(i % 2 == 0);
+        }
+        b
+    }
+
+    /// Verify `ValidityBitmap::split_off` at byte-boundary-crossing row counts.
+    #[test]
+    fn test_bitmap_split_off_boundaries() {
+        for n in [7, 8, 9] {
+            let mut bm = bitmap_alternating(n);
+            let split = n / 2;
+            let prefix = bm.split_off(split);
+            assert_eq!(prefix.len(), split);
+            assert_eq!(bm.len(), n - split);
+            // Verify each bit survived the split.
+            for i in 0..split {
+                assert_eq!(prefix.is_valid(i), i % 2 == 0, "prefix row {i} n={n}");
+            }
+            for i in 0..(n - split) {
+                assert_eq!(
+                    bm.is_valid(i),
+                    (i + split) % 2 == 0,
+                    "suffix row {i} n={n}"
+                );
+            }
+        }
+    }
+
+    /// Verify `ValidityBitmap::append` when `self` is at boundary row counts.
+    #[test]
+    fn test_bitmap_append_at_boundaries() {
+        for n in [7, 8, 9] {
+            let mut a = bitmap_alternating(n);
+            let b = bitmap_alternating(5);
+            a.append(&b);
+            assert_eq!(a.len(), n + 5);
+            for i in 0..n {
+                assert_eq!(a.is_valid(i), i % 2 == 0, "original row {i} n={n}");
+            }
+            for i in 0..5 {
+                assert_eq!(
+                    a.is_valid(n + i),
+                    i % 2 == 0,
+                    "appended row {i} n={n}"
+                );
+            }
+        }
+    }
+
+    /// Verify `NullableColumn<i64>::split_off` at boundary row counts.
+    #[test]
+    fn test_nullable_i64_split_off_boundaries() {
+        for n in [7, 8, 9] {
+            let mut col = NullableColumn::with_capacity(n);
+            for i in 0..n {
+                if i % 3 == 0 {
+                    col.push(None);
+                } else {
+                    col.push(Some(i as i64));
+                }
+            }
+            let split = n / 2;
+            let prefix = col.split_off(split);
+            assert_eq!(prefix.len(), split);
+            assert_eq!(col.len(), n - split);
+            for i in 0..split {
+                let expected = if i % 3 == 0 { None } else { Some(i as i64) };
+                assert_eq!(prefix.get(i).copied(), expected, "prefix row {i} n={n}");
+            }
+            for i in 0..(n - split) {
+                let orig = i + split;
+                let expected = if orig % 3 == 0 {
+                    None
+                } else {
+                    Some(orig as i64)
+                };
+                assert_eq!(col.get(i).copied(), expected, "suffix row {i} n={n}");
+            }
+        }
+    }
+
+    /// Verify `StrColumn::split_off` at boundary row counts with mixed nulls.
+    #[test]
+    fn test_str_column_split_off_boundaries() {
+        for n in [7, 8, 9] {
+            let mut col = StrColumn::with_capacity(n);
+            for i in 0..n {
+                if i % 4 == 0 {
+                    col.push(None);
+                } else {
+                    col.push(Some(&format!("v{i}")));
+                }
+            }
+            let split = n / 2;
+            let prefix = col.split_off(split);
+            assert_eq!(prefix.len(), split);
+            assert_eq!(col.len(), n - split);
+            for i in 0..split {
+                let expected = if i % 4 == 0 {
+                    None
+                } else {
+                    Some(format!("v{i}"))
+                };
+                assert_eq!(prefix.get(i).map(|s| s.to_owned()), expected, "prefix row {i} n={n}");
+            }
+            for i in 0..(n - split) {
+                let orig = i + split;
+                let expected = if orig % 4 == 0 {
+                    None
+                } else {
+                    Some(format!("v{orig}"))
+                };
+                assert_eq!(col.get(i).map(|s| s.to_owned()), expected, "suffix row {i} n={n}");
+            }
         }
     }
 }
