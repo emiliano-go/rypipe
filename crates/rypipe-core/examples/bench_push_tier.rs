@@ -52,7 +52,8 @@ impl RecordParser for LineParser {
     }
 
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
-        let text = std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
         for line in text.lines().filter(|line| !line.is_empty()) {
             sink.begin_row();
             for token in line.split_whitespace() {
@@ -73,21 +74,32 @@ struct PushOnly {
 }
 
 impl ColumnarSink for PushOnly {
-    #[inline] fn begin_row(&mut self) {}
-    #[inline] fn put_field(&mut self, name: &str, value: Value<'_>) {
+    #[inline]
+    fn begin_row(&mut self) {}
+    #[inline]
+    fn put_field(&mut self, name: &str, value: Value<'_>) {
         self.inner.put_field(name, value);
     }
-    #[inline] fn end_row(&mut self) {
+    #[inline]
+    fn end_row(&mut self) {
         self.inner.advance_row();
     }
-    #[inline] fn wants(&self, name: &str) -> bool { self.inner.wants(name) }
-    #[inline] fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+    #[inline]
+    fn wants(&self, name: &str) -> bool {
+        self.inner.wants(name)
+    }
+    #[inline]
+    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
         self.inner.resolve(name)
     }
-    #[inline] fn put_field_resolved(&mut self, name: &str, value: Value<'_>) {
+    #[inline]
+    fn put_field_resolved(&mut self, name: &str, value: Value<'_>) {
         self.inner.put_field_resolved(name, value);
     }
-    #[inline] fn needs_value(&self) -> bool { true }
+    #[inline]
+    fn needs_value(&self) -> bool {
+        true
+    }
     fn finish(&mut self) -> rypipe_core::Result<arrow::record_batch::RecordBatch> {
         self.inner.finish()
     }
@@ -108,9 +120,13 @@ fn main() {
     // Warmup
     {
         let plan = ExecutionPlan::new();
-        let est_row = splitter.estimate_bytes_per_row(&data[..data.len().min(65536)]).max(512);
+        let est_row = splitter
+            .estimate_bytes_per_row(&data[..data.len().min(65536)])
+            .max(512);
         let est = (data.len() / est_row).max(64);
-        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)) };
+        let mut sink = PushOnly {
+            inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)),
+        };
         decoder.parse_chunk_generic(&data, &mut sink).unwrap();
     }
 
@@ -120,9 +136,13 @@ fn main() {
     let mut last_rows = 0usize;
     for _ in 0..n {
         let plan = ExecutionPlan::new();
-        let est_row = splitter.estimate_bytes_per_row(&data[..data.len().min(65536)]).max(512);
+        let est_row = splitter
+            .estimate_bytes_per_row(&data[..data.len().min(65536)])
+            .max(512);
         let est = (data.len() / est_row).max(64);
-        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)) };
+        let mut sink = PushOnly {
+            inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)),
+        };
         let t0 = Instant::now();
         decoder.parse_chunk_generic(&data, &mut sink).unwrap();
         let dt = t0.elapsed().as_secs_f64();
@@ -138,9 +158,15 @@ fn main() {
     let stdev = (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
     let cov = stdev / mean;
 
-    println!("push_only {median:.4}s median ({best:.4}-{worst:.4}, CoV {:.1}%)", cov * 100.0);
+    println!(
+        "push_only {median:.4}s median ({best:.4}-{worst:.4}, CoV {:.1}%)",
+        cov * 100.0
+    );
     println!("  {last_rows} rows, {mb:.1} MB, {:.0} MB/s", mb / median);
-    println!("  ns/field: {:.0}", median * 1e9 / (last_rows as f64 * 10.0));
+    println!(
+        "  ns/field: {:.0}",
+        median * 1e9 / (last_rows as f64 * 10.0)
+    );
     println!();
     println!("Run with:");
     println!("  perf stat -e cycles,instructions,branch-misses,L1-dcache-load-misses \\");

@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::record_batch::RecordBatch;
@@ -68,7 +68,9 @@ impl ParallelExecutor {
         SPLIT_SCAN_NS.store(t_split.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let ranges = split_points_to_ranges(&split_points, bytes.len());
 
-        let est_row = splitter.estimate_bytes_per_row(&bytes[..bytes.len().min(65536)]).max(512);
+        let est_row = splitter
+            .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
+            .max(512);
         let results: Vec<Result<TableBuilder>> = ranges
             .into_par_iter()
             .map(|range| {
@@ -106,9 +108,15 @@ impl ParallelExecutor {
                     if elapsed_ns <= prev {
                         break;
                     }
-                    if CHUNK_TIME_MAX_NS.compare_exchange_weak(
-                        prev, elapsed_ns, Ordering::Relaxed, Ordering::Relaxed,
-                    ).is_ok() {
+                    if CHUNK_TIME_MAX_NS
+                        .compare_exchange_weak(
+                            prev,
+                            elapsed_ns,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
                         break;
                     }
                 }
@@ -148,12 +156,20 @@ impl ParallelExecutor {
                     if let Some(idx) = first_idx {
                         if engines[0].columns[idx].variant_key() == "dictionary" {
                             // Check if all chunks have same dict for this column
-                            let first_dict = if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } = &engines[0].columns[idx] {
-                                dict
-                            } else { continue };
+                            let first_dict =
+                                if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } =
+                                    &engines[0].columns[idx]
+                                {
+                                    dict
+                                } else {
+                                    continue;
+                                };
                             for e in &engines[1..] {
                                 if let Some(&j) = e.field_index.get(col_name) {
-                                    if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } = &e.columns[j] {
+                                    if let crate::columnar::ColumnBuilder::Dictionary {
+                                        dict, ..
+                                    } = &e.columns[j]
+                                    {
                                         if dict != first_dict {
                                             needs_unify = true;
                                             break;
@@ -161,7 +177,9 @@ impl ParallelExecutor {
                                     }
                                 }
                             }
-                            if needs_unify { break; }
+                            if needs_unify {
+                                break;
+                            }
                         }
                     }
                 }

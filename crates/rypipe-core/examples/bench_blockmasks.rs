@@ -14,7 +14,10 @@ fn main() {
     let counts: &[usize] = &[1, 2, 3, 5, 8];
 
     println!("BlockMasks vs memchr microbench ({} iterations)", ITERS);
-    println!("{:<6} {:<6} {:<14} {:<14} {:<8}", "span", "n", "memchr (ns)", "blockmasks (ns)", "ratio");
+    println!(
+        "{:<6} {:<6} {:<14} {:<14} {:<8}",
+        "span", "n", "memchr (ns)", "blockmasks (ns)", "ratio"
+    );
     println!("{}", "-".repeat(60));
 
     for &span in spans {
@@ -36,7 +39,10 @@ fn main() {
             let t_blockmasks = bench_blockmasks(&buf, &query_delims, ITERS);
 
             let ratio = t_memchr as f64 / t_blockmasks as f64;
-            println!("{:<6} {:<6} {:<14} {:<14} {:<8.2}x", span, n, t_memchr, t_blockmasks, ratio);
+            println!(
+                "{:<6} {:<6} {:<14} {:<14} {:<8.2}x",
+                span, n, t_memchr, t_blockmasks, ratio
+            );
         }
         println!();
     }

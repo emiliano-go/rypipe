@@ -5,8 +5,8 @@
 //! - `Pipeline::read_bytes_par` / `read_bytes_stream` and `BoundedExecutor::run_bytes`
 //! - magic-byte decompression in `InputBuffer::open`
 
-use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
 
 use rypipe_core::{
     bounded::MemoryBudget, ColumnarSink, CompareOp, ExecutionPlan, FilterPredicate, Pipeline,
@@ -52,7 +52,8 @@ impl RecordParser for LineParser {
         Ok(())
     }
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
-        let text = std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
         for line in text.lines() {
             if line.is_empty() {
                 continue;
@@ -195,7 +196,10 @@ fn test_not_of_and_via_de_morgan() {
     // !(A==x AND B==y) — plain: row1 passes both so dropped; all others kept.
     let data = b"A=x B=y\nA=x B=z\nA=w B=y\n";
     let plan = ExecutionPlan {
-        filter: Some(FilterPredicate::not(FilterPredicate::all(eq("A", "x"), eq("B", "y")))),
+        filter: Some(FilterPredicate::not(FilterPredicate::all(
+            eq("A", "x"),
+            eq("B", "y"),
+        ))),
         ..Default::default()
     };
     assert_eq!(parse_bytes(data, plan).num_rows(), 2);
@@ -206,8 +210,10 @@ fn test_compare_inside_or() {
     // A > B  OR  S==special
     // Row 1: 5 > 3 (true) → keep; Row2: 1 > 9 false but S==special true → keep; Row3: neither → drop.
     let mut plan = ExecutionPlan::new();
-    plan.field_types.insert("A".into(), rypipe_core::FieldType::Int64);
-    plan.field_types.insert("B".into(), rypipe_core::FieldType::Int64);
+    plan.field_types
+        .insert("A".into(), rypipe_core::FieldType::Int64);
+    plan.field_types
+        .insert("B".into(), rypipe_core::FieldType::Int64);
     plan.filter = Some(FilterPredicate::any(
         cmp("A", CompareOp::Gt, "B"),
         eq("S", "special"),
@@ -239,7 +245,9 @@ fn test_helpers_all_any_not_short_hands() {
 #[test]
 fn test_read_bytes_par_matches_single() {
     let pipeline = Pipeline::new(LineSplitter, LineParser);
-    let data = (0..500).map(|i| format!("A={} B={}\n", i % 7, i % 3)).collect::<String>();
+    let data = (0..500)
+        .map(|i| format!("A={} B={}\n", i % 7, i % 3))
+        .collect::<String>();
     let bytes = data.as_bytes();
     let single = pipeline.read_bytes(bytes).unwrap();
     let chunks = pipeline.read_bytes_par(bytes, 4).unwrap();
@@ -255,10 +263,17 @@ fn test_read_bytes_par_with_filter_tree() {
         ..Default::default()
     };
     let pipeline = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
-    let data = (0..200).map(|i| format!("A={} B={}\n", i % 5, i % 4)).collect::<String>();
+    let data = (0..200)
+        .map(|i| format!("A={} B={}\n", i % 5, i % 4))
+        .collect::<String>();
     let bytes = data.as_bytes();
     let single = pipeline.read_bytes(bytes).unwrap();
-    let par: usize = pipeline.read_bytes_par(bytes, 4).unwrap().iter().map(|b| b.num_rows()).sum();
+    let par: usize = pipeline
+        .read_bytes_par(bytes, 4)
+        .unwrap()
+        .iter()
+        .map(|b| b.num_rows())
+        .sum();
     assert_eq!(par, single.num_rows());
 }
 
@@ -266,12 +281,18 @@ fn test_read_bytes_par_with_filter_tree() {
 fn test_read_bytes_stream_matches_single_and_is_chunked() {
     let pipeline = Pipeline::new(LineSplitter, LineParser);
     // 4000 rows (~28 KiB). Budget 4 KiB forces ~7 batches even with MAX_SPLIT_CHUNKS=256 cap.
-    let data = (0..4000).map(|i| format!("A={} B={}\n", i % 10, i % 8)).collect::<String>();
+    let data = (0..4000)
+        .map(|i| format!("A={} B={}\n", i % 10, i % 8))
+        .collect::<String>();
     let bytes = data.as_bytes();
     let single = pipeline.read_bytes(bytes).unwrap();
     let budget = MemoryBudget::new(4096);
     let batches = pipeline.read_bytes_stream(bytes, budget).unwrap();
-    assert!(batches.len() > 1, "streaming should produce multiple batches: {}", batches.len());
+    assert!(
+        batches.len() > 1,
+        "streaming should produce multiple batches: {}",
+        batches.len()
+    );
     let stream_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(stream_rows, single.num_rows());
 }
@@ -280,7 +301,9 @@ fn test_read_bytes_stream_matches_single_and_is_chunked() {
 fn test_run_bytes_direct_is_equivalent_to_run_via_path() {
     use std::io::Write as _;
 
-    let data = (0..300).map(|i| format!("K={} V={}\n", i % 6, i % 9)).collect::<String>();
+    let data = (0..300)
+        .map(|i| format!("K={} V={}\n", i % 6, i % 9))
+        .collect::<String>();
     let bytes = data.as_bytes().to_vec();
 
     // Path-based bounded path.
@@ -310,7 +333,9 @@ fn test_run_bytes_direct_is_equivalent_to_run_via_path() {
 fn test_batchpipe_style_bounded_engine_run_bytes() {
     // Direct BoundedExecutor::run_bytes smoke test.
     use rypipe_core::bounded::BoundedExecutor;
-    let data = (0..400).map(|i| format!("A={} B={}\n", i % 7, i % 5)).collect::<String>();
+    let data = (0..400)
+        .map(|i| format!("A={} B={}\n", i % 7, i % 5))
+        .collect::<String>();
     let bytes = data.as_bytes();
     let exec = BoundedExecutor::new(MemoryBudget::new(4096));
     let batches = exec
@@ -344,10 +369,14 @@ fn test_batchpipe_style_bounded_engine_run_bytes() {
 fn test_pure_compare_and_survives_batch_filter() {
     // A parallel pure-Compare AND is idempotently reapplied post-assembly.
     let mut plan = ExecutionPlan::new();
-    plan.field_types.insert("A".into(), rypipe_core::FieldType::Int64);
-    plan.field_types.insert("B".into(), rypipe_core::FieldType::Int64);
-    plan.field_types.insert("C".into(), rypipe_core::FieldType::Int64);
-    plan.field_types.insert("D".into(), rypipe_core::FieldType::Int64);
+    plan.field_types
+        .insert("A".into(), rypipe_core::FieldType::Int64);
+    plan.field_types
+        .insert("B".into(), rypipe_core::FieldType::Int64);
+    plan.field_types
+        .insert("C".into(), rypipe_core::FieldType::Int64);
+    plan.field_types
+        .insert("D".into(), rypipe_core::FieldType::Int64);
     plan.filter = Some(FilterPredicate::all(
         cmp("A", CompareOp::Gt, "B"),
         cmp("C", CompareOp::Le, "D"),
@@ -356,7 +385,12 @@ fn test_pure_compare_and_survives_batch_filter() {
     let pipeline = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
     // single and parallel must both give 2 rows: row1 (5>3,4<=4) and row3 (10>2,1<=100).
     let single = pipeline.read_bytes(data).unwrap();
-    let par: usize = pipeline.read_bytes_par(data, 2).unwrap().iter().map(|b| b.num_rows()).sum();
+    let par: usize = pipeline
+        .read_bytes_par(data, 2)
+        .unwrap()
+        .iter()
+        .map(|b| b.num_rows())
+        .sum();
     assert_eq!(single.num_rows(), 2);
     assert_eq!(par, 2);
 }
@@ -417,7 +451,11 @@ fn test_gz_decode_round_trips_without_feature_is_opaque_bytes_or_error() {
     {
         // Without the feature, reading a gz file must not decode to the original two-row batch.
         if let Ok(batch) = &result {
-            assert_ne!(batch.num_rows(), 2, "gz bytes without the feature must not decode");
+            assert_ne!(
+                batch.num_rows(),
+                2,
+                "gz bytes without the feature must not decode"
+            );
         }
         // Error path is also acceptable; at minimum we assert it's not two rows of the expected shape.
     }
@@ -433,7 +471,9 @@ fn test_gz_decode_round_trips_without_feature_is_opaque_bytes_or_error() {
 #[test]
 #[cfg(feature = "gzip")]
 fn test_gz_auto_decompress_parallels_stream() {
-    let plain = (0..200).map(|i| format!("A={} B={}\n", i % 5, i % 3)).collect::<String>();
+    let plain = (0..200)
+        .map(|i| format!("A={} B={}\n", i % 5, i % 3))
+        .collect::<String>();
     let plain_bytes = plain.as_bytes();
     let gz_path = temp_gz_file(plain_bytes);
 

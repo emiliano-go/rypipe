@@ -1,9 +1,9 @@
 //! Parallel streaming executor: multi-core parsing with bounded memory.
 
-use std::sync::Arc;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use arrow::record_batch::RecordBatch;
@@ -107,9 +107,9 @@ impl crate::decoder::ColumnarSink for DiscoverySink {
     }
     // needs_resolve defaults to true → scanner calls resolve() for each field.
     fn finish(&mut self) -> crate::Result<arrow::record_batch::RecordBatch> {
-        Ok(arrow::record_batch::RecordBatch::new_empty(std::sync::Arc::new(
-            arrow::datatypes::Schema::empty(),
-        )))
+        Ok(arrow::record_batch::RecordBatch::new_empty(
+            std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        ))
     }
 }
 
@@ -313,8 +313,12 @@ impl ParallelStreamingExecutor {
             }
         };
 
-        let bytes_per_row = splitter.estimate_bytes_per_row(&actual_bytes[..actual_bytes.len().min(65536)]).max(1);
-        let chunk_size = (self.budget.bytes() / (n * 2)).max(bytes_per_row * 10).max(64 * 1024);
+        let bytes_per_row = splitter
+            .estimate_bytes_per_row(&actual_bytes[..actual_bytes.len().min(65536)])
+            .max(1);
+        let chunk_size = (self.budget.bytes() / (n * 2))
+            .max(bytes_per_row * 10)
+            .max(64 * 1024);
         let num_chunks = (actual_bytes.len() / chunk_size).max(n).min(10000);
         let split_points = splitter.find_split_points(actual_bytes, num_chunks);
         let mut ranges = crate::decoder::split_points_to_ranges(&split_points, actual_bytes.len());
@@ -330,10 +334,16 @@ impl ParallelStreamingExecutor {
         let chunk_queue = std::sync::Arc::new(std::sync::Mutex::new(chunks_with_seq));
         let plan_arc = plan;
         let schema_arc = schema.map(std::sync::Arc::new);
-        let est_row = splitter.estimate_bytes_per_row(&bytes[..bytes.len().min(65536)]).max(512);
+        let est_row = splitter
+            .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
+            .max(512);
 
         // Pre-clone bytes for the fallback path (when input is None).
-        let bytes_fallback = if input.is_none() { Some(actual_bytes.to_vec()) } else { None };
+        let bytes_fallback = if input.is_none() {
+            Some(actual_bytes.to_vec())
+        } else {
+            None
+        };
         for _ in 0..n {
             let queue = std::sync::Arc::clone(&chunk_queue);
             let sender_clone: SyncSender<(usize, Result<RecordBatch>)> = sender.clone();
@@ -356,8 +366,10 @@ impl ParallelStreamingExecutor {
                     };
                     let Some((seq, range)) = next else { break };
                     let chunk_bytes = &bytes_ref[range.start..range.end];
-                    let mut builder =
-                        TableBuilder::with_plan((chunk_bytes.len() / est_row).max(64), plan_clone.clone());
+                    let mut builder = TableBuilder::with_plan(
+                        (chunk_bytes.len() / est_row).max(64),
+                        plan_clone.clone(),
+                    );
                     // If schema is provided, pre-size columns from it.
                     if let Some(ref schema) = schema_clone {
                         if let Err(e) = builder.ensure_schema(schema) {
@@ -427,7 +439,8 @@ impl ParallelStreamingExecutor {
             }
         }
         for h in handles {
-            h.join().map_err(|_| crate::Error::Merge("worker panicked".into()))??;
+            h.join()
+                .map_err(|_| crate::Error::Merge("worker panicked".into()))??;
         }
         Ok(())
     }
@@ -459,8 +472,18 @@ impl ParallelStreamingBatchIterator {
         let (sender, receiver) = sync_channel(max_in_flight);
         let handle = thread::spawn(move || {
             let exec = ParallelStreamingExecutor::new(budget, max_in_flight);
-            let mut consumer = ChannelConsumer { sender: sender.clone() };
-            let res = exec.run_stream(&path, &splitter, parser, plan, prefault, opts, &mut consumer);
+            let mut consumer = ChannelConsumer {
+                sender: sender.clone(),
+            };
+            let res = exec.run_stream(
+                &path,
+                &splitter,
+                parser,
+                plan,
+                prefault,
+                opts,
+                &mut consumer,
+            );
             if let Err(e) = res {
                 let _ = sender.send(Err(e));
             }
@@ -510,7 +533,9 @@ impl Iterator for ParallelStreamingBatchIterator {
                         } else {
                             "worker panicked".to_string()
                         };
-                        return Some(Err(crate::Error::Merge(format!("parallel streaming worker panicked: {msg}"))));
+                        return Some(Err(crate::Error::Merge(format!(
+                            "parallel streaming worker panicked: {msg}"
+                        ))));
                     }
                 }
                 None

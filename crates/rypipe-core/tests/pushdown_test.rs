@@ -3,10 +3,10 @@
 //! Uses a tiny newline-delimited parser so the tests exercise the core engine
 //! without any XML-specific logic.
 
-use std::sync::Arc;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
 
 use rypipe_core::{
     ColumnarSink, CompareOp, ExecutionPlan, FieldType, FilterPredicate, RecordParser, TableBuilder,
@@ -243,9 +243,12 @@ fn test_compare_missing_field_rejects_row() {
 #[test]
 fn test_compare_resolves_rename() {
     let mut plan = ExecutionPlan::new();
-    plan.field_map.insert("raw_a".to_string(), "alpha".to_string());
-    plan.field_types.insert("alpha".to_string(), FieldType::Int64);
-    plan.field_types.insert("beta".to_string(), FieldType::Int64);
+    plan.field_map
+        .insert("raw_a".to_string(), "alpha".to_string());
+    plan.field_types
+        .insert("alpha".to_string(), FieldType::Int64);
+    plan.field_types
+        .insert("beta".to_string(), FieldType::Int64);
     plan.filter = Some(FilterPredicate::Compare {
         field_a: "raw_a".to_string(),
         op: CompareOp::Ge,
@@ -276,9 +279,14 @@ fn test_compare_parallel_matches_single() {
 
     let single = parse_bytes(&data, plan.clone());
 
-    let batches =
-        rypipe_core::parallel::ParallelExecutor::parse(&data, &splitter, LineParser, Arc::new(plan), 4)
-            .unwrap();
+    let batches = rypipe_core::parallel::ParallelExecutor::parse(
+        &data,
+        &splitter,
+        LineParser,
+        Arc::new(plan),
+        4,
+    )
+    .unwrap();
 
     let par_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(par_rows, single.num_rows());
@@ -397,9 +405,14 @@ fn test_dict_config_honored() {
     assert_eq!(batch.column_by_name("S").unwrap().data_type(), &dict_type);
 
     // max_size=4 cannot hold 10 distinct values: stays string.
-    let plan = ExecutionPlan::new().with_auto_dict(true).with_dict_max_size(4);
+    let plan = ExecutionPlan::new()
+        .with_auto_dict(true)
+        .with_dict_max_size(4);
     let batch = parse_bytes(&data, plan);
-    assert_eq!(batch.column_by_name("S").unwrap().data_type(), &DataType::Utf8);
+    assert_eq!(
+        batch.column_by_name("S").unwrap().data_type(),
+        &DataType::Utf8
+    );
 
     // 600 rows with 200 distinct values: default cap 30 -> no upgrade;
     // ratio 0.5 -> cap 300 -> upgrade.
@@ -409,7 +422,10 @@ fn test_dict_config_honored() {
     }
     let plan = ExecutionPlan::new().with_auto_dict(true);
     let batch = parse_bytes(&data, plan);
-    assert_eq!(batch.column_by_name("S").unwrap().data_type(), &DataType::Utf8);
+    assert_eq!(
+        batch.column_by_name("S").unwrap().data_type(),
+        &DataType::Utf8
+    );
 
     let plan = ExecutionPlan::new()
         .with_auto_dict(true)
@@ -538,7 +554,10 @@ fn test_date32_vs_string_compare_fails() {
         field_b: "B".to_string(),
     });
 
-    let batch = parse_bytes(b"A=2024-01-15 B=2024-01-10\nA=2024-06-01 B=2024-01-01\n", plan);
+    let batch = parse_bytes(
+        b"A=2024-01-15 B=2024-01-10\nA=2024-06-01 B=2024-01-01\n",
+        plan,
+    );
     assert_eq!(batch.num_rows(), 0);
 }
 
@@ -565,12 +584,12 @@ fn test_all_compare_ops_typed() {
     let data = b"A=1 B=2\nA=2 B=2\nA=3 B=2\n";
 
     for (op, expected) in [
-        (CompareOp::Gt, 1),  // 3 > 2
-        (CompareOp::Lt, 1),  // 1 < 2
-        (CompareOp::Ge, 2),  // 2 >= 2, 3 >= 2
-        (CompareOp::Le, 2),  // 1 <= 2, 2 <= 2
-        (CompareOp::Eq, 1),  // 2 == 2
-        (CompareOp::Ne, 2),  // 1 != 2, 3 != 2
+        (CompareOp::Gt, 1), // 3 > 2
+        (CompareOp::Lt, 1), // 1 < 2
+        (CompareOp::Ge, 2), // 2 >= 2, 3 >= 2
+        (CompareOp::Le, 2), // 1 <= 2, 2 <= 2
+        (CompareOp::Eq, 1), // 2 == 2
+        (CompareOp::Ne, 2), // 1 != 2, 3 != 2
     ] {
         let mut plan = ExecutionPlan::new();
         plan.field_types.insert("A".to_string(), FieldType::Int64);

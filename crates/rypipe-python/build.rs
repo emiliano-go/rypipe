@@ -10,7 +10,9 @@ fn main() {
         .ok()
         .and_then(|o| {
             if o.status.success() {
-                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
             } else {
                 None
             }
@@ -24,11 +26,7 @@ fn main() {
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
-    let build_sha = if dirty {
-        format!("{sha}-dirty")
-    } else {
-        sha
-    };
+    let build_sha = if dirty { format!("{sha}-dirty") } else { sha };
 
     println!("cargo:rustc-env=RYPIPE_BUILD_SHA={build_sha}");
 }

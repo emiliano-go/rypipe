@@ -1,9 +1,9 @@
 //! Schema-unification tests for the parallel fast-path export
 //! (`engines_to_record_batches`) and end-to-end heterogeneous chunks.
 
-use std::sync::Arc;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Float64Type};
+use std::sync::Arc;
 
 use rypipe_core::{
     engines_to_record_batches, ColumnarSink, ExecutionPlan, FieldType, RecordParser, TableBuilder,
@@ -34,7 +34,11 @@ fn test_export_int64_vs_float64_unifies_to_float64() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
     for batch in &batches {
         let n = batch.column_by_name("N").unwrap();
-        assert_eq!(n.data_type(), &DataType::Float64, "unified type must be Float64");
+        assert_eq!(
+            n.data_type(),
+            &DataType::Float64,
+            "unified type must be Float64"
+        );
     }
     let mut vals = Vec::new();
     for batch in &batches {

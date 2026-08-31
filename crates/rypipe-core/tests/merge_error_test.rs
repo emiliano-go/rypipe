@@ -1,8 +1,8 @@
 //! Error-path tests for table/merge operations.
 
-use std::sync::Arc;
 use arrow::array::AsArray;
 use arrow::datatypes::{DataType, Int32Type};
+use std::sync::Arc;
 
 use rypipe_core::{ColumnarSink, ExecutionPlan, FieldType, TableBuilder, Value};
 
@@ -82,7 +82,10 @@ fn test_extend_int64_vs_float64_promotes() {
     e1.extend(e2).expect("int64 + float64 must reconcile");
     let batch = e1.finish().expect("finish after promotion");
     assert_eq!(batch.num_rows(), 3);
-    let n = batch.column_by_name("N").unwrap().as_primitive::<arrow::datatypes::Float64Type>();
+    let n = batch
+        .column_by_name("N")
+        .unwrap()
+        .as_primitive::<arrow::datatypes::Float64Type>();
     assert_eq!(n.value(0), 1.0);
     assert_eq!(n.value(1), 2.0);
     assert!((n.value(2) - 3.5).abs() < 1e-9);

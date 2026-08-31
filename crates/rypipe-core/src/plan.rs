@@ -28,9 +28,7 @@ impl FieldType {
             "timestamp" => Some(FieldType::Timestamp(TimeUnit::Microsecond)),
             "timestamp[s]" => Some(FieldType::Timestamp(TimeUnit::Second)),
             "timestamp[ms]" => Some(FieldType::Timestamp(TimeUnit::Millisecond)),
-            "timestamp[us]" | "timestamp[µs]" => {
-                Some(FieldType::Timestamp(TimeUnit::Microsecond))
-            }
+            "timestamp[us]" | "timestamp[µs]" => Some(FieldType::Timestamp(TimeUnit::Microsecond)),
             "timestamp[ns]" => Some(FieldType::Timestamp(TimeUnit::Nanosecond)),
             _ => None,
         }
@@ -310,31 +308,28 @@ impl FilterPredicate {
             FilterPredicate::And(a, b) => {
                 // Evaluate the operand with the earlier field first for
                 // short-circuit benefit (C2: reorder by document position).
-                let (first, second) = if pred_ordinal(a, field_index, plan)
-                    <= pred_ordinal(b, field_index, plan)
-                {
-                    (a.as_ref(), b.as_ref())
-                } else {
-                    (b.as_ref(), a.as_ref())
-                };
+                let (first, second) =
+                    if pred_ordinal(a, field_index, plan) <= pred_ordinal(b, field_index, plan) {
+                        (a.as_ref(), b.as_ref())
+                    } else {
+                        (b.as_ref(), a.as_ref())
+                    };
                 first.check(columns, field_index, row_index, plan)
                     && second.check(columns, field_index, row_index, plan)
             }
             FilterPredicate::Or(a, b) => {
-                let (first, second) = if pred_ordinal(a, field_index, plan)
-                    <= pred_ordinal(b, field_index, plan)
-                {
-                    (a.as_ref(), b.as_ref())
-                } else {
-                    (b.as_ref(), a.as_ref())
-                };
+                let (first, second) =
+                    if pred_ordinal(a, field_index, plan) <= pred_ordinal(b, field_index, plan) {
+                        (a.as_ref(), b.as_ref())
+                    } else {
+                        (b.as_ref(), a.as_ref())
+                    };
                 first.check(columns, field_index, row_index, plan)
                     || second.check(columns, field_index, row_index, plan)
             }
             FilterPredicate::Not(inner) => !inner.check(columns, field_index, row_index, plan),
         }
     }
-
 }
 
 /// Resolve a filter field name to its output column name.
@@ -423,17 +418,21 @@ fn pred_ordinal(
     plan: &ExecutionPlan,
 ) -> usize {
     match pred {
-        FilterPredicate::Equal { field, .. }
-        | FilterPredicate::NotEqual { field, .. } => {
-            field_index.get(resolve(field, plan))
+        FilterPredicate::Equal { field, .. } | FilterPredicate::NotEqual { field, .. } => {
+            field_index
+                .get(resolve(field, plan))
                 .copied()
                 .unwrap_or(usize::MAX)
         }
-        FilterPredicate::Compare { field_a, field_b, .. } => {
-            let a = field_index.get(resolve(field_a, plan))
+        FilterPredicate::Compare {
+            field_a, field_b, ..
+        } => {
+            let a = field_index
+                .get(resolve(field_a, plan))
                 .copied()
                 .unwrap_or(usize::MAX);
-            let b = field_index.get(resolve(field_b, plan))
+            let b = field_index
+                .get(resolve(field_b, plan))
                 .copied()
                 .unwrap_or(usize::MAX);
             a.min(b)

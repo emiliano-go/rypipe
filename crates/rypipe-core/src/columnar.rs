@@ -1210,11 +1210,7 @@ mod tests {
                 assert_eq!(prefix.is_valid(i), i % 2 == 0, "prefix row {i} n={n}");
             }
             for i in 0..(n - split) {
-                assert_eq!(
-                    bm.is_valid(i),
-                    (i + split) % 2 == 0,
-                    "suffix row {i} n={n}"
-                );
+                assert_eq!(bm.is_valid(i), (i + split) % 2 == 0, "suffix row {i} n={n}");
             }
         }
     }
@@ -1231,11 +1227,7 @@ mod tests {
                 assert_eq!(a.is_valid(i), i % 2 == 0, "original row {i} n={n}");
             }
             for i in 0..5 {
-                assert_eq!(
-                    a.is_valid(n + i),
-                    i % 2 == 0,
-                    "appended row {i} n={n}"
-                );
+                assert_eq!(a.is_valid(n + i), i % 2 == 0, "appended row {i} n={n}");
             }
         }
     }
@@ -1294,7 +1286,11 @@ mod tests {
                 } else {
                     Some(format!("v{i}"))
                 };
-                assert_eq!(prefix.get(i).map(|s| s.to_owned()), expected, "prefix row {i} n={n}");
+                assert_eq!(
+                    prefix.get(i).map(|s| s.to_owned()),
+                    expected,
+                    "prefix row {i} n={n}"
+                );
             }
             for i in 0..(n - split) {
                 let orig = i + split;
@@ -1303,7 +1299,11 @@ mod tests {
                 } else {
                     Some(format!("v{orig}"))
                 };
-                assert_eq!(col.get(i).map(|s| s.to_owned()), expected, "suffix row {i} n={n}");
+                assert_eq!(
+                    col.get(i).map(|s| s.to_owned()),
+                    expected,
+                    "suffix row {i} n={n}"
+                );
             }
         }
     }

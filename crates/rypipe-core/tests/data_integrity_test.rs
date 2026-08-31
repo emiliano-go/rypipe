@@ -3,9 +3,9 @@
 //! ColumnarSink resolve/put_field_resolved produce bit-identical results
 //! across all execution modes and plans.
 
-use std::sync::Arc;
 use arrow::array::{Array, AsArray};
 use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
 
 use rypipe_core::{
     bounded::MemoryBudget, ColumnarSink, ExecutionPlan, FieldType, FilterPredicate, Pipeline,
@@ -51,7 +51,8 @@ impl RecordParser for LineParser {
         Ok(())
     }
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
-        let text = std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
         for line in text.lines() {
             if line.is_empty() {
                 continue;
@@ -78,7 +79,8 @@ impl RecordParser for LineParserResolved {
         Ok(())
     }
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
-        let text = std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
         for line in text.lines() {
             if line.is_empty() {
                 continue;
@@ -113,7 +115,11 @@ fn batches_to_rows(batches: &[RecordBatch]) -> Vec<Vec<Option<String>>> {
     }
     // Build a unified order from first batch schema
     let schema = batches[0].schema();
-    let names: Vec<String> = schema.fields().iter().map(|f| f.name().to_string()).collect();
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let mut rows: Vec<Vec<Option<String>>> = vec![vec![None; names.len()]; total_rows];
     let mut out = 0;
@@ -125,16 +131,32 @@ fn batches_to_rows(batches: &[RecordBatch]) -> Vec<Vec<Option<String>>> {
                     // For correctness we compare via string value where possible
                     let v = if col.data_type() == &arrow::datatypes::DataType::Utf8 {
                         let arr = col.as_string::<i32>();
-                        if arr.is_null(row) { None } else { Some(arr.value(row).to_owned()) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row).to_owned())
+                        }
                     } else if col.data_type() == &arrow::datatypes::DataType::Int64 {
                         let arr = col.as_primitive::<arrow::datatypes::Int64Type>();
-                        if arr.is_null(row) { None } else { Some(arr.value(row).to_string()) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row).to_string())
+                        }
                     } else if col.data_type() == &arrow::datatypes::DataType::Float64 {
                         let arr = col.as_primitive::<arrow::datatypes::Float64Type>();
-                        if arr.is_null(row) { None } else { Some(arr.value(row).to_string()) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row).to_string())
+                        }
                     } else if col.data_type() == &arrow::datatypes::DataType::Boolean {
                         let arr = col.as_boolean();
-                        if arr.is_null(row) { None } else { Some(arr.value(row).to_string()) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row).to_string())
+                        }
                     } else {
                         // Fallback: use debug string
                         None
@@ -156,8 +178,18 @@ fn assert_batches_equal(a: &[RecordBatch], b: &[RecordBatch]) {
         return;
     }
     // Compare schema names (order may differ due to schema_order, but for no-plan tests order is insertion order)
-    let a_names: Vec<String> = a[0].schema().fields().iter().map(|f| f.name().to_string()).collect();
-    let b_names: Vec<String> = b[0].schema().fields().iter().map(|f| f.name().to_string()).collect();
+    let a_names: Vec<String> = a[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    let b_names: Vec<String> = b[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
     assert_eq!(a_names, b_names, "schema mismatch");
     // Compare per-row stringified values
     let ar_rows = batches_to_rows(a);
@@ -243,7 +275,9 @@ fn duplicate_field_last_write_wins_no_data_loss() {
 #[test]
 fn many_rows_few_columns_no_data_loss() {
     let p = pipeline();
-    let data: String = (0..5000).map(|i| format!("A={} B={} C={}\n", i % 10, i % 7, i % 5)).collect();
+    let data: String = (0..5000)
+        .map(|i| format!("A={} B={} C={}\n", i % 10, i % 7, i % 5))
+        .collect();
     let bytes = data.as_bytes();
     let single = p.read_bytes(bytes).unwrap();
     assert_eq!(single.num_rows(), 5000);
@@ -287,7 +321,9 @@ fn many_columns_no_data_loss() {
 
 #[test]
 fn plan_rename_no_data_loss() {
-    let plan = ExecutionPlan::new().rename("A", "Alpha").rename("B", "Beta");
+    let plan = ExecutionPlan::new()
+        .rename("A", "Alpha")
+        .rename("B", "Beta");
     let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
     let data = b"A=1 B=2 C=3\nA=4 B=5 C=6\n";
     let single = p.read_bytes(data).unwrap();
@@ -326,7 +362,10 @@ fn plan_typed_columns_no_data_loss() {
     let single = p.read_bytes(data).unwrap();
     assert_eq!(single.num_rows(), 3);
     // Verify typed nulls for bad values
-    let i = single.column_by_name("I").unwrap().as_primitive::<arrow::datatypes::Int64Type>();
+    let i = single
+        .column_by_name("I")
+        .unwrap()
+        .as_primitive::<arrow::datatypes::Int64Type>();
     assert!(i.is_null(1));
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
@@ -352,10 +391,19 @@ fn plan_filter_and_or_not_no_data_loss() {
     let plan = ExecutionPlan {
         filter: Some(FilterPredicate::any(
             FilterPredicate::all(
-                FilterPredicate::Equal { field: "A".into(), value: "1".into() },
-                FilterPredicate::Equal { field: "B".into(), value: "2".into() },
+                FilterPredicate::Equal {
+                    field: "A".into(),
+                    value: "1".into(),
+                },
+                FilterPredicate::Equal {
+                    field: "B".into(),
+                    value: "2".into(),
+                },
             ),
-            FilterPredicate::not(FilterPredicate::Equal { field: "C".into(), value: "drop".into() }),
+            FilterPredicate::not(FilterPredicate::Equal {
+                field: "C".into(),
+                value: "drop".into(),
+            }),
         )),
         ..Default::default()
     };
@@ -374,7 +422,9 @@ fn plan_filter_and_or_not_no_data_loss() {
 fn plan_dictionary_no_data_loss() {
     let plan = ExecutionPlan::new().dictionary("P");
     let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
-    let data: String = (0..500).map(|i| format!("P={}\n", if i % 2 == 0 { "Widget" } else { "Gadget" })).collect();
+    let data: String = (0..500)
+        .map(|i| format!("P={}\n", if i % 2 == 0 { "Widget" } else { "Gadget" }))
+        .collect();
     let bytes = data.as_bytes();
     let single = p.read_bytes(bytes).unwrap();
     assert_eq!(single.num_rows(), 500);
@@ -390,7 +440,15 @@ fn plan_schema_order_no_data_loss() {
     let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
     let data = b"A=1 B=2 C=3\nA=4 B=5 C=6\n";
     let single = p.read_bytes(data).unwrap();
-    assert_eq!(single.schema().fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>(), vec!["C", "B", "A"]);
+    assert_eq!(
+        single
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect::<Vec<_>>(),
+        vec!["C", "B", "A"]
+    );
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
     assert_batches_equal(&[single.clone()], &par);
@@ -402,7 +460,16 @@ fn plan_schema_order_no_data_loss() {
 
 #[test]
 fn resolve_put_field_resolved_identical_to_put_field() {
-    let data: String = (0..1000).map(|i| format!("A={} B={} C={}\n", i % 5, i % 3, if i % 2 == 0 { "keep" } else { "drop" })).collect();
+    let data: String = (0..1000)
+        .map(|i| {
+            format!(
+                "A={} B={} C={}\n",
+                i % 5,
+                i % 3,
+                if i % 2 == 0 { "keep" } else { "drop" }
+            )
+        })
+        .collect();
     let bytes = data.as_bytes();
 
     let plan = ExecutionPlan::new()
@@ -422,8 +489,12 @@ fn resolve_put_field_resolved_identical_to_put_field() {
     let r_par = resolved.read_bytes_par(bytes, 4).unwrap();
     assert_batches_equal(&n_par, &r_par);
 
-    let n_stream = normal.read_bytes_stream(bytes, MemoryBudget::new(2048)).unwrap();
-    let r_stream = resolved.read_bytes_stream(bytes, MemoryBudget::new(2048)).unwrap();
+    let n_stream = normal
+        .read_bytes_stream(bytes, MemoryBudget::new(2048))
+        .unwrap();
+    let r_stream = resolved
+        .read_bytes_stream(bytes, MemoryBudget::new(2048))
+        .unwrap();
     assert_batches_equal(&n_stream, &r_stream);
 
     // Also cross-check normal single vs resolved parallel/stream
@@ -464,7 +535,9 @@ fn large_dataset_all_modes_agree() {
 #[test]
 fn file_path_apis_match_bytes_apis() {
     use std::io::Write as _;
-    let data: String = (0..1000).map(|i| format!("A={} B={}\n", i % 7, i % 5)).collect();
+    let data: String = (0..1000)
+        .map(|i| format!("A={} B={}\n", i % 7, i % 5))
+        .collect();
     let bytes = data.as_bytes().to_vec();
     let dir = std::env::temp_dir().join(format!("rypipe_integrity_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -482,8 +555,12 @@ fn file_path_apis_match_bytes_apis() {
     let via_path_par = p.read_path_par(&path, 4, false, false).unwrap();
     assert_batches_equal(&via_bytes_par, &via_path_par);
 
-    let via_bytes_stream = p.read_bytes_stream(&bytes, MemoryBudget::new(2048)).unwrap();
-    let via_path_stream = p.read_path_stream(&path, MemoryBudget::new(2048), false).unwrap();
+    let via_bytes_stream = p
+        .read_bytes_stream(&bytes, MemoryBudget::new(2048))
+        .unwrap();
+    let via_path_stream = p
+        .read_path_stream(&path, MemoryBudget::new(2048), false)
+        .unwrap();
     assert_batches_equal(&via_bytes_stream, &via_path_stream);
 
     let _ = std::fs::remove_file(&path);

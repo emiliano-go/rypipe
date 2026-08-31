@@ -19,8 +19,8 @@
 //!   target/release/examples/bench_scanner_single
 //! ```
 
-use std::sync::Arc;
 use std::io::Write;
+use std::sync::Arc;
 use std::time::Instant;
 
 use rypipe_core::{
@@ -68,11 +68,14 @@ impl RecordParser for TsvParser {
                     if sink.needs_resolve() && !sink.wants(k) {
                         continue;
                     }
-                    sink.put_field(k, if sink.needs_value() {
-                        Value::Str(v)
-                    } else {
-                        Value::Null
-                    });
+                    sink.put_field(
+                        k,
+                        if sink.needs_value() {
+                            Value::Str(v)
+                        } else {
+                            Value::Null
+                        },
+                    );
                 }
             }
             sink.end_row();
@@ -100,12 +103,24 @@ fn bench_scan_only(data: &[u8]) -> (usize, f64) {
 struct TraverseOnly;
 
 impl ColumnarSink for TraverseOnly {
-    #[inline] fn begin_row(&mut self) {}
-    #[inline] fn put_field(&mut self, _n: &str, _v: Value<'_>) {}
-    #[inline] fn end_row(&mut self) {}
-    #[inline] fn wants(&self, _name: &str) -> bool { true }
-    #[inline] fn needs_value(&self) -> bool { false }
-    #[inline] fn needs_resolve(&self) -> bool { false }
+    #[inline]
+    fn begin_row(&mut self) {}
+    #[inline]
+    fn put_field(&mut self, _n: &str, _v: Value<'_>) {}
+    #[inline]
+    fn end_row(&mut self) {}
+    #[inline]
+    fn wants(&self, _name: &str) -> bool {
+        true
+    }
+    #[inline]
+    fn needs_value(&self) -> bool {
+        false
+    }
+    #[inline]
+    fn needs_resolve(&self) -> bool {
+        false
+    }
     fn finish(&mut self) -> Result<arrow::record_batch::RecordBatch> {
         Ok(arrow::record_batch::RecordBatch::new_empty(
             std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -150,21 +165,32 @@ struct PushOnly {
 }
 
 impl ColumnarSink for PushOnly {
-    #[inline] fn begin_row(&mut self) {}
-    #[inline] fn put_field(&mut self, name: &str, value: Value<'_>) {
+    #[inline]
+    fn begin_row(&mut self) {}
+    #[inline]
+    fn put_field(&mut self, name: &str, value: Value<'_>) {
         self.inner.put_field(name, value);
     }
-    #[inline] fn end_row(&mut self) {
+    #[inline]
+    fn end_row(&mut self) {
         self.inner.advance_row();
     }
-    #[inline] fn wants(&self, name: &str) -> bool { self.inner.wants(name) }
-    #[inline] fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+    #[inline]
+    fn wants(&self, name: &str) -> bool {
+        self.inner.wants(name)
+    }
+    #[inline]
+    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
         self.inner.resolve(name)
     }
-    #[inline] fn put_field_resolved(&mut self, name: &str, value: Value<'_>) {
+    #[inline]
+    fn put_field_resolved(&mut self, name: &str, value: Value<'_>) {
         self.inner.put_field_resolved(name, value);
     }
-    #[inline] fn needs_value(&self) -> bool { true }
+    #[inline]
+    fn needs_value(&self) -> bool {
+        true
+    }
     fn finish(&mut self) -> Result<arrow::record_batch::RecordBatch> {
         self.inner.finish()
     }
@@ -203,24 +229,23 @@ fn bench_full_parse(data: &[u8], plan: ExecutionPlan) -> (usize, f64) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let (data, expected_rows, expected_fpr): (Vec<u8>, usize, usize) =
-        if args.len() > 1 {
-            let path = &args[1];
-            let data = std::fs::read(path).expect("failed to read file");
-            let mb = data.len() as f64 / 1_048_576.0;
-            eprintln!("Read {path} ({mb:.1} MB)");
-            let rows = memchr::memmem::find_iter(&data, b"\n").count();
-            let first_line_end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
-            let fpr = data[..first_line_end]
-                .split(|&b| b == b'\t')
-                .filter(|t| t.iter().any(|&b| b == b'='))
-                .count()
-                .max(1);
-            (data, rows, fpr)
-        } else {
-            let rows = 5_000_000;
-            (generate_tsv(rows), rows, FIELDS_PER_ROW)
-        };
+    let (data, expected_rows, expected_fpr): (Vec<u8>, usize, usize) = if args.len() > 1 {
+        let path = &args[1];
+        let data = std::fs::read(path).expect("failed to read file");
+        let mb = data.len() as f64 / 1_048_576.0;
+        eprintln!("Read {path} ({mb:.1} MB)");
+        let rows = memchr::memmem::find_iter(&data, b"\n").count();
+        let first_line_end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
+        let fpr = data[..first_line_end]
+            .split(|&b| b == b'\t')
+            .filter(|t| t.iter().any(|&b| b == b'='))
+            .count()
+            .max(1);
+        (data, rows, fpr)
+    } else {
+        let rows = 5_000_000;
+        (generate_tsv(rows), rows, FIELDS_PER_ROW)
+    };
 
     let bytes = data.len();
     let mb = bytes as f64 / 1_048_576.0;
@@ -228,7 +253,9 @@ fn main() {
     let bpf = bytes as f64 / fields_total as f64;
 
     println!("=== bench_scanner_single (six-tier) ===");
-    println!("{mb:.1} MB, {expected_rows} est. rows, {expected_fpr} fields/row, {bpf:.0} bytes/field");
+    println!(
+        "{mb:.1} MB, {expected_rows} est. rows, {expected_fpr} fields/row, {bpf:.0} bytes/field"
+    );
     println!("Fields total: {fields_total}");
     println!();
 
@@ -279,7 +306,11 @@ fn main() {
 
     let print_tier = |name: &str, rows: usize, fields: usize, elapsed: f64| {
         let mb_s = mb / elapsed;
-        let ns_per_field = if fields > 0 { elapsed * 1e9 / fields as f64 } else { 0.0 };
+        let ns_per_field = if fields > 0 {
+            elapsed * 1e9 / fields as f64
+        } else {
+            0.0
+        };
         println!("{name:<16} {elapsed:>7.4}s  {rows:>10} rows  {fields:>12} fields  {mb_s:>8.0} MB/s  {ns_per_field:>10.1} ns/field");
     };
 
@@ -294,10 +325,30 @@ fn main() {
     println!();
     println!("ms/MB decomposition (additive, each rung adds exactly one cost layer):");
     println!("  scan_only:    {:.3} ms/MB", t1 / mb * 1000.0);
-    println!("  traverse:     {:.3} ms/MB  (+{:.3} = traversal cost)", t2 / mb * 1000.0, (t2 - t1) / mb * 1000.0);
-    println!("  locate:       {:.3} ms/MB  (+{:.3} = resolution cost)", t3 / mb * 1000.0, (t3 - t2) / mb * 1000.0);
-    println!("  push_only:    {:.3} ms/MB  (+{:.3} = per-field push cost)", t4 / mb * 1000.0, (t4 - t3) / mb * 1000.0);
-    println!("  build_only:   {:.3} ms/MB  (+{:.3} = finish_row cost)", t5 / mb * 1000.0, (t5 - t4) / mb * 1000.0);
-    println!("  full_parse:   {:.3} ms/MB  (+{:.3} = Arrow export cost)", t6 / mb * 1000.0, (t6 - t5) / mb * 1000.0);
+    println!(
+        "  traverse:     {:.3} ms/MB  (+{:.3} = traversal cost)",
+        t2 / mb * 1000.0,
+        (t2 - t1) / mb * 1000.0
+    );
+    println!(
+        "  locate:       {:.3} ms/MB  (+{:.3} = resolution cost)",
+        t3 / mb * 1000.0,
+        (t3 - t2) / mb * 1000.0
+    );
+    println!(
+        "  push_only:    {:.3} ms/MB  (+{:.3} = per-field push cost)",
+        t4 / mb * 1000.0,
+        (t4 - t3) / mb * 1000.0
+    );
+    println!(
+        "  build_only:   {:.3} ms/MB  (+{:.3} = finish_row cost)",
+        t5 / mb * 1000.0,
+        (t5 - t4) / mb * 1000.0
+    );
+    println!(
+        "  full_parse:   {:.3} ms/MB  (+{:.3} = Arrow export cost)",
+        t6 / mb * 1000.0,
+        (t6 - t5) / mb * 1000.0
+    );
     println!("  total:        {:.3} ms/MB", t6 / mb * 1000.0);
 }

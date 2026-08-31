@@ -55,7 +55,11 @@ fn is_pure_compare_tree(predicate: &FilterPredicate) -> bool {
 /// Returns `None` for an empty conjunction (all rows pass).
 fn compare_mask(batch: &RecordBatch, predicate: &FilterPredicate) -> Result<Option<BooleanArray>> {
     match predicate {
-        FilterPredicate::Compare { field_a, op, field_b } => {
+        FilterPredicate::Compare {
+            field_a,
+            op,
+            field_b,
+        } => {
             let col_a = batch.column_by_name(field_a).ok_or_else(|| {
                 crate::Error::Plan(format!(
                     "compare filter references unknown column {field_a:?}"

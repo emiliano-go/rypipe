@@ -242,7 +242,12 @@ mod tests {
             for pos in 0..buf.len() {
                 let a = bm.next(pos, d);
                 let b = memchr(d, &buf[pos..]).map(|i| pos + i);
-                assert_eq!(a, b, "next mismatch at pos {pos} delim {d:?} buf len {}", buf.len());
+                assert_eq!(
+                    a,
+                    b,
+                    "next mismatch at pos {pos} delim {d:?} buf len {}",
+                    buf.len()
+                );
             }
         }
     }
