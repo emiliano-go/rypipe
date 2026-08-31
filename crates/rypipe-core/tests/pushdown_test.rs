@@ -607,3 +607,72 @@ fn test_all_compare_ops_typed() {
         );
     }
 }
+
+/// Parser that uses `resolve_and_put` + `row_rejected` (like the crxml scanner),
+/// instead of `put_field` (like LineParser).
+#[derive(Clone)]
+struct ResolveAndPutParser;
+
+impl RecordParser for ResolveAndPutParser {
+    fn validate(&self, bytes: &[u8]) -> rypipe_core::Result<()> {
+        simdutf8::basic::from_utf8(bytes)?;
+        Ok(())
+    }
+
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            sink.begin_row();
+            for token in line.split_whitespace() {
+                if let Some((k, v)) = token.split_once('=') {
+                    sink.resolve_and_put(k, Value::Str(v));
+                    if sink.row_rejected() {
+                        break;
+                    }
+                }
+            }
+            sink.end_row();
+        }
+        Ok(())
+    }
+}
+
+fn parse_bytes_resolve(bytes: &[u8], plan: ExecutionPlan) -> RecordBatch {
+    let mut sink = TableBuilder::with_plan((bytes.len() / 16).max(4), Arc::new(plan));
+    ResolveAndPutParser.parse_chunk(bytes, &mut sink).unwrap();
+    sink.finish().unwrap()
+}
+
+#[test]
+fn test_equal_filter_via_resolve_and_put() {
+    let mut plan = ExecutionPlan::new();
+    plan.filter = Some(FilterPredicate::Equal {
+        field: "A".to_string(),
+        value: "yes".to_string(),
+    });
+
+    let batch = parse_bytes_resolve(b"A=yes B=1\nA=no B=2\nA=yes B=3\n", plan);
+    assert_eq!(batch.num_rows(), 2, "Equal filter via resolve_and_put should keep 2 rows");
+    let a = batch.column_by_name("A").unwrap().as_string::<i32>();
+    assert_eq!(a.value(0), "yes");
+    assert_eq!(a.value(1), "yes");
+}
+
+#[test]
+fn test_not_equal_filter_via_resolve_and_put() {
+    let mut plan = ExecutionPlan::new();
+    plan.filter = Some(FilterPredicate::NotEqual {
+        field: "A".to_string(),
+        value: "skip".to_string(),
+    });
+
+    let batch = parse_bytes_resolve(b"A=keep B=1\nA=skip B=2\nA=keep B=3\n", plan);
+    assert_eq!(batch.num_rows(), 2, "NotEqual filter via resolve_and_put should keep 2 rows");
+    let a = batch.column_by_name("A").unwrap().as_string::<i32>();
+    assert_eq!(a.value(0), "keep");
+    assert_eq!(a.value(1), "keep");
+}
