@@ -315,6 +315,7 @@ impl BoundedExecutor {
     /// Legacy path for mapped inputs: plan against the mapping, drop it, then
     /// read each chunk from the file with `seek` + `read_exact`.
     #[cfg(feature = "mmap")]
+    #[expect(dead_code, reason = "legacy path kept for reference")]
     fn run_mapped<P>(
         &self,
         path: &Path,
@@ -326,7 +327,7 @@ impl BoundedExecutor {
     where
         P: RecordParser + Clone + Send + Sync,
     {
-        let mut batches = Vec::new();
+        let batches = Vec::new();
         let mut consumer = CollectingConsumer(batches);
         self.run_mapped_stream(path, input, splitter, parser, plan, &mut consumer)?;
         Ok(consumer.0)
@@ -336,6 +337,7 @@ impl BoundedExecutor {
 /// Post-assembly safety net: re-apply pure column-comparison plans with
 /// Arrow kernels. Per-row evaluation during parse is authoritative, so trees
 /// involving `Or`, `Not`, `Equal`, or `NotEqual` pass through untouched.
+#[expect(dead_code, reason = "legacy path kept for reference")]
 fn apply_plan_filter(batches: &mut Vec<RecordBatch>, plan: &ExecutionPlan) -> Result<()> {
     if let Some(ref filter) = plan.filter {
         for batch in batches {

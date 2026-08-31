@@ -33,7 +33,7 @@ pub use bounded::MemoryBudget;
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 pub use decoder::{ColumnarSink, RecordParser, Splitter};
 pub use engine::{LocateOnly, TableBuilder};
-#[cfg(any(feature = "profiling", feature = "profile"))]
+#[cfg(feature = "profile")]
 pub use engine::{
     IS_PRED_FALSE, IS_PRED_TRUE, PREDICATE_EVALUATIONS, PREDICATE_FAILS, PREDICATE_UNDECIDED,
     RESOLVE_AND_PUT_COUNT,

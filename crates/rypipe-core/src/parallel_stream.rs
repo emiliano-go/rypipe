@@ -207,6 +207,7 @@ impl ParallelStreamingExecutor {
     }
 
     /// Stream a file in parallel, calling `consumer` per batch in order.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_stream<P, C>(
         &self,
         path: &Path,
@@ -270,6 +271,7 @@ impl ParallelStreamingExecutor {
     }
 
     /// Core implementation shared by `run_bytes_stream` and `run_bytes_stream_shared`.
+    #[allow(clippy::too_many_arguments)]
     fn run_bytes_stream_core<P, C>(
         &self,
         bytes: &[u8],
@@ -357,7 +359,7 @@ impl ParallelStreamingExecutor {
                 // fall back to pre-cloned bytes for external callers.
                 let bytes_ref: &[u8] = match input_clone {
                     Some(ref inp) => inp.as_slice(),
-                    None => fallback_clone.as_ref().map(|v| v.as_slice()).unwrap_or(&[]),
+                    None => fallback_clone.as_deref().unwrap_or(&[]),
                 };
                 loop {
                     let next = {
@@ -403,32 +405,30 @@ impl ParallelStreamingExecutor {
         let mut next_seq = 0usize;
         let mut reorder_bytes: usize = 0;
         for (seq, res) in receiver {
-            match res {
-                Ok(batch) => {
-                    if opts.ordered {
-                        if seq == next_seq {
-                            consumer.consume(batch)?;
+            {
+                let batch = res?;
+                if opts.ordered {
+                    if seq == next_seq {
+                        consumer.consume(batch)?;
+                        next_seq += 1;
+                        while let Some(b) = pending.remove(&next_seq) {
+                            consumer.consume(b)?;
                             next_seq += 1;
-                            while let Some(b) = pending.remove(&next_seq) {
-                                consumer.consume(b)?;
-                                next_seq += 1;
-                            }
-                        } else {
-                            reorder_bytes += batch.get_array_memory_size();
-                            if reorder_bytes > max_reorder * self.budget.bytes() {
-                                return Err(crate::Error::Merge(format!(
-                                    "reorder buffer exceeded {} MiB limit (max_reorder={max_reorder})",
-                                    self.budget.bytes() / 1024 / 1024
-                                )));
-                            }
-                            pending.insert(seq, batch);
                         }
                     } else {
-                        // Unordered: deliver immediately regardless of sequence.
-                        consumer.consume(batch)?;
+                        reorder_bytes += batch.get_array_memory_size();
+                        if reorder_bytes > max_reorder * self.budget.bytes() {
+                            return Err(crate::Error::Merge(format!(
+                                "reorder buffer exceeded {} MiB limit (max_reorder={max_reorder})",
+                                self.budget.bytes() / 1024 / 1024
+                            )));
+                        }
+                        pending.insert(seq, batch);
                     }
+                } else {
+                    // Unordered: deliver immediately regardless of sequence.
+                    consumer.consume(batch)?;
                 }
-                Err(e) => return Err(e),
             }
         }
         // Drain remaining.

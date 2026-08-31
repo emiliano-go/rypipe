@@ -314,7 +314,7 @@ fn ordered_parallel_streaming_matches_single_parse() {
     let path = temp_path();
     std::fs::write(&path, &bytes).expect("test fixture must be writable");
 
-    let result = (|| {
+    {
         let single = pipeline
             .read_path(&path, false, false)
             .expect("path parse must succeed");
@@ -342,8 +342,7 @@ fn ordered_parallel_streaming_matches_single_parse() {
             .collect::<rypipe_core::Result<Vec<_>>>()
             .expect("parallel stream must succeed");
         assert_eq!(rows(&parallel_stream), expected_rows);
-    })();
+    };
 
     let _ = std::fs::remove_file(&path);
-    result
 }

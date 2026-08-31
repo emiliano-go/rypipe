@@ -185,7 +185,7 @@ unsafe fn mask64(p: *const u8, needle: u8) -> u64 {
         if has_avx2() {
             return unsafe { mask64_avx2(p, needle) };
         }
-        return unsafe { mask64_sse2(p, needle) };
+        unsafe { mask64_sse2(p, needle) }
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -194,6 +194,7 @@ unsafe fn mask64(p: *const u8, needle: u8) -> u64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn mask64_avx2(p: *const u8, needle: u8) -> u64 {
     use std::arch::x86_64::*;
@@ -207,6 +208,7 @@ unsafe fn mask64_avx2(p: *const u8, needle: u8) -> u64 {
     m0 | (m1 << 32)
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn mask64_sse2(p: *const u8, needle: u8) -> u64 {
     use std::arch::x86_64::*;
@@ -221,6 +223,7 @@ unsafe fn mask64_sse2(p: *const u8, needle: u8) -> u64 {
     mask
 }
 
+#[expect(dead_code, reason = "fallback for non-x86_64 targets")]
 unsafe fn mask64_scalar(p: *const u8, needle: u8) -> u64 {
     let mut mask = 0u64;
     for i in 0..64 {
@@ -254,7 +257,7 @@ mod tests {
 
     #[test]
     fn block_boundaries() {
-        let delims: &'static [u8] = &[b'<', b'>'];
+        let delims: &'static [u8] = b"<>";
         // delimiter at byte 63 and 64
         let mut buf = vec![b'x'; 128];
         buf[63] = b'<';
@@ -271,15 +274,13 @@ mod tests {
 
     #[test]
     fn straddling() {
-        let delims: &'static [u8] = &[b'<'];
+        let delims: &'static [u8] = b"<";
         // needle straddling will be tested via raw_text_until candidate+verify,
         // but check next still works across boundary
         let mut buf = vec![b'a'; 128];
         // place "</FormattedValue>" straddling 64
         let needle = b"</FormattedValue>";
-        for i in 0..needle.len() {
-            buf[60 + i] = needle[i];
-        }
+        buf[60..(needle.len() + 60)].copy_from_slice(&needle[..]);
         let mut bm = BlockMasks::new(&buf, delims);
         assert_eq!(bm.next(0, b'<'), Some(60));
         assert_eq!(bm.next(61, b'<'), None);
@@ -287,7 +288,7 @@ mod tests {
 
     #[test]
     fn tail_lengths() {
-        let delims: &'static [u8] = &[b'<', b'>', b'"', b'\'', b'='];
+        let delims: &'static [u8] = b"<>\"'=";
         for len in [1, 63, 64, 65, 127, 128, 129] {
             let mut buf = vec![b'x'; len];
             if len > 0 {
@@ -302,7 +303,7 @@ mod tests {
 
     #[test]
     fn empty_and_single() {
-        let delims: &'static [u8] = &[b'<'];
+        let delims: &'static [u8] = b"<";
         check_next(b"", delims);
         check_next(b"<", delims);
         check_next(b"x", delims);
@@ -310,7 +311,7 @@ mod tests {
 
     #[test]
     fn equivalence_random() {
-        let delims: &'static [u8] = &[b'<', b'>', b'"', b'\'', b'='];
+        let delims: &'static [u8] = b"<>\"'=";
         let mut rng = 0u64;
         let mut next_rng = || {
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -342,7 +343,7 @@ mod tests {
 
     #[test]
     fn next_any_correct() {
-        let delims: &'static [u8] = &[b'"', b'\'', b'>'];
+        let delims: &'static [u8] = b"\"'>";
         let buf = br#"a"b'c>d"#;
         let mut bm = BlockMasks::new(buf, delims);
         assert_eq!(bm.next_any(0, delims), Some((1, b'"')));
@@ -352,7 +353,7 @@ mod tests {
 
     #[test]
     fn next_far_fallback() {
-        let delims: &'static [u8] = &[b'<'];
+        let delims: &'static [u8] = b"<";
         let buf = vec![b'x'; 1000];
         let mut bm = BlockMasks::new(&buf, delims);
         // hint >256 should use memchr path, but still correct
@@ -368,7 +369,7 @@ mod tests {
     fn avx2_sse2_scalar_parity() {
         // Force scalar vs avx2 parity via direct mask64 calls are internal;
         // equivalence test already covers. This just ensures tail handling same.
-        let delims: &'static [u8] = &[b'='];
+        let delims: &'static [u8] = b"=";
         let buf = b"a=b=c";
         let mut bm = BlockMasks::new(buf, delims);
         assert_eq!(bm.next(0, b'='), Some(1));
