@@ -38,7 +38,7 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 | Page | Technique used in crxml |
 |------|-------------------------|
 | [Adapter design](./adapter-design.md) | `memchr::memmem` splitter; skip comments/CDATA; validate tag boundaries. |
-| [Adapter design](./adapter-design.md) | Borrowed-slice `quick_xml` reader; XML events point into the input buffer. |
+| [Adapter design](./adapter-design.md) | Hand-rolled `memchr`/`memmem` scanner in `scanner.rs`; XML events point into the input buffer. |
 | [Schema and types](./schema-and-types.md) | `field_types` casts strings to numbers during parse. |
 | [Dictionary encoding](./dictionary-encoding.md) | `dictionary_columns` for low-cardinality string fields. |
 | [Parallelism](./parallelism.md) | Parallel fast path when `auto_dict` and compare filters are off. |
@@ -51,7 +51,7 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 
 ## The decoder
 
-`CrystalXmlDecoder` uses `quick_xml` in borrowed-slice mode. Events reference the input bytes directly instead of copying into a scratch buffer. For each row element it:
+`CrystalXmlDecoder` uses the hand-rolled `memchr`/`memmem` scanner in `scanner.rs` (replacing `quick_xml` as of crxml 1.2). Events reference the input bytes directly instead of copying into a scratch buffer. For each row element it:
 
 1. Emits row attributes as fields.
 2. Walks child elements.
@@ -64,7 +64,7 @@ The decoder also has a `parse_tail` fallback that rescans orphan close-tags at c
 
 | Technique | Benefit |
 |-----------|---------|
-| Borrowed-slice `quick_xml` reader | XML events point into the input buffer; no per-event copy. |
+| Hand-rolled `memchr`/`memmem` scanner (`scanner.rs`) | XML events point into the input buffer; no per-event copy. |
 | `memchr::memmem` row-tag scan | SIMD-accelerated boundary search for parallel chunks. |
 | Skip-region handling | Comments/CDATA do not create false split points. |
 | SIMD UTF-8 validation | `simdutf8` validates each chunk in bulk. |

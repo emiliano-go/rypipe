@@ -5,7 +5,7 @@
 ## Pipeline
 
 ```rust
-pub struct Pipeline<S, P> { splitter: S, parser: P, plan: ExecutionPlan }
+pub struct Pipeline<S, P> { splitter: S, parser: P, plan: Arc<ExecutionPlan> }
 ```
 
 `S: Splitter + Clone` and `P: RecordParser + Clone` so the pipeline can be reused across files and modes.
@@ -26,7 +26,7 @@ All six methods share the same `Splitter` plus `RecordParser` plus `ExecutionPla
 `crates/rypipe-core/src/parallel.rs:16` `pub struct ParallelExecutor;` with one associated function:
 
 ```rust
-pub fn parse<P>(bytes: &[u8], splitter: &dyn Splitter, parser: P, plan: ExecutionPlan, num_chunks: usize) -> Result<Vec<RecordBatch>>
+pub fn parse<P>(bytes: &[u8], splitter: &dyn Splitter, parser: P, plan: Arc<ExecutionPlan>, num_chunks: usize) -> Result<Vec<RecordBatch>>
 where P: RecordParser + Clone + Send + Sync
 ```
 
@@ -52,15 +52,15 @@ All row filters (`Equal`, `NotEqual`, `Compare`, and `And`/`Or`/`Not` trees) are
 
 `BoundedExecutor { budget: MemoryBudget }` has:
 
-* `plan_chunks(&self, bytes: &[u8], splitter: &dyn Splitter) -> (Vec<Range<usize>>, usize, usize)` estimates `bytes_per_row = splitter.estimate_bytes_per_row(bytes).max(1)`, `total_rows_est = bytes.len() / bytes_per_row`, `rows_per_batch = (budget.bytes() / bytes_per_row).max(1).min(total_rows_est.max(1))`, `num_batches = (total_rows_est / rows_per_batch).max(1)`, `split_points = splitter.find_split_points(bytes, num_batches.min(MAX_SPLIT_CHUNKS))` where `MAX_SPLIT_CHUNKS = 256`, then `split_points_to_ranges`.
+* `plan_chunks(&self, bytes: &[u8], splitter: &dyn Splitter) -> (Vec<Range<usize>>, usize, usize)` estimates `bytes_per_row = splitter.estimate_bytes_per_row(bytes).max(1)`, `total_rows_est = bytes.len() / bytes_per_row`, `rows_per_batch = (budget.bytes() / bytes_per_row).max(1).min(total_rows_est.max(1))`, `num_batches = (total_rows_est / rows_per_batch).max(1)`, `split_points = splitter.find_split_points(bytes, num_batches.min(MAX_SPLIT_CHUNKS))` where `MAX_SPLIT_CHUNKS = 100_000`, then `split_points_to_ranges`.
 
 * `run_bytes<P>(&self, bytes: &[u8], splitter: &dyn Splitter, parser: P, plan: ExecutionPlan) -> Result<Vec<RecordBatch>>` where `P: RecordParser + Clone + Send + Sync`. For empty bytes returns `Ok(vec![])`. Otherwise it gets `(chunks, rows_per_batch, bytes_per_row)`, creates `batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), plan)`, then for each `chunk` slices `&bytes[chunk.start..chunk.end]`, creates a per chunk `chunk_engine`, calls `validate` and `parse_chunk`, extends `batch_engine` via `extend`, tracks `rows_in_batch`, flushes when `rows_in_batch >= rows_per_batch` via `batch_engine.finish()` plus `reset`. At the end flushes remainder and calls `apply_plan_filter` (which applies `apply_compare_filter` only for pure `Compare` and `And` trees; other trees are no ops because per row is authoritative).
 
-* `run<P>(&self, path: &Path, splitter: &dyn Splitter, parser: P, plan: ExecutionPlan, prefault: bool) -> Result<Vec<RecordBatch>>` opens `InputBuffer::open(path, use_mmap = cfg(feature="mmap"), prefault)`. If the buffer is `Mmap`, it calls `run_mapped` which does `plan_chunks` on the mapped slice, drops the mapping, then reopens the file with `File::open` and for each `chunk` does `seek` plus `read_exact` into a fresh `Vec<u8>`, parses, and accumulates as above. This keeps RSS low for large files: the mapping is released before the parse loop, and only one chunk buffer is live at a time. If the buffer is `Owned` (including transparently decompressed), it delegates to `run_bytes(input.as_slice(), ...)`.
+* `run<P>(&self, path: &Path, splitter: &dyn Splitter, parser: P, plan: Arc<ExecutionPlan>, prefault: bool) -> Result<Vec<RecordBatch>>` opens `InputBuffer::open(path, use_mmap = cfg(feature="mmap"), prefault)`. If the buffer is `Mmap`, it calls `run_mapped` which does `plan_chunks` on the mapped slice, drops the mapping, then reopens the file with `File::open` and for each `chunk` does `seek` plus `read_exact` into a fresh `Vec<u8>`, parses, and accumulates as above. This keeps RSS low for large files: the mapping is released before the parse loop, and only one chunk buffer is live at a time. If the buffer is `Owned` (including transparently decompressed), it delegates to `run_bytes(input.as_slice(), ...)`.
 
 * `run_mapped` is `#[cfg(feature="mmap")]` and takes `input: InputBuffer` by value (so the mapping is dropped after `plan_chunks`). The file is reopened; chunk reads use `SeekFrom::Start(chunk.start)` plus `read_exact`.
 
-`MAX_SPLIT_CHUNKS = 256` is the internal safeguard: never request more than 256 split points even if `budget` would imply more batches; pathological `bytes_per_row` cannot explode per chunk overhead. Batches may still exceed budget when the required count exceeds the cap (documented).
+`MAX_SPLIT_CHUNKS = 100_000` is the internal safeguard: never request more than 100,000 split points even if `budget` would imply more batches; pathological `bytes_per_row` cannot explode per chunk overhead. Batches may still exceed budget when the required count exceeds the cap (documented).
 
 ## InputBuffer
 

@@ -253,7 +253,7 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 | Page | Technique used in crxml |
 |------|-------------------------|
 | [Adapter design](./adapter-design.md) | `memchr::memmem` splitter; skip comments/CDATA; validate tag boundaries. |
-| [Adapter design](./adapter-design.md) | Borrowed-slice `quick_xml` reader; XML events point into the input buffer. |
+| [Adapter design](./adapter-design.md) | Hand-rolled `memchr`/`memmem` scanner in `scanner.rs`; XML events point into the input buffer. |
 | [Schema and types](./schema-and-types.md) | `field_types` casts strings to numbers during parse. |
 | [Dictionary encoding](./dictionary-encoding.md) | `dictionary_columns` for low-cardinality string fields. |
 | [Parallelism](./parallelism.md) | Parallel fast path when `auto_dict` and compare filters are off. |
@@ -266,7 +266,7 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 
 ## The decoder
 
-`CrystalXmlDecoder` uses `quick_xml` in borrowed-slice mode. Events reference the input bytes directly instead of copying into a scratch buffer. For each row element it:
+`CrystalXmlDecoder` uses the hand-rolled `memchr`/`memmem` scanner in `scanner.rs` (replacing `quick_xml` as of crxml 1.2). Events reference the input bytes directly instead of copying into a scratch buffer. For each row element it:
 
 1. Emits row attributes as fields.
 2. Walks child elements.
@@ -279,7 +279,7 @@ The decoder also has a `parse_tail` fallback that rescans orphan close-tags at c
 
 | Technique | Benefit |
 |-----------|---------|
-| Borrowed-slice `quick_xml` reader | XML events point into the input buffer; no per-event copy. |
+| Hand-rolled `memchr`/`memmem` scanner (`scanner.rs`) | XML events point into the input buffer; no per-event copy. |
 | `memchr::memmem` row-tag scan | SIMD-accelerated boundary search for parallel chunks. |
 | Skip-region handling | Comments/CDATA do not create false split points. |
 | SIMD UTF-8 validation | `simdutf8` validates each chunk in bulk. |
@@ -426,7 +426,7 @@ Stream mode uses `BoundedExecutor`. It keeps a memory budget and parses the file
 1. Opens the file via `InputBuffer`.
 2. Estimates `bytes_per_row` from the splitter.
 3. Computes `rows_per_batch` from the budget.
-4. Splits the file into batches sized to fit the memory budget, capped at 256
+4. Splits the file into batches sized to fit the memory budget, capped at 100,000
    split points as an internal safeguard against pathological chunk counts.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates or iterates.
@@ -813,7 +813,7 @@ This page explains how `BoundedExecutor` enforces the budget and how to size chu
 1. Opens the file via `InputBuffer`.
 2. Estimates `bytes_per_row` from `Splitter::estimate_bytes_per_row`.
 3. Computes `rows_per_batch` from the budget.
-4. Splits the file into batches sized to fit the memory budget, capped at 256
+4. Splits the file into batches sized to fit the memory budget, capped at 100,000
    split points as an internal safeguard against pathological chunk counts.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates.
@@ -1338,29 +1338,29 @@ Operations:
 
 * `append(&mut self, other: &StrColumn)` merges another column by base shifting offsets: `base = self.data.len() as i32`, then `self.offsets.extend(other.offsets[1..].iter().map(|o| o + base))`. This is O(n) in offsets, not in bytes.
 
-* `to_arrow() -> Result<ArrayRef>` builds an Arrow `StringArray` by wrapping the three buffers with `OffsetBuffer`, `Buffer`, and `NullBuffer`. When all validity are true, `nulls` is `None`. This is a block copy of two buffers, not per cell.
+* `to_arrow(&mut self) -> Result<ArrayRef>` builds an Arrow `StringArray` by wrapping the three buffers with `OffsetBuffer`, `Buffer`, and `NullBuffer`. When all validity are true, `nulls` is `None`. This is a block copy of two buffers, not per cell.
 
 ## ColumnBuilder
 
 ```rust
 pub(crate) enum ColumnBuilder {
     String(StrColumn),
-    Int64(Vec<Option<i64>>),
-    Float64(Vec<Option<f64>>),
-    Boolean(Vec<Option<bool>>),
-    Date32(Vec<Option<i32>>),
-    Timestamp(TimeUnit, Vec<Option<i64>>),
-    Dictionary { codes: Vec<Option<i32>>, dict: Vec<String>, index: HashMap<String, i32> },
+    Int64(NullableColumn<i64>),
+    Float64(NullableColumn<f64>),
+    Boolean(NullableColumn<bool>),
+    Date32(NullableColumn<i32>),
+    Timestamp(TimeUnit, NullableColumn<i64>),
+    Dictionary { codes: NullableColumn<i32>, dict: Vec<String>, index: HashMap<String, i32> },
 }
 ```
 
-Each variant stores a dense `Vec<Option<T>>` (or `StrColumn` for strings). There is exactly one builder per column, created by `ExecutionPlan::column_type` at first use.
+Each variant stores a `NullableColumn<T>` (or `StrColumn` for strings). There is exactly one builder per column, created by `ExecutionPlan::column_type` at first use.
 
 * `String` is `StrColumn`.
-* `Int64`, `Float64`, `Boolean` are `Vec<Option<T>>` with `lexical::parse` for string inputs.
-* `Date32(Vec<Option<i32>>)` stores days since epoch. Parsing uses `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`.
-* `Timestamp(TimeUnit, Vec<Option<i64>>)` stores raw integers in the column's `TimeUnit` (Second, Millisecond, Microsecond, Nanosecond). Parsing tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`, then bare `"%Y-%m-%d"` as midnight. Timezone handling is left to adapters that emit `Value::Timestamp` directly.
-* `Dictionary { codes, dict, index }` stores `codes: Vec<Option<i32>>` plus `dict: Vec<String>` (id to string) and `index: HashMap<String,i32>` (string to id). This is the write path for `FieldType::Dictionary` and for auto dict upgrade.
+* `Int64`, `Float64`, `Boolean` are `NullableColumn<T>` with `lexical::parse` for string inputs.
+* `Date32(NullableColumn<i32>)` stores days since epoch. Parsing uses `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`.
+* `Timestamp(TimeUnit, NullableColumn<i64>)` stores raw integers in the column's `TimeUnit` (Second, Millisecond, Microsecond, Nanosecond). Parsing tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`, then bare `"%Y-%m-%d"` as midnight. Timezone handling is left to adapters that emit `Value::Timestamp` directly.
+* `Dictionary { codes, dict, index }` stores `codes: NullableColumn<i32>` plus `dict: Vec<String>` (id to string) and `index: HashMap<String,i32>` (string to id). This is the write path for `FieldType::Dictionary` and for auto dict upgrade.
 
 Variant keys for unification (10 strings):
 
@@ -1537,7 +1537,7 @@ if batch_engine.num_rows() > 0 { batches.push(batch_engine.finish()?) }  (CORE)
 apply_plan_filter(&mut batches, &plan)  // pure Compare/And reapplication only (CORE)
 ```
 
-`run_bytes` slices directly from `bytes` (used for decompressed buffers and for `Pipeline::read_bytes_stream`). `run` opens `InputBuffer`; if `Mmap` it drops the mapping after `plan_chunks` and reopens the file for `seek` plus `read_exact` per chunk (bounded RSS); if `Owned` it delegates to `run_bytes`. `MAX_SPLIT_CHUNKS = 256` caps split points.
+`run_bytes` slices directly from `bytes` (used for decompressed buffers and for `Pipeline::read_bytes_stream`). `run` opens `InputBuffer`; if `Mmap` it drops the mapping after `plan_chunks` and reopens the file for `seek` plus `read_exact` per chunk (bounded RSS); if `Owned` it delegates to `run_bytes`. `MAX_SPLIT_CHUNKS = 100_000` caps split points.
 
 ## Input buffering  (CORE)
 
@@ -1563,19 +1563,21 @@ Decompressed bytes are served from memory for all modes. `Pipeline::read_path` a
 
 ```
 (CORE) begin_row (no op)  // row boundaries tracked by row_count plus row_dirty
-  (ADAPTER BOUND) put_field(k, v) -> (CORE) resolve(k) (ExecutionPlan::resolve_field, one hash) -> (CORE) ensure_column_idx (single hash for field_index plus Vec push if new) -> (CORE) row_dirty[idx]=true -> (CORE) last_write_wins check (if len > row_count { pop }) -> (CORE) push_value (lexical parse or typed)
+  (ADAPTER BOUND) put_field(k, v) -> (CORE) resolve(k) (ExecutionPlan::resolve_field, one hash) -> (CORE) ensure_column_idx (single hash for field_index plus Vec push if new) -> (CORE) set dirty bit row_dirty[idx/64]|=1<<(idx%64) -> (CORE) last_write_wins check (if len > row_count { pop }) -> (CORE) push_value (lexical parse or typed)
   (ADAPTER BOUND) put_field(k, v) duplicate in same row -> (CORE) pop previous value for this row (len > row_count) then push new, dirty stays true
   ... (ADAPTER BOUND) may call put_field_resolved(r, v) after resolve(r) to avoid second hash (see Decoder)
 end_row -> (CORE) finish_row
+    // bitmask: row_dirty is Vec<u64> with (columns.len()+63)/64 words
     for (i,b) in columns.iter_mut().enumerate() {  (CORE)
-        if !row_dirty[i] { b.push(None) }  // null fill only missing (CORE)
-        else { row_dirty[i]=false }       // clear for next row (CORE)
+        let word = i/64; let bit = i%64;
+        if (row_dirty[word]>>bit)&1==0 { b.push(None) }  // null fill only missing (CORE)
+        else { row_dirty[word] &= !(1u64<<bit) }          // clear for next row (CORE)
     }
     if (CORE) filter.check(...) false { for b in columns { b.pop() } return }  // per row And/Or/Not with short circuit (CORE)
     row_count += 1  (CORE)
 ```
 
-`row_dirty` is `Vec<bool>` with the same length as `columns` (kept in sync in `ensure_column_idx` plus `take_column` plus `extend`). See [Engine](./engine.md) and [Optimizations](./optimizations.md) for why this saves 80 percent of `push(None)` calls.
+`row_dirty` is `Vec<u64>` bitmask with `(columns.len() + 63) / 64` words (kept in sync in `ensure_column_idx` plus `take_column` plus `extend`). See [Engine](./engine.md) and [Optimizations](./optimizations.md) for why this saves 80 percent of `push(None)` calls.
 
 Adapter code never touches `row_dirty`; it only emits `put_field` events. The engine owns the dirty tracking.
 
@@ -1591,7 +1593,7 @@ PAGE: https://rypipe.emiliano-go.com/architecture/decoder/
 
 # Decoder API
 
-`crates/rypipe-core/src/decoder.rs` (63 lines) defines the boundary between format specific and format agnostic code. Adapters implement two traits; the engine implements the third.
+`crates/rypipe-core/src/decoder.rs` (~170 lines) defines the boundary between format specific and format agnostic code. Adapters implement two traits; the engine implements the third.
 
 ## Splitter
 
@@ -1641,15 +1643,23 @@ pub trait ColumnarSink {
 
 This is the event sink that decoders drive.
 
-* `begin_row` and `end_row` bracket a row. `TableBuilder` uses `row_count` plus `row_dirty` to track the row, so `begin_row` is a no op.
+* `begin_row` and `end_row` bracket a row. `TableBuilder` uses `row_count` plus `row_dirty` bitmask to track the row, so `begin_row` is a no op.
 
 * `put_field(&mut self, name: &str, value: Value<'_>)` resolves `name` via `ExecutionPlan::resolve_field` (rename then drop) and stores the value. If `resolve` returns `None` (dropped), it returns immediately.
+
+* `put_row(&mut self, fields: &[(&str, Value<'_>)])` is a convenience for adapters that already have all fields as slices. It iterates `fields` and calls `put_field` for each. Default implementation.
+
+* `resolve_raw<'a>(&'a self, raw_name: &'a [u8]) -> Option<&'a str>` resolves a field name that is still in raw byte form (e.g. from XML scanners that have not yet decoded to `&str`). Default converts via `from_utf8` then delegates to `resolve`. Avoids an intermediate `String` allocation when the parser holds raw bytes.
+
+* `resolve_and_put_raw(&mut self, raw_name: &[u8], value: Value<'_>)` combines `resolve_raw` and `put_field_resolved` in one call for raw-byte scanners. Default converts via `from_utf8` then delegates to `resolve_and_put`.
+
+* `resolve_and_put(&mut self, name: &str, value: Value<'_>)` resolves and pushes in one call, avoiding the double `resolve_field` that `wants` + `put_field` would perform. Default resolves then calls `put_field_resolved` (with an owned clone to satisfy the borrow checker). `TableBuilder` overrides to bypass the allocation.
 
 * `wants(&self, name: &str) -> bool` is the hint: return false to signal the engine will drop this field. Default is true. Adapters that do expensive extraction (entity unescaping, base64, decompression) call `if sink.wants(col) { /* decode */ sink.put_field(col, val) }` to skip work.
 
 * `resolve<'a>(&'a self, name: &'a str) -> Option<&'a str>` is the single lookup version. Default returns `Some(name)` (keep as is). `TableBuilder` overrides to `self.plan.resolve_field(name)` which returns `Some(resolved)` or `None` for dropped, borrowing from `field_map` where possible. This lets adapters do `if let Some(r) = sink.resolve(k) { /* expensive decode */ sink.put_field_resolved(r, v) }` with one hash instead of two (`wants` plus `put_field`).
 
-* `put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>)` pushes a field that is already resolved. Default delegates to `put_field` (which will resolve again). `TableBuilder` overrides to `push_field_resolved` which calls `ensure_column_idx` directly and sets `row_dirty[idx] = true` without re hashing `field_map`/`drop_fields`. This is the fast path for adapters that already called `resolve`.
+* `put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>)` pushes a field that is already resolved. Default delegates to `put_field` (which will resolve again). `TableBuilder` overrides to `push_field_resolved` which calls `ensure_column_idx` directly and sets the dirty bit for column `i` without re hashing `field_map`/`drop_fields`. This is the fast path for adapters that already called `resolve`.
 
 * `needs_value(&self) -> bool` controls whether the parser decodes values. Default is `true`. When `false`, the parser skips value extraction entirely (e.g. `raw_text_until` in XML scanners) and does not call `put_field`. Adapters must NOT decode values when `needs_value()` returns `false`; the parser will emit `put_field` with an empty value or skip the call entirely. This enables locate-only and traversal-only tiers for profiling.
 
@@ -1657,9 +1667,9 @@ This is the event sink that decoders drive.
 
 * `finish(&mut self) -> Result<RecordBatch>` finalizes the sink. For `TableBuilder` it does `normalize`, early `new_empty` if no columns, `auto_dict_upgrade`, `sort_columns`, and builds `Schema` plus arrays.
 
-### Why two APIs for the same thing
+### Why multiple APIs for the same thing
 
-`wants` plus `put_field` is backward compatible and simple for stringly adapters (CSV header loop). `resolve` plus `put_field_resolved` is the same semantics with one hash instead of two, and it avoids the extra `String` allocation in `push_field` when `field_map` is non empty (`owned = n.to_owned()`). The Python fusion layer and `merge.rs` already use the single lookup Vec path; adapters can choose either pair and the engine guarantees the same result. Tests in `tests/data_integrity_test.rs` (`resolve_put_field_resolved_identical_to_put_field`) assert bit identical batches across `LineParser` vs `LineParserResolved` for 1000 rows with rename, drop, filter, and typed columns across single, parallel, and bounded modes.
+`wants` plus `put_field` is backward compatible and simple for stringly adapters (CSV header loop). `resolve` plus `put_field_resolved` is the same semantics with one hash instead of two, and it avoids the extra `String` allocation in `push_field` when `field_map` is non empty. `resolve_and_put` combines both in one call. For raw-byte scanners (XML), `resolve_raw` and `resolve_and_put_raw` avoid the `from_utf8` + `to_owned` two-step. `put_row` is a batch convenience for adapters that already have fields as slices. The Python fusion layer and `merge.rs` already use the single lookup Vec path; adapters can choose any pair and the engine guarantees the same result. Tests in `tests/data_integrity_test.rs` (`resolve_put_field_resolved_identical_to_put_field`) assert bit identical batches across `LineParser` vs `LineParserResolved` for 1000 rows with rename, drop, filter, and typed columns across single, parallel, and bounded modes.
 
 ## Value
 
@@ -1781,8 +1791,8 @@ pub struct TableBuilder {
     pub(crate) column_order: Vec<String>,
     pub(crate) row_count: usize,
     pub(crate) estimated_rows: usize,
-    pub(crate) plan: ExecutionPlan,
-    pub(crate) row_dirty: Vec<bool>,
+    pub(crate) plan: Arc<ExecutionPlan>,
+    pub(crate) row_dirty: Vec<u64>,
 }
 ```
 
@@ -1796,9 +1806,9 @@ Why this shape:
 
 * `row_count: usize` is the number of committed rows. A row is not counted until `finish_row` succeeds (including filter).
 
-* `row_dirty: Vec<bool>` has the same length as `columns`. `row_dirty[i]` is true if column `i` received a value in the current uncommitted row. It lets `finish_row` null fill only missing columns and avoids a per column `while len < target` check for touched columns.
+* `row_dirty: Vec<u64>` is a bitmask word array. `row_dirty` has `(columns.len() + 63) / 64` words. A set bit at column `i` means the column received a value in the current uncommitted row. It lets `finish_row` null fill only missing columns and avoids a per column `while len < target` check for touched columns.
 
-* `estimated_rows: usize` and `plan: ExecutionPlan` are carried from `Pipeline::with_plan` and used for capacity hints and per row decisions.
+* `estimated_rows: usize` and `plan: Arc<ExecutionPlan>` are carried from `Pipeline::with_plan` and used for capacity hints and per row decisions.
 
 Constructors (`new`, `with_capacity`, `with_plan`) all initialize the three Vectors and the map as empty.
 
@@ -1816,18 +1826,23 @@ Adapters call `begin_row`, `put_field` (or `put_field_resolved`), `end_row` in a
 
 * `push_field` resolves the raw name (`plan.field_map` then `plan.drop_fields`) and delegates to `push_field_resolved`. Fast path: if both maps are empty, it uses `name` directly and avoids allocation and hashing in `resolve_field`.
 
-* `push_field_resolved` is the hot path (see [Optimizations](./optimizations.md) for the single lookup version). It calls `ensure_column_idx(resolved)` to get `idx`, marks `row_dirty[idx] = true`, then handles last write wins: if `columns[idx].len() > row_count`, the column already has a value for this row (duplicate field in the same row), so it pops before pushing the new value. Then `push_value` is called on the builder.
+* `push_field_resolved` is the hot path (see [Optimizations](./optimizations.md) for the single lookup version). It calls `ensure_column_idx(resolved)` to get `idx`, sets the dirty bit for column `idx` via `row_dirty[idx/64] |= 1u64 << (idx%64)`, then handles last write wins: if `columns[idx].len() > row_count`, the column already has a value for this row (duplicate field in the same row), so it pops before pushing the new value. Then `push_value` is called on the builder.
 
-* `ensure_column_idx(&mut self, name: &str) -> usize` does one hash lookup. If `field_index.get(name)` exists, it returns immediately. Otherwise it creates a `ColumnBuilder::with_capacity(est, &col_type)` where `est = estimated_rows.max(64)` and `col_type = plan.column_type(name)`, backfills `row_count` nulls (`for _ in 0..row_count { b.push(None) }`), pushes to `columns`, inserts into `field_index`, pushes `false` to `row_dirty`, and inserts into `column_order` at `schema_insert_index(name)`.
+* `ensure_column_idx(&mut self, name: &str) -> usize` does one hash lookup. If `field_index.get(name)` exists, it returns immediately. Otherwise it creates a `ColumnBuilder::with_capacity(est, &col_type)` where `est = estimated_rows.max(64)` and `col_type = plan.column_type(name)`, backfills `row_count` nulls (`for _ in 0..row_count { b.push(None) }`), pushes to `columns`, inserts into `field_index`, clears the dirty bit for the new column (ensuring `row_dirty` has enough words), and inserts into `column_order` at `schema_insert_index(name)`.
 
 * `finish_row` is where the dirty optimization matters (2C-S1). Instead of looping over all columns and doing `while b.len() < target { b.push(None) }`, it does:
 
 ```rust
+// bitmask version: row_dirty is Vec<u64> with (columns.len()+63)/64 words
+let full_words = self.row_dirty.len() - 1;
+let rem_bits = self.columns.len() % 64;
 for (i, b) in self.columns.iter_mut().enumerate() {
-    if !self.row_dirty[i] {
+    let word = i / 64;
+    let bit = i % 64;
+    if (self.row_dirty[word] >> bit) & 1 == 0 {
         b.push(None);
     } else {
-        self.row_dirty[i] = false;
+        self.row_dirty[word] &= !(1u64 << bit);
     }
 }
 if let Some(ref filter) = self.plan.filter {
@@ -1839,7 +1854,7 @@ if let Some(ref filter) = self.plan.filter {
 self.row_count += 1;
 ```
 
-Only missing columns get a `push(None)`; touched columns are just cleared for the next row. For 10 columns where 8 are present each row, this saves 80% of the null fill pushes and the associated `len` checks. The loop still iterates over `columns.len()` to check the bool, but the bool check is a single byte load versus a `len` load plus branch and push.
+Only missing columns get a `push(None)`; touched columns are just cleared for the next row. For 10 columns where 8 are present each row, this saves 80% of the null fill pushes and the associated `len` checks. The bitmask word load plus bit test is cheaper than a `Vec` push per column.
 
 Filter is evaluated per row via `FilterPredicate::check` with `(&columns, &field_index, row_index, &plan)`. If it fails, each column is popped (undoing the row) and `row_count` is not advanced. Dirty was already cleared, so the next row starts clean. For `And`/`Or`/`Not` trees, `check` short circuits.
 
@@ -1847,7 +1862,7 @@ Filter is evaluated per row via `FilterPredicate::check` with `(&columns, &field
 
 * `reset` clears `columns`, `field_index`, `column_order`, `row_dirty`, and resets `row_count` to zero while keeping `plan` and `estimated_rows`.
 
-* `normalize` truncates any column with `len > row_count` (partial row from a truncated chunk) and clears `row_dirty` to all false. Idempotent.
+* `normalize` truncates any column with `len > row_count` (partial row from a truncated chunk) and zeros `row_dirty`. Idempotent.
 
 * `auto_dict_upgrade` iterates `&mut self.columns` and calls `try_upgrade_to_dict(512, max_ratio, max_size)` when `plan.auto_dict` is true. Threshold defaults are 0.05 ratio and 256 entries. It is called from `finish` before sorting.
 
@@ -1875,9 +1890,9 @@ impl ColumnarSink for TableBuilder {
 
 ## Invariants
 
-* `columns.len() == field_index.len() == row_dirty.len()` always.
+* `columns.len() == field_index.len()` and `row_dirty.len() == (columns.len() + 63) / 64` always.
 * `columns.len() == column_order.len()` after each successful `finish_row` or `extend`, but during a row `columns` may be larger than `row_count+1` before `finish_row` completes.
-* `row_dirty[i]` is true exactly when `columns[i].len() == row_count + 1` and the column was touched this row; after `finish_row` all entries are false.
+* `row_dirty` bit `i` is set exactly when `columns[i].len() == row_count + 1` and the column was touched this row; after `finish_row` all bits are clear.
 * `take_column` keeps the three vectors in sync via swap remove patching.
 
 ## Tests
@@ -1895,7 +1910,7 @@ PAGE: https://rypipe.emiliano-go.com/architecture/execution/
 ## Pipeline
 
 ```rust
-pub struct Pipeline<S, P> { splitter: S, parser: P, plan: ExecutionPlan }
+pub struct Pipeline<S, P> { splitter: S, parser: P, plan: Arc<ExecutionPlan> }
 ```
 
 `S: Splitter + Clone` and `P: RecordParser + Clone` so the pipeline can be reused across files and modes.
@@ -1916,7 +1931,7 @@ All six methods share the same `Splitter` plus `RecordParser` plus `ExecutionPla
 `crates/rypipe-core/src/parallel.rs:16` `pub struct ParallelExecutor;` with one associated function:
 
 ```rust
-pub fn parse<P>(bytes: &[u8], splitter: &dyn Splitter, parser: P, plan: ExecutionPlan, num_chunks: usize) -> Result<Vec<RecordBatch>>
+pub fn parse<P>(bytes: &[u8], splitter: &dyn Splitter, parser: P, plan: Arc<ExecutionPlan>, num_chunks: usize) -> Result<Vec<RecordBatch>>
 where P: RecordParser + Clone + Send + Sync
 ```
 
@@ -1942,15 +1957,15 @@ All row filters (`Equal`, `NotEqual`, `Compare`, and `And`/`Or`/`Not` trees) are
 
 `BoundedExecutor { budget: MemoryBudget }` has:
 
-* `plan_chunks(&self, bytes: &[u8], splitter: &dyn Splitter) -> (Vec<Range<usize>>, usize, usize)` estimates `bytes_per_row = splitter.estimate_bytes_per_row(bytes).max(1)`, `total_rows_est = bytes.len() / bytes_per_row`, `rows_per_batch = (budget.bytes() / bytes_per_row).max(1).min(total_rows_est.max(1))`, `num_batches = (total_rows_est / rows_per_batch).max(1)`, `split_points = splitter.find_split_points(bytes, num_batches.min(MAX_SPLIT_CHUNKS))` where `MAX_SPLIT_CHUNKS = 256`, then `split_points_to_ranges`.
+* `plan_chunks(&self, bytes: &[u8], splitter: &dyn Splitter) -> (Vec<Range<usize>>, usize, usize)` estimates `bytes_per_row = splitter.estimate_bytes_per_row(bytes).max(1)`, `total_rows_est = bytes.len() / bytes_per_row`, `rows_per_batch = (budget.bytes() / bytes_per_row).max(1).min(total_rows_est.max(1))`, `num_batches = (total_rows_est / rows_per_batch).max(1)`, `split_points = splitter.find_split_points(bytes, num_batches.min(MAX_SPLIT_CHUNKS))` where `MAX_SPLIT_CHUNKS = 100_000`, then `split_points_to_ranges`.
 
 * `run_bytes<P>(&self, bytes: &[u8], splitter: &dyn Splitter, parser: P, plan: ExecutionPlan) -> Result<Vec<RecordBatch>>` where `P: RecordParser + Clone + Send + Sync`. For empty bytes returns `Ok(vec![])`. Otherwise it gets `(chunks, rows_per_batch, bytes_per_row)`, creates `batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), plan)`, then for each `chunk` slices `&bytes[chunk.start..chunk.end]`, creates a per chunk `chunk_engine`, calls `validate` and `parse_chunk`, extends `batch_engine` via `extend`, tracks `rows_in_batch`, flushes when `rows_in_batch >= rows_per_batch` via `batch_engine.finish()` plus `reset`. At the end flushes remainder and calls `apply_plan_filter` (which applies `apply_compare_filter` only for pure `Compare` and `And` trees; other trees are no ops because per row is authoritative).
 
-* `run<P>(&self, path: &Path, splitter: &dyn Splitter, parser: P, plan: ExecutionPlan, prefault: bool) -> Result<Vec<RecordBatch>>` opens `InputBuffer::open(path, use_mmap = cfg(feature="mmap"), prefault)`. If the buffer is `Mmap`, it calls `run_mapped` which does `plan_chunks` on the mapped slice, drops the mapping, then reopens the file with `File::open` and for each `chunk` does `seek` plus `read_exact` into a fresh `Vec<u8>`, parses, and accumulates as above. This keeps RSS low for large files: the mapping is released before the parse loop, and only one chunk buffer is live at a time. If the buffer is `Owned` (including transparently decompressed), it delegates to `run_bytes(input.as_slice(), ...)`.
+* `run<P>(&self, path: &Path, splitter: &dyn Splitter, parser: P, plan: Arc<ExecutionPlan>, prefault: bool) -> Result<Vec<RecordBatch>>` opens `InputBuffer::open(path, use_mmap = cfg(feature="mmap"), prefault)`. If the buffer is `Mmap`, it calls `run_mapped` which does `plan_chunks` on the mapped slice, drops the mapping, then reopens the file with `File::open` and for each `chunk` does `seek` plus `read_exact` into a fresh `Vec<u8>`, parses, and accumulates as above. This keeps RSS low for large files: the mapping is released before the parse loop, and only one chunk buffer is live at a time. If the buffer is `Owned` (including transparently decompressed), it delegates to `run_bytes(input.as_slice(), ...)`.
 
 * `run_mapped` is `#[cfg(feature="mmap")]` and takes `input: InputBuffer` by value (so the mapping is dropped after `plan_chunks`). The file is reopened; chunk reads use `SeekFrom::Start(chunk.start)` plus `read_exact`.
 
-`MAX_SPLIT_CHUNKS = 256` is the internal safeguard: never request more than 256 split points even if `budget` would imply more batches; pathological `bytes_per_row` cannot explode per chunk overhead. Batches may still exceed budget when the required count exceeds the cap (documented).
+`MAX_SPLIT_CHUNKS = 100_000` is the internal safeguard: never request more than 100,000 split points even if `budget` would imply more batches; pathological `bytes_per_row` cannot explode per chunk overhead. Batches may still exceed budget when the required count exceeds the cap (documented).
 
 ## InputBuffer
 
@@ -2037,8 +2052,8 @@ input bytes  [ADAPTER or CORE decides the source; InputBuffer below]
 |  (ColumnarSink)     |  columns: Vec<ColumnBuilder> (CORE)
 |                     |  field_index: HashMap<String,usize> (CORE)
 |                     |  column_order: Vec<String> (CORE)
-|                     |  row_dirty: Vec<bool> (CORE)
-|                     |  plan: ExecutionPlan (CORE)
+|                     |  row_dirty: Vec<u64> (CORE)
+|                     |  plan: Arc<ExecutionPlan> (CORE)
 +----------+----------+
            | RecordBatch  (CORE) Arrow
            v
@@ -2068,7 +2083,7 @@ All format specific code is **ADAPTER BOUND** (separate crates, not in this repo
 | `decoder` | `decoder.rs` | CORE (traits) / ADAPTER BOUND (impls) | Traits `Splitter`, `RecordParser`, `ColumnarSink` (with `resolve` and `put_field_resolved`) plus `split_points_to_ranges`; adapters implement the first two, core implements the third |
 | `pipeline` | `pipeline.rs` | CORE | `Pipeline<S,P>` wiring `Splitter` plus `RecordParser` to `TableBuilder` with `read_bytes`, `read_bytes_par`, `read_bytes_stream`, `read_path`, `read_path_par`, `read_path_stream` |
 | `parallel` | `parallel.rs` | CORE | `ParallelExecutor::parse` with rayon, fast path vs merge path, `schemas_consistent` |
-| `bounded` | `bounded.rs` | CORE | `BoundedExecutor` plus `MemoryBudget`, `run`, `run_bytes`, `run_mapped`, `plan_chunks`, `MAX_SPLIT_CHUNKS = 256` |
+| `bounded` | `bounded.rs` | CORE | `BoundedExecutor` plus `MemoryBudget`, `run`, `run_bytes`, `run_mapped`, `plan_chunks`, `MAX_SPLIT_CHUNKS = 100_000` |
 | `input` | `input.rs` | CORE | `InputBuffer` (`Mmap` or `Owned`), `MmapHandle`, magic byte detection for `gzip` (`1f 8b`), `zstd` (`28 b5 2f fd`), `lz4` frame (`04 22 4d 18`), transparent decompression |
 | `merge` | `merge.rs` | CORE | `TableBuilder::extend`, `engines_to_record_batches` with variant unification and promotion |
 | `arrow_export` | `arrow_export.rs` | CORE | `null_array`, `apply_compare_filter` (pure Compare and And only; other trees are no ops), `compare_columns`, `is_numeric` |
@@ -2106,7 +2121,7 @@ All format specific code is **ADAPTER BOUND** (separate crates, not in this repo
 
 ## State and ownership
 
-`TableBuilder` owns three parallel structures: `columns: Vec<ColumnBuilder>` (dense storage), `field_index: HashMap<String, usize>` (name to Vec index), and `column_order: Vec<String>` (output order). A fourth vector `row_dirty: Vec<bool>` tracks which columns were touched in the current row (see [Engine](./engine.md) and [Optimizations](./optimizations.md)). All are cleared together in `reset` and kept in sync in `take_column` (swap_remove with index patching) and `extend`.
+`TableBuilder` owns three parallel structures: `columns: Vec<ColumnBuilder>` (dense storage), `field_index: HashMap<String, usize>` (name to Vec index), and `column_order: Vec<String>` (output order). A fourth vector `row_dirty: Vec<u64>` bitmask tracks which columns were touched in the current row (see [Engine](./engine.md) and [Optimizations](./optimizations.md)). All are cleared together in `reset` and kept in sync in `take_column` (swap_remove with index patching) and `extend`.
 
 `Pipeline<S,P>` is `Clone` where `S: Splitter + Clone` and `P: RecordParser + Clone`, so the same pipeline can be reused across files and execution modes.
 
@@ -2138,15 +2153,15 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Why not `entry` API:** `HashMap::entry` would also be one hash, but `Vacant` insertion still needs `schema_insert_index` which borrows `self` mutably while `entry` holds a borrow. The `get` plus `insert` split avoids the borrow checker fight and keeps the fast path as a pure `get` without allocating the key.
 
-## 3. Dirty bitmask for finish_row (engine.rs:274)
+## 3. Dirty bitmask for finish_row (engine.rs:563)
 
 **Before:** `for b in &mut columns { while b.len() < target { b.push(None) } }` iterated all columns and pushed `None` for missing ones, checking `len < target` for every column.
 
-**After:** `row_dirty: Vec<bool>` has the same length as `columns`. `push_field_resolved` sets `row_dirty[idx] = true` on first touch of the row (idempotent for duplicate fields). `finish_row` does `for (i,b) in columns.iter_mut().enumerate() { if !row_dirty[i] { b.push(None) } else { row_dirty[i]=false } }`. Only missing columns get a push; touched columns are just cleared. `reset` and `normalize` clear the mask, `take_column` keeps it in sync via `swap_remove`.
+**After:** `row_dirty: Vec<u64>` is a bitmask with `(columns.len() + 63) / 64` words. `push_field_resolved` sets the bit for column `i` via `row_dirty[i / 64] |= 1u64 << (i % 64)` on first touch of the row. `finish_row` checks each bit: if clear, pushes `None`; if set, clears the bit. Only missing columns get a push; touched columns are just cleared. `reset` and `normalize` clear the mask, `take_column` keeps it in sync.
 
-**Impact:** for 10 columns where 8 are present, this saves 80% of the `push(None)` calls and the associated `len` loads. The loop still iterates over `columns.len()` to check the bool, but a byte load plus branch is cheaper than a `Vec` push.
+**Impact:** for 10 columns where 8 are present, this saves 80% of the `push(None)` calls and the associated `len` loads. The loop iterates over bitmask words and checks each bit; a bit test plus branch is cheaper than a `Vec` push.
 
-## 4. Resolve plus put_field_resolved (decoder.rs:46, engine.rs:302)
+## 4. Resolve plus put_field_resolved (decoder.rs:65, engine.rs:542)
 
 **Before:** adapters did `if sink.wants(k) { /* decode */ sink.put_field(k, v) }` which called `ExecutionPlan::resolve_field` twice: once in `wants` (hash `field_map` then `drop_fields`) and once in `put_field`. When `field_map` or `drop_fields` is non empty, this is two hashes per field. `push_field` also did `owned = n.to_owned()` to hold the resolved name.
 
@@ -2162,7 +2177,7 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Why generic:** every row that has a filter pays this per row. `Equal`/`NotEqual` plus `Compare` plus `And`/`Or`/`Not` trees all use it. Vectorizing `Equal`/`NotEqual` after `finish` would be possible (see `arrow_export`), but per row is authoritative for short circuiting and missing field semantics, so the Vec path is the right intermediate.
 
-## 6. Unified schema with promotion (columnar.rs:53, merge.rs:30)
+## 6. Unified schema with promotion (columnar.rs:1043, merge.rs:30)
 
 **Before:** mixed `int64` plus `float64` or `string` plus `dictionary` across chunks was an error or silent first sighting.
 
@@ -2178,12 +2193,12 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Before:** `Pipeline` had only `read_bytes` (single) and `read_path` variants; bounded mode required a file path and did `File::open` plus `seek`.
 
-**After:** `Pipeline::read_bytes_par` and `read_bytes_stream` plus `BoundedExecutor::run_bytes` slice directly from `&[u8]` with no file IO. `plan_chunks` computes `bytes_per_row`, `total_rows_est`, `rows_per_batch`, `num_batches`, caps at `MAX_SPLIT_CHUNKS = 256`, then `split_points_to_ranges`. `run_bytes` is used for decompressed buffers and for adapters that hold `BytesIO` data.
+**After:** `Pipeline::read_bytes_par` and `read_bytes_stream` plus `BoundedExecutor::run_bytes` slice directly from `&[u8]` with no file IO. `plan_chunks` computes `bytes_per_row`, `total_rows_est`, `rows_per_batch`, `num_batches`, caps at `MAX_SPLIT_CHUNKS = 100_000`, then `split_points_to_ranges`. `run_bytes` is used for decompressed buffers and for adapters that hold `BytesIO` data.
 
-## 9. Arrow export and filter reapplication (arrow_export.rs:29, engine.rs:289)
+## 9. Arrow export and filter reapplication (arrow_export.rs:29, engine.rs:335)
 
 * `StrColumn` arena plus offsets plus validity is block copied to `StringArray` (two buffers).
-* Numeric builders are dense `Vec<Option<T>>` with `collect`.
+* Numeric builders are `NullableColumn<T>` with `collect`.
 * `apply_compare_filter` only reapplies pure `Compare` and `And` of `Compare` via Arrow compute; other trees are no ops because per row is authoritative. This avoids double null semantics and keeps the fast path correct.
 
 ## 10. Small but cumulative
@@ -2315,11 +2330,11 @@ This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBui
 | `ColumnBuilder` variant | Arrow `DataType` | Array type |
 |-------------------------|-----------------|------------|
 | `String(StrColumn)` | `Utf8` | `StringArray` (OffsetBuffer plus Buffer plus NullBuffer) |
-| `Int64(Vec<Option<i64>>)` | `Int64` | `Int64Array` |
-| `Float64(Vec<Option<f64>>)` | `Float64` | `Float64Array` |
-| `Boolean(Vec<Option<bool>>)` | `Boolean` | `BooleanArray` |
-| `Date32(Vec<Option<i32>>)` | `Date32` | `Date32Array` |
-| `Timestamp(TimeUnit, Vec<Option<i64>>)` | `Timestamp(unit, None)` | `PrimitiveArray<TimestampSecondType>` etc. |
+| `Int64(NullableColumn<i64>)` | `Int64` | `Int64Array` |
+| `Float64(NullableColumn<f64>)` | `Float64` | `Float64Array` |
+| `Boolean(NullableColumn<bool>)` | `Boolean` | `BooleanArray` |
+| `Date32(NullableColumn<i32>)` | `Date32` | `Date32Array` |
+| `Timestamp(TimeUnit, NullableColumn<i64>)` | `Timestamp(unit, None)` | `PrimitiveArray<TimestampSecondType>` etc. |
 | `Dictionary { codes, dict, index }` | `Dictionary(Int32, Utf8)` | `DictionaryArray<Int32Type>` with `Int32Array` keys and `StringArray` values |
 
 `arrow_datatype(&self) -> DataType` and `to_arrow_array(&self) -> Result<ArrayRef>` implement the mapping. `Timestamp` branches on `TimeUnit` to the correct `PrimitiveArray` type.
@@ -2328,7 +2343,7 @@ This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBui
 
 * `StrColumn` has `validity: Vec<bool>`. `to_arrow` builds `NullBuffer` only if some validity is false; otherwise `None` (all valid). Offsets still advance by 0 for null entries so `offsets[i]==offsets[i+1]`.
 
-* Numeric and boolean builders are `Vec<Option<T>>`. `collect::<Int64Array>()` etc. preserves nulls.
+* Numeric and boolean builders are `NullableColumn<T>`. `collect::<Int64Array>()` etc. preserves nulls.
 
 * Missing columns in `engines_to_record_batches` become `null_array(&types[name], e.row_count)` (a `NullArray` of the unified type).
 
@@ -2353,7 +2368,7 @@ Capacity: `with_capacity(cap)` reserves `cap+1` offsets and `cap*16` data bytes.
 
 ## Dictionary
 
-`Dictionary { codes: Vec<Option<i32>>, dict: Vec<String>, index: HashMap<String,i32> }`
+`Dictionary { codes: NullableColumn<i32>, dict: Vec<String>, index: HashMap<String,i32> }`
 
 * `dict_code` does `if let Some(&code) = index.get(v) { return code }` else `dict.push`, `index.insert`.
 
@@ -2742,10 +2757,11 @@ let batches = pipeline.read_bytes_stream(data_bytes, MemoryBudget::new(64 * 1024
 ### Low level direct TableBuilder  (CORE)
 
 ```rust
+use std::sync::Arc;
 use rypipe_core::{ExecutionPlan, TableBuilder, ColumnarSink, Value}; // (CORE)
 use std::path::Path; // (CORE)
 
-let plan = ExecutionPlan::new().drop("internal_id"); // (CORE)
+let plan: Arc<ExecutionPlan> = Arc::new(ExecutionPlan::new().drop("internal_id")); // (CORE)
 let input = rypipe_core::InputBuffer::open(Path::new("data.log"), false, false)?; // (CORE) handles mmap plus gzip/zstd/lz4
 let mut builder = TableBuilder::with_plan(1024, plan); // (CORE)
 LogParser.validate(input.as_slice())?; // (ADAPTER BOUND)
@@ -3467,13 +3483,14 @@ fn main() -> rypipe_core::Result<()> {
 If you prefer to control every step, use `TableBuilder` directly:
 
 ```rust
+use std::sync::Arc;
 use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
 use my_csv_adapter::{CsvDecoder, CsvSplitter}; // separate adapter crate
 use std::path::Path;
 
 fn main() -> rypipe_core::Result<()> {
     let input = InputBuffer::open(Path::new("data.csv"), false, false)?;
-    let mut builder = TableBuilder::with_plan(1024, ExecutionPlan::new());
+    let mut builder = TableBuilder::with_plan(1024, Arc::new(ExecutionPlan::new()));
 
     let decoder = CsvDecoder {
         header: vec!["id".into(), "status".into(), "amount".into()],

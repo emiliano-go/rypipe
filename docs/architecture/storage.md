@@ -7,11 +7,11 @@ This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBui
 | `ColumnBuilder` variant | Arrow `DataType` | Array type |
 |-------------------------|-----------------|------------|
 | `String(StrColumn)` | `Utf8` | `StringArray` (OffsetBuffer plus Buffer plus NullBuffer) |
-| `Int64(Vec<Option<i64>>)` | `Int64` | `Int64Array` |
-| `Float64(Vec<Option<f64>>)` | `Float64` | `Float64Array` |
-| `Boolean(Vec<Option<bool>>)` | `Boolean` | `BooleanArray` |
-| `Date32(Vec<Option<i32>>)` | `Date32` | `Date32Array` |
-| `Timestamp(TimeUnit, Vec<Option<i64>>)` | `Timestamp(unit, None)` | `PrimitiveArray<TimestampSecondType>` etc. |
+| `Int64(NullableColumn<i64>)` | `Int64` | `Int64Array` |
+| `Float64(NullableColumn<f64>)` | `Float64` | `Float64Array` |
+| `Boolean(NullableColumn<bool>)` | `Boolean` | `BooleanArray` |
+| `Date32(NullableColumn<i32>)` | `Date32` | `Date32Array` |
+| `Timestamp(TimeUnit, NullableColumn<i64>)` | `Timestamp(unit, None)` | `PrimitiveArray<TimestampSecondType>` etc. |
 | `Dictionary { codes, dict, index }` | `Dictionary(Int32, Utf8)` | `DictionaryArray<Int32Type>` with `Int32Array` keys and `StringArray` values |
 
 `arrow_datatype(&self) -> DataType` and `to_arrow_array(&self) -> Result<ArrayRef>` implement the mapping. `Timestamp` branches on `TimeUnit` to the correct `PrimitiveArray` type.
@@ -20,7 +20,7 @@ This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBui
 
 * `StrColumn` has `validity: Vec<bool>`. `to_arrow` builds `NullBuffer` only if some validity is false; otherwise `None` (all valid). Offsets still advance by 0 for null entries so `offsets[i]==offsets[i+1]`.
 
-* Numeric and boolean builders are `Vec<Option<T>>`. `collect::<Int64Array>()` etc. preserves nulls.
+* Numeric and boolean builders are `NullableColumn<T>`. `collect::<Int64Array>()` etc. preserves nulls.
 
 * Missing columns in `engines_to_record_batches` become `null_array(&types[name], e.row_count)` (a `NullArray` of the unified type).
 
@@ -45,7 +45,7 @@ Capacity: `with_capacity(cap)` reserves `cap+1` offsets and `cap*16` data bytes.
 
 ## Dictionary
 
-`Dictionary { codes: Vec<Option<i32>>, dict: Vec<String>, index: HashMap<String,i32> }`
+`Dictionary { codes: NullableColumn<i32>, dict: Vec<String>, index: HashMap<String,i32> }`
 
 * `dict_code` does `if let Some(&code) = index.get(v) { return code }` else `dict.push`, `index.insert`.
 

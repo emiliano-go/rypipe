@@ -49,8 +49,8 @@ input bytes  [ADAPTER or CORE decides the source; InputBuffer below]
 |  (ColumnarSink)     |  columns: Vec<ColumnBuilder> (CORE)
 |                     |  field_index: HashMap<String,usize> (CORE)
 |                     |  column_order: Vec<String> (CORE)
-|                     |  row_dirty: Vec<bool> (CORE)
-|                     |  plan: ExecutionPlan (CORE)
+|                     |  row_dirty: Vec<u64> (CORE)
+|                     |  plan: Arc<ExecutionPlan> (CORE)
 +----------+----------+
            | RecordBatch  (CORE) Arrow
            v
@@ -80,7 +80,7 @@ All format specific code is **ADAPTER BOUND** (separate crates, not in this repo
 | `decoder` | `decoder.rs` | CORE (traits) / ADAPTER BOUND (impls) | Traits `Splitter`, `RecordParser`, `ColumnarSink` (with `resolve` and `put_field_resolved`) plus `split_points_to_ranges`; adapters implement the first two, core implements the third |
 | `pipeline` | `pipeline.rs` | CORE | `Pipeline<S,P>` wiring `Splitter` plus `RecordParser` to `TableBuilder` with `read_bytes`, `read_bytes_par`, `read_bytes_stream`, `read_path`, `read_path_par`, `read_path_stream` |
 | `parallel` | `parallel.rs` | CORE | `ParallelExecutor::parse` with rayon, fast path vs merge path, `schemas_consistent` |
-| `bounded` | `bounded.rs` | CORE | `BoundedExecutor` plus `MemoryBudget`, `run`, `run_bytes`, `run_mapped`, `plan_chunks`, `MAX_SPLIT_CHUNKS = 256` |
+| `bounded` | `bounded.rs` | CORE | `BoundedExecutor` plus `MemoryBudget`, `run`, `run_bytes`, `run_mapped`, `plan_chunks`, `MAX_SPLIT_CHUNKS = 100_000` |
 | `input` | `input.rs` | CORE | `InputBuffer` (`Mmap` or `Owned`), `MmapHandle`, magic byte detection for `gzip` (`1f 8b`), `zstd` (`28 b5 2f fd`), `lz4` frame (`04 22 4d 18`), transparent decompression |
 | `merge` | `merge.rs` | CORE | `TableBuilder::extend`, `engines_to_record_batches` with variant unification and promotion |
 | `arrow_export` | `arrow_export.rs` | CORE | `null_array`, `apply_compare_filter` (pure Compare and And only; other trees are no ops), `compare_columns`, `is_numeric` |
@@ -118,7 +118,7 @@ All format specific code is **ADAPTER BOUND** (separate crates, not in this repo
 
 ## State and ownership
 
-`TableBuilder` owns three parallel structures: `columns: Vec<ColumnBuilder>` (dense storage), `field_index: HashMap<String, usize>` (name to Vec index), and `column_order: Vec<String>` (output order). A fourth vector `row_dirty: Vec<bool>` tracks which columns were touched in the current row (see [Engine](./engine.md) and [Optimizations](./optimizations.md)). All are cleared together in `reset` and kept in sync in `take_column` (swap_remove with index patching) and `extend`.
+`TableBuilder` owns three parallel structures: `columns: Vec<ColumnBuilder>` (dense storage), `field_index: HashMap<String, usize>` (name to Vec index), and `column_order: Vec<String>` (output order). A fourth vector `row_dirty: Vec<u64>` bitmask tracks which columns were touched in the current row (see [Engine](./engine.md) and [Optimizations](./optimizations.md)). All are cleared together in `reset` and kept in sync in `take_column` (swap_remove with index patching) and `extend`.
 
 `Pipeline<S,P>` is `Clone` where `S: Splitter + Clone` and `P: RecordParser + Clone`, so the same pipeline can be reused across files and execution modes.
 
