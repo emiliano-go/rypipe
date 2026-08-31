@@ -52,7 +52,10 @@ fn complete_frame_ends(bytes: &[u8]) -> Vec<usize> {
         let Some(body_len) = decimal(&bytes[header_start..colon]) else {
             break;
         };
-        let Some(end) = colon.checked_add(1).and_then(|start| start.checked_add(body_len)) else {
+        let Some(end) = colon
+            .checked_add(1)
+            .and_then(|start| start.checked_add(body_len))
+        else {
             break;
         };
         if end > bytes.len() {
@@ -105,10 +108,13 @@ impl RecordParser for FrameParser {
         let mut cursor = 0;
         while cursor < bytes.len() {
             if bytes[cursor] != b'@' {
-                return Err(Error::Plan(format!("frame at byte {cursor} must start with '@'")));
+                return Err(Error::Plan(format!(
+                    "frame at byte {cursor} must start with '@'"
+                )));
             }
             let header_start = cursor + 1;
-            let Some(colon_rel) = bytes[header_start..].iter().position(|&byte| byte == b':') else {
+            let Some(colon_rel) = bytes[header_start..].iter().position(|&byte| byte == b':')
+            else {
                 // The final header itself is incomplete, so it cannot form a row.
                 break;
             };
@@ -118,7 +124,9 @@ impl RecordParser for FrameParser {
             })?;
             let body_start = colon + 1;
             let Some(end) = body_start.checked_add(body_len) else {
-                return Err(Error::Plan(format!("frame at byte {cursor} length overflows")));
+                return Err(Error::Plan(format!(
+                    "frame at byte {cursor} length overflows"
+                )));
             };
             if end > bytes.len() {
                 // A trailing partial frame is adapter-owned incomplete input and
@@ -144,7 +152,9 @@ impl RecordParser for FrameParser {
                 }
             }
             let (Some(id), Some(note)) = (id, note) else {
-                return Err(Error::Plan(format!("frame at byte {cursor} is missing a required field")));
+                return Err(Error::Plan(format!(
+                    "frame at byte {cursor} is missing a required field"
+                )));
             };
 
             sink.begin_row();
@@ -203,7 +213,9 @@ fn expected(records: &[(usize, String)]) -> Vec<(String, String)> {
 
 fn assert_in_memory_modes(bytes: &[u8], expected_rows: &[(String, String)]) {
     let pipeline = pipeline();
-    let single = pipeline.read_bytes(bytes).expect("single parse must succeed");
+    let single = pipeline
+        .read_bytes(bytes)
+        .expect("single parse must succeed");
     assert_eq!(rows(&[single]), expected_rows);
 
     for chunks in [1, 2, 3, 7] {
@@ -237,7 +249,10 @@ fn safe_partitions_preserve_frames_across_in_memory_modes() {
     let records = vec![
         (1, "short".to_string()),
         (2, "contains a newline\nand remains one frame".to_string()),
-        (3, "longer value used to force an internal partition boundary".to_string()),
+        (
+            3,
+            "longer value used to force an internal partition boundary".to_string(),
+        ),
         (4, "final".to_string()),
     ];
     let bytes = frames(&records);
@@ -246,7 +261,10 @@ fn safe_partitions_preserve_frames_across_in_memory_modes() {
 
 #[test]
 fn partial_trailing_frame_is_never_committed() {
-    let records = vec![(1, "complete".to_string()), (2, "also complete".to_string())];
+    let records = vec![
+        (1, "complete".to_string()),
+        (2, "also complete".to_string()),
+    ];
     let mut bytes = frames(&records);
     bytes.extend(b"@1000:id=3|note=this frame ends before its declared body");
 
@@ -275,7 +293,10 @@ fn malformed_complete_frame_returns_an_error_in_every_in_memory_mode() {
     let pipeline = pipeline();
 
     assert!(matches!(pipeline.read_bytes(bytes), Err(Error::Plan(_))));
-    assert!(matches!(pipeline.read_bytes_par(bytes, 3), Err(Error::Plan(_))));
+    assert!(matches!(
+        pipeline.read_bytes_par(bytes, 3),
+        Err(Error::Plan(_))
+    ));
     assert!(matches!(
         pipeline.read_bytes_stream(bytes, MemoryBudget::new(32)),
         Err(Error::Plan(_))

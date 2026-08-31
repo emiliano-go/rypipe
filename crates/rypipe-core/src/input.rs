@@ -90,15 +90,13 @@ fn decompress(path: &Path, codec: Compression) -> Result<Vec<u8>> {
         #[cfg(feature = "zstd")]
         Compression::Zstd => {
             let mut out = Vec::new();
-            zstd::stream::read::Decoder::new(std::fs::File::open(path)?)?
-                .read_to_end(&mut out)?;
+            zstd::stream::read::Decoder::new(std::fs::File::open(path)?)?.read_to_end(&mut out)?;
             Ok(out)
         }
         #[cfg(feature = "lz4")]
         Compression::Lz4 => {
             let mut out = Vec::new();
-            lz4_flex::frame::FrameDecoder::new(std::fs::File::open(path)?)
-                .read_to_end(&mut out)?;
+            lz4_flex::frame::FrameDecoder::new(std::fs::File::open(path)?).read_to_end(&mut out)?;
             Ok(out)
         }
         // Only reachable when a codec's cargo feature is disabled; detection

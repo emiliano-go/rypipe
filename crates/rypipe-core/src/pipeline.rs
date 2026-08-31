@@ -17,8 +17,8 @@
 //! let batch = pipeline.read_path("data.txt", false, false).unwrap();
 //! ```
 
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 
@@ -67,7 +67,8 @@ where
             .splitter
             .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
             .max(512);
-        let mut engine = TableBuilder::with_plan((bytes.len() / est).max(64), Arc::clone(&self.plan));
+        let mut engine =
+            TableBuilder::with_plan((bytes.len() / est).max(64), Arc::clone(&self.plan));
         self.parser.validate(bytes)?;
         self.parser.parse_chunk_generic(bytes, &mut engine)?;
         engine.finish()
@@ -97,7 +98,12 @@ where
         bytes: &[u8],
         budget: MemoryBudget,
     ) -> Result<Vec<RecordBatch>> {
-        BoundedExecutor::new(budget).run_bytes(bytes, &self.splitter, self.parser.clone(), Arc::clone(&self.plan))
+        BoundedExecutor::new(budget).run_bytes(
+            bytes,
+            &self.splitter,
+            self.parser.clone(),
+            Arc::clone(&self.plan),
+        )
     }
 
     /// Parse a file into a single `RecordBatch`.

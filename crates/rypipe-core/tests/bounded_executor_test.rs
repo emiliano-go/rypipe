@@ -1,10 +1,10 @@
 //! Sanity tests for `BoundedExecutor`.
 
-use std::sync::Arc;
 use arrow::array::{Array, AsArray};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rypipe_core::{
     bounded::{BoundedExecutor, MemoryBudget},

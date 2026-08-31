@@ -1,10 +1,10 @@
 #[cfg(feature = "mmap")]
 use std::fs::File;
-use std::sync::Arc;
 #[cfg(feature = "mmap")]
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 
@@ -118,7 +118,9 @@ impl BoundedExecutor {
                 }
                 let n = rows_per_batch.min(batch_engine.num_rows());
                 // If bytes_used is the trigger, estimate a smaller n to stay under budget
-                let n = if batch_engine.bytes_used() >= self.budget.bytes() && batch_engine.num_rows() > 1 {
+                let n = if batch_engine.bytes_used() >= self.budget.bytes()
+                    && batch_engine.num_rows() > 1
+                {
                     let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
                         / batch_engine.bytes_used() as f64) as usize;
                     est.clamp(1, n)
@@ -280,7 +282,9 @@ impl BoundedExecutor {
                 }
                 let n = rows_per_batch.min(batch_engine.num_rows());
                 // If bytes_used is the trigger, estimate a smaller n to stay under budget
-                let n = if batch_engine.bytes_used() >= self.budget.bytes() && batch_engine.num_rows() > 1 {
+                let n = if batch_engine.bytes_used() >= self.budget.bytes()
+                    && batch_engine.num_rows() > 1
+                {
                     let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
                         / batch_engine.bytes_used() as f64) as usize;
                     est.clamp(1, n)

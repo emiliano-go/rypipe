@@ -59,7 +59,9 @@ impl StreamingBatchIterator {
         let (sender, receiver) = sync_channel(1);
         let handle = thread::spawn(move || {
             let executor = BoundedExecutor::new(budget);
-            let mut consumer = ChannelConsumer { sender: sender.clone() };
+            let mut consumer = ChannelConsumer {
+                sender: sender.clone(),
+            };
             let res = executor.run_stream(&path, &splitter, parser, plan, prefault, &mut consumer);
             // If run_stream fails, send the error.
             if let Err(e) = res {
@@ -90,7 +92,9 @@ impl StreamingBatchIterator {
         let (sender, receiver) = sync_channel(1);
         let handle = thread::spawn(move || {
             let executor = BoundedExecutor::new(budget);
-            let mut consumer = ChannelConsumer { sender: sender.clone() };
+            let mut consumer = ChannelConsumer {
+                sender: sender.clone(),
+            };
             let res = executor.run_bytes_stream(&bytes, &splitter, parser, plan, &mut consumer);
             if let Err(e) = res {
                 let _ = sender.send(Err(e));
@@ -233,7 +237,12 @@ mod tests {
         let data = b"A=1 B=2\nA=3 B=4\n";
         let budget = MemoryBudget::new(1024);
         let expected = BoundedExecutor::new(budget)
-            .run_bytes(data, &LineSplitter, LineParser, Arc::new(ExecutionPlan::new()))
+            .run_bytes(
+                data,
+                &LineSplitter,
+                LineParser,
+                Arc::new(ExecutionPlan::new()),
+            )
             .unwrap();
         let expected_rows: usize = expected.iter().map(|b| b.num_rows()).sum();
 

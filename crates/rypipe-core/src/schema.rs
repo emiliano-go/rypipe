@@ -87,10 +87,7 @@ impl FrozenSchema {
 
     /// Build from discovered names (file order, then document order within
     /// a window).  Applies the execution plan's renames and drops.
-    pub fn from_discovered(
-        names_in_order: &[String],
-        plan: &ExecutionPlan,
-    ) -> Self {
+    pub fn from_discovered(names_in_order: &[String], plan: &ExecutionPlan) -> Self {
         let mut index = FxHashMap::default();
         let mut out_names = Vec::new();
         let mut types = Vec::new();
