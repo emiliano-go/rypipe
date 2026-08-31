@@ -57,8 +57,8 @@ impl AllocStats {
             reallocs: self.reallocs - before.reallocs,
             size_hist: {
                 let mut h = [0u64; 64];
-                for i in 0..64 {
-                    h[i] = self.size_hist[i] - before.size_hist[i];
+                for (i, slot) in h.iter_mut().enumerate() {
+                    *slot = self.size_hist[i] - before.size_hist[i];
                 }
                 h
             },

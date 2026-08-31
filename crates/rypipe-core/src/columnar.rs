@@ -32,7 +32,7 @@ impl ValidityBitmap {
     }
 
     fn push(&mut self, valid: bool) {
-        if self.len % 8 == 0 {
+        if self.len.is_multiple_of(8) {
             self.bits.push(0);
         }
         if valid {
@@ -54,7 +54,7 @@ impl ValidityBitmap {
             self.null_count -= 1;
         }
         *byte &= !(1 << (self.len % 8));
-        if self.len % 8 == 0 {
+        if self.len.is_multiple_of(8) {
             self.bits.pop();
         }
         Some(valid)
@@ -75,11 +75,11 @@ impl ValidityBitmap {
     }
 
     fn append(&mut self, other: &Self) {
-        if self.len % 8 == 0 {
+        if self.len.is_multiple_of(8) {
             self.bits.extend_from_slice(&other.bits);
             self.len += other.len;
             self.null_count += other.null_count;
-            if self.len % 8 != 0 {
+            if !self.len.is_multiple_of(8) {
                 let mask = (1u8 << (self.len % 8)) - 1;
                 if let Some(last) = self.bits.last_mut() {
                     *last &= mask;
@@ -312,6 +312,10 @@ impl StrColumn {
     /// Convert to Arrow StringArray by moving buffers (zero-copy).
     /// Takes `&mut self` so we can `std::mem::take` the Vecs and preserve
     /// their capacity for reuse by the streaming path.
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "takes &mut self for zero-copy mem::take"
+    )]
     fn to_arrow(&mut self) -> Result<ArrayRef> {
         use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
         // Move the Vecs out, leaving zero-capacity replacements.
@@ -913,6 +917,10 @@ impl ColumnBuilder {
     /// Build a native Arrow array from the column builder.
     /// Build a native Arrow array from the column builder.
     /// Takes `&mut self` to move buffers instead of copying (zero-copy export).
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "takes &mut self for zero-copy mem::take"
+    )]
     pub(crate) fn to_arrow_array(&mut self) -> Result<ArrayRef> {
         // Handle empty columns (after mem::take from a previous export).
         if self.len() == 0 {

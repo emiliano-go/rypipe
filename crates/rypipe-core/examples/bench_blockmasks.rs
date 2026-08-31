@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-const DELIMS: &[u8] = &[b'<', b'>', b'"', b'\'', b'='];
+const DELIMS: &[u8] = b"<>\"'=";
 const ITERS: usize = 500_000;
 
 fn main() {

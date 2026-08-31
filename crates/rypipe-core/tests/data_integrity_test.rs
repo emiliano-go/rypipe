@@ -104,6 +104,7 @@ impl RecordParser for LineParserResolved {
 fn pipeline() -> Pipeline<LineSplitter, LineParser> {
     Pipeline::new(LineSplitter, LineParser)
 }
+#[expect(dead_code)]
 fn pipeline_resolved() -> Pipeline<LineSplitter, LineParserResolved> {
     Pipeline::new(LineSplitter, LineParserResolved)
 }
@@ -221,7 +222,7 @@ fn single_row_no_data_loss() {
     assert_eq!(single.num_rows(), 1);
     assert_eq!(single.num_columns(), 3);
     let par = p.read_bytes_par(data, 4).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     let stream = p.read_bytes_stream(data, MemoryBudget::new(64)).unwrap();
     assert_batches_equal(&[single], &stream);
 }
@@ -246,7 +247,7 @@ fn ragged_columns_no_data_loss() {
 
     let par = p.read_bytes_par(data, 3).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -265,7 +266,7 @@ fn duplicate_field_last_write_wins_no_data_loss() {
 
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(64)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -283,7 +284,7 @@ fn many_rows_few_columns_no_data_loss() {
     assert_eq!(single.num_rows(), 5000);
     let par = p.read_bytes_par(bytes, 8).unwrap();
     let stream = p.read_bytes_stream(bytes, MemoryBudget::new(4096)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -312,7 +313,7 @@ fn many_columns_no_data_loss() {
     assert_eq!(single.num_columns(), 50);
     let par = p.read_bytes_par(bytes, 4).unwrap();
     let stream = p.read_bytes_stream(bytes, MemoryBudget::new(8192)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -333,7 +334,7 @@ fn plan_rename_no_data_loss() {
     assert_eq!(single.num_rows(), 2);
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -347,7 +348,7 @@ fn plan_drop_no_data_loss() {
     assert_eq!(single.num_rows(), 2);
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -369,7 +370,7 @@ fn plan_typed_columns_no_data_loss() {
     assert!(i.is_null(1));
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -382,7 +383,7 @@ fn plan_filter_no_data_loss() {
     assert_eq!(single.num_rows(), 2);
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -414,7 +415,7 @@ fn plan_filter_and_or_not_no_data_loss() {
     assert_eq!(single.num_rows(), 3);
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -430,7 +431,7 @@ fn plan_dictionary_no_data_loss() {
     assert_eq!(single.num_rows(), 500);
     let par = p.read_bytes_par(bytes, 4).unwrap();
     let stream = p.read_bytes_stream(bytes, MemoryBudget::new(1024)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -451,7 +452,7 @@ fn plan_schema_order_no_data_loss() {
     );
     let par = p.read_bytes_par(data, 2).unwrap();
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -483,7 +484,10 @@ fn resolve_put_field_resolved_identical_to_put_field() {
 
     let n_single = normal.read_bytes(bytes).unwrap();
     let r_single = resolved.read_bytes(bytes).unwrap();
-    assert_batches_equal(&[n_single.clone()], &[r_single.clone()]);
+    assert_batches_equal(
+        std::slice::from_ref(&n_single),
+        std::slice::from_ref(&r_single),
+    );
 
     let n_par = normal.read_bytes_par(bytes, 4).unwrap();
     let r_par = resolved.read_bytes_par(bytes, 4).unwrap();
@@ -498,7 +502,7 @@ fn resolve_put_field_resolved_identical_to_put_field() {
     assert_batches_equal(&n_stream, &r_stream);
 
     // Also cross-check normal single vs resolved parallel/stream
-    assert_batches_equal(&[n_single.clone()], &r_par);
+    assert_batches_equal(std::slice::from_ref(&n_single), &r_par);
     assert_batches_equal(&[n_single], &r_stream);
 }
 
@@ -525,7 +529,7 @@ fn large_dataset_all_modes_agree() {
     assert_eq!(single.num_columns(), cols);
     let par = p.read_bytes_par(bytes, 8).unwrap();
     let stream = p.read_bytes_stream(bytes, MemoryBudget::new(8192)).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
 
@@ -549,7 +553,10 @@ fn file_path_apis_match_bytes_apis() {
     let p = pipeline();
     let via_bytes = p.read_bytes(&bytes).unwrap();
     let via_path = p.read_path(&path, false, false).unwrap();
-    assert_batches_equal(&[via_bytes.clone()], &[via_path.clone()]);
+    assert_batches_equal(
+        std::slice::from_ref(&via_bytes),
+        std::slice::from_ref(&via_path),
+    );
 
     let via_bytes_par = p.read_bytes_par(&bytes, 4).unwrap();
     let via_path_par = p.read_path_par(&path, 4, false, false).unwrap();
@@ -577,7 +584,8 @@ fn direct_table_builder_extend_preserves_all_rows_and_columns() {
         t1.put_field(k, Value::Str(v));
     }
     t1.end_row();
-    for (k, v) in [("A", "3")] {
+    {
+        let (k, v) = ("A", "3");
         t1.put_field(k, Value::Str(v));
     }
     t1.end_row();
