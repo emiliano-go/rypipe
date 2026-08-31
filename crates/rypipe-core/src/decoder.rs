@@ -47,6 +47,35 @@ pub trait RecordParser: Send + Sync {
 pub trait ColumnarSink {
     fn begin_row(&mut self);
     fn put_field(&mut self, name: &str, value: Value<'_>);
+
+    /// Push a complete row.
+    ///
+    /// The default preserves event-oriented semantics. Sinks may override this
+    /// to optimize row handling while preserving filtering and duplicate-field
+    /// behavior.
+    #[inline]
+    fn put_row(&mut self, fields: &[(&str, Value<'_>)]) {
+        for &(name, value) in fields {
+            self.put_field(name, value);
+        }
+    }
+
+    /// Resolve a valid raw name without allocating a UTF-8 `String`.
+    #[inline]
+    fn resolve_raw<'a>(&'a self, raw_name: &'a [u8]) -> Option<&'a str> {
+        std::str::from_utf8(raw_name)
+            .ok()
+            .and_then(|name| self.resolve(name))
+    }
+
+    /// Push a value for a field whose name is still in its raw byte form.
+    #[inline]
+    fn resolve_and_put_raw(&mut self, raw_name: &[u8], value: Value<'_>) {
+        if let Ok(name) = std::str::from_utf8(raw_name) {
+            self.resolve_and_put(name, value);
+        }
+    }
+
     fn end_row(&mut self);
 
     /// Return `false` to signal that the engine will drop this field.

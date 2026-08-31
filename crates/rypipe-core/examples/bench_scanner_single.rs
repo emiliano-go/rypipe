@@ -68,9 +68,11 @@ impl RecordParser for TsvParser {
                     if sink.needs_resolve() && !sink.wants(k) {
                         continue;
                     }
-                    if sink.needs_value() {
-                        sink.put_field(k, Value::Str(v));
-                    }
+                    sink.put_field(k, if sink.needs_value() {
+                        Value::Str(v)
+                    } else {
+                        Value::Null
+                    });
                 }
             }
             sink.end_row();

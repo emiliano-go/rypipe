@@ -491,3 +491,100 @@ impl rypipe_core::Splitter for LineSplitter {
         (sample.len() / lines).max(1)
     }
 }
+
+/// Compare between two Date32 columns: native-typed day comparison.
+#[test]
+fn test_date32_compare_filter() {
+    use arrow::array::Date32Array;
+
+    let mut plan = ExecutionPlan::new();
+    plan.field_types.insert("A".to_string(), FieldType::Date32);
+    plan.field_types.insert("B".to_string(), FieldType::Date32);
+    plan.filter = Some(FilterPredicate::Compare {
+        field_a: "A".to_string(),
+        op: CompareOp::Gt,
+        field_b: "B".to_string(),
+    });
+
+    // 2024-03-01 > 2024-01-15 → keep
+    // 2024-01-10 > 2024-01-15 → drop
+    // 2024-12-31 > 2024-06-15 → keep
+    let batch = parse_bytes(
+        b"A=2024-03-01 B=2024-01-15\nA=2024-01-10 B=2024-01-15\nA=2024-12-31 B=2024-06-15\n",
+        plan,
+    );
+    assert_eq!(batch.num_rows(), 2);
+    let a = batch
+        .column_by_name("A")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Date32Array>()
+        .unwrap();
+    // Both kept dates (2024-03-01, 2024-12-31) are after 2024-01-15.
+    let day_2024_01_15 = 19737i32;
+    assert!(a.value(0) > day_2024_01_15);
+    assert!(a.value(1) > day_2024_01_15);
+}
+
+/// Cross-type Compare (Date32 vs String) rejects all rows.
+#[test]
+fn test_date32_vs_string_compare_fails() {
+    let mut plan = ExecutionPlan::new();
+    plan.field_types.insert("A".to_string(), FieldType::Date32);
+    // B stays String
+    plan.filter = Some(FilterPredicate::Compare {
+        field_a: "A".to_string(),
+        op: CompareOp::Gt,
+        field_b: "B".to_string(),
+    });
+
+    let batch = parse_bytes(b"A=2024-01-15 B=2024-01-10\nA=2024-06-01 B=2024-01-01\n", plan);
+    assert_eq!(batch.num_rows(), 0);
+}
+
+/// Cross-type Compare (Int64 vs Float64) applies numeric promotion.
+#[test]
+fn test_int64_vs_float64_compare_promotion() {
+    let mut plan = ExecutionPlan::new();
+    plan.field_types.insert("A".to_string(), FieldType::Int64);
+    plan.field_types.insert("B".to_string(), FieldType::Float64);
+    plan.filter = Some(FilterPredicate::Compare {
+        field_a: "A".to_string(),
+        op: CompareOp::Le,
+        field_b: "B".to_string(),
+    });
+
+    // 5 <= 5.0 → keep, 10 <= 3.0 → drop, 1 <= 2.5 → keep
+    let batch = parse_bytes(b"A=5 B=5.0\nA=10 B=3.0\nA=1 B=2.5\n", plan);
+    assert_eq!(batch.num_rows(), 2);
+}
+
+/// All Compare ops (Gt, Lt, Ge, Le, Eq, Ne) on typed columns.
+#[test]
+fn test_all_compare_ops_typed() {
+    let data = b"A=1 B=2\nA=2 B=2\nA=3 B=2\n";
+
+    for (op, expected) in [
+        (CompareOp::Gt, 1),  // 3 > 2
+        (CompareOp::Lt, 1),  // 1 < 2
+        (CompareOp::Ge, 2),  // 2 >= 2, 3 >= 2
+        (CompareOp::Le, 2),  // 1 <= 2, 2 <= 2
+        (CompareOp::Eq, 1),  // 2 == 2
+        (CompareOp::Ne, 2),  // 1 != 2, 3 != 2
+    ] {
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("A".to_string(), FieldType::Int64);
+        plan.field_types.insert("B".to_string(), FieldType::Int64);
+        plan.filter = Some(FilterPredicate::Compare {
+            field_a: "A".to_string(),
+            op,
+            field_b: "B".to_string(),
+        });
+        let batch = parse_bytes(data, plan);
+        assert_eq!(
+            batch.num_rows(),
+            expected,
+            "op={op:?} should keep {expected} rows"
+        );
+    }
+}

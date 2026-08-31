@@ -37,7 +37,8 @@ def run_benchmark() -> list[dict[str, float | str]]:
     # Parse lines like:
     # single-thread               1.591s     5000000 rows   3142971 rows/s  188.5 MB/s  RSS  320 MB
     pattern = re.compile(
-        r"^(?P<name>.+?)\s+(?P<time>\d+\.\d+)s\s+(?P<rows>\d+) rows\s+"
+        r"^(?P<name>.+?)\s+(?P<time>\d+\.\d+)s(?:\s+median)?\s+"
+        r"(?:\([^)]*\)\s+)?(?P<rows>\d+) rows\s+"
         r"(?P<rows_per_s>\d+) rows/s\s+(?P<mb_per_s>\d+\.\d+) MB/s\s+"
         r"RSS\s+(?P<memory>\S+)"
     )

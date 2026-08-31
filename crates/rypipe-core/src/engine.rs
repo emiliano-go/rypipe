@@ -28,10 +28,9 @@ use rustc_hash::FxHashMap as HashMap;
 
 use smallvec::SmallVec;
 
-
 use crate::columnar::ColumnBuilder;
 use crate::decoder::ColumnarSink;
-use crate::plan::{ExecutionPlan, FilterPredicate};
+use crate::plan::{ExecutionPlan, FieldType, FilterPredicate};
 use crate::value::Value;
 use crate::Result;
 
@@ -174,7 +173,8 @@ impl TableBuilder {
             let ty = schema.column_types()[slot].clone();
             let col = ColumnBuilder::with_capacity(self.estimated_rows, &ty);
             self.columns.push(col);
-            self.field_index.insert(name_str.to_string(), self.columns.len() - 1);
+            self.field_index
+                .insert(name_str.to_string(), self.columns.len() - 1);
             self.column_order.push(name_str.to_string());
         }
         // Resize row_dirty bitmask to cover all columns.
@@ -230,11 +230,17 @@ impl TableBuilder {
                 Some(Box::new(RowBuffer {
                     fields: SmallVec::new(),
                     state: PredicateState::Undecided,
-                    predicate_mask: self.row_buf.as_ref().map_or_else(SmallVec::new, |b| b.predicate_mask.clone()),
+                    predicate_mask: self
+                        .row_buf
+                        .as_ref()
+                        .map_or_else(SmallVec::new, |b| b.predicate_mask.clone()),
                     direct: false,
                     predicate_ordinal: None,
                     buffer_worthwhile: true,
-                    pred_names: self.row_buf.as_ref().map_or_else(SmallVec::new, |b| b.pred_names.clone()),
+                    pred_names: self
+                        .row_buf
+                        .as_ref()
+                        .map_or_else(SmallVec::new, |b| b.pred_names.clone()),
                 }))
             } else {
                 None
@@ -268,8 +274,8 @@ impl TableBuilder {
             *w = 0;
         }
         let _ = idx; // suppress unused warning
-        // After removal, columns.len() == old_len; last index = old_len - 1.
-        // swap_remove will move the last element into idx (if not already last).
+                     // After removal, columns.len() == old_len; last index = old_len - 1.
+                     // swap_remove will move the last element into idx (if not already last).
         let last = self.columns.len() - 1;
         let col = if idx == last {
             self.columns.pop().unwrap()
@@ -277,12 +283,15 @@ impl TableBuilder {
             let col = self.columns.swap_remove(idx);
             // The element that was at `last` is now at `idx`; fix its map entry.
             let old_last = self.columns.len(); // == last, new len after pop/swap
-            // Find the key that pointed to old_last and repoint it to idx.
-            // We must not borrow field_index mutably while iterating, so clone the key first.
-            let moved_name = self
-                .field_index
-                .iter()
-                .find_map(|(k, &v)| if v == old_last { Some(k.clone()) } else { None });
+                                               // Find the key that pointed to old_last and repoint it to idx.
+                                               // We must not borrow field_index mutably while iterating, so clone the key first.
+            let moved_name = self.field_index.iter().find_map(|(k, &v)| {
+                if v == old_last {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            });
             if let Some(k) = moved_name {
                 self.field_index.insert(k, idx);
             }
@@ -305,11 +314,14 @@ impl TableBuilder {
 
     /// Diagnostic: (name, bytes_used, bytes_capacity) for each column.
     pub fn column_diagnostics(&self) -> Vec<(String, usize, usize)> {
-        self.column_order.iter().map(|name| {
-            let idx = self.field_index[name];
-            let col = &self.columns[idx];
-            (name.clone(), col.bytes_used(), col.capacity_bytes())
-        }).collect()
+        self.column_order
+            .iter()
+            .map(|name| {
+                let idx = self.field_index[name];
+                let col = &self.columns[idx];
+                (name.clone(), col.bytes_used(), col.capacity_bytes())
+            })
+            .collect()
     }
 
     /// The estimated_rows capacity hint passed to with_plan.
@@ -329,7 +341,9 @@ impl TableBuilder {
         self.columns.clear();
         self.field_index.clear();
         self.column_order.clear();
-        for w in &mut self.row_dirty { *w = 0; }
+        for w in &mut self.row_dirty {
+            *w = 0;
+        }
         self.row_count = 0;
         if let Some(ref mut buf) = self.row_buf {
             buf.fields.clear();
@@ -553,7 +567,8 @@ impl TableBuilder {
         let full_words = ncols / 64;
         let rem_bits = ncols % 64;
         let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
-            && (rem_bits == 0 || self.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem_bits) - 1);
+            && (rem_bits == 0
+                || self.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem_bits) - 1);
         if is_full {
             for w in &mut self.row_dirty {
                 *w = 0;
@@ -652,9 +667,10 @@ impl TableBuilder {
         // Phase 3: mask is built but this slot isn't in it. Check if the
         // column name matches any cached predicate name (no filter clone).
         if let Some(col_name) = self.column_order.get(slot as usize) {
-            let is_pred = self.row_buf.as_ref().map_or(false, |buf| {
-                buf.pred_names.iter().any(|n| n == col_name)
-            });
+            let is_pred = self
+                .row_buf
+                .as_ref()
+                .map_or(false, |buf| buf.pred_names.iter().any(|n| n == col_name));
             if is_pred {
                 let buf = self.row_buf.as_mut().unwrap();
                 let word = slot as usize / 64;
@@ -677,7 +693,9 @@ impl TableBuilder {
                 let resolved = plan.resolve_field(field).unwrap_or(field);
                 names.push(resolved.to_string());
             }
-            FilterPredicate::Compare { field_a, field_b, .. } => {
+            FilterPredicate::Compare {
+                field_a, field_b, ..
+            } => {
                 for f in [field_a, field_b] {
                     let resolved = plan.resolve_field(f).unwrap_or(f);
                     names.push(resolved.to_string());
@@ -734,8 +752,12 @@ impl TableBuilder {
         let result = Self::eval_predicate(pred, self);
         #[cfg(any(feature = "profiling", feature = "profile"))]
         match result {
-            PredicateState::Fail => { crate::engine::PREDICATE_FAILS.fetch_add(1, Ordering::Relaxed); }
-            PredicateState::Undecided => { crate::engine::PREDICATE_UNDECIDED.fetch_add(1, Ordering::Relaxed); }
+            PredicateState::Fail => {
+                crate::engine::PREDICATE_FAILS.fetch_add(1, Ordering::Relaxed);
+            }
+            PredicateState::Undecided => {
+                crate::engine::PREDICATE_UNDECIDED.fetch_add(1, Ordering::Relaxed);
+            }
             _ => {}
         }
         result
@@ -743,56 +765,111 @@ impl TableBuilder {
 
     fn eval_predicate(pred: &FilterPredicate, tb: &TableBuilder) -> PredicateState {
         match pred {
-            FilterPredicate::Equal { field, value } => {
-                match tb.get_buffered_str(field) {
-                    Some(actual) => {
-                        if actual == *value {
-                            PredicateState::Pass
-                        } else {
-                            PredicateState::Fail
-                        }
+            FilterPredicate::Equal { field, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if actual == *value {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
                     }
-                    None => PredicateState::Undecided,
                 }
-            }
-            FilterPredicate::NotEqual { field, value } => {
-                match tb.get_buffered_str(field) {
-                    Some(actual) => {
-                        if actual != *value {
-                            PredicateState::Pass
-                        } else {
-                            PredicateState::Fail
-                        }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::NotEqual { field, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if actual != *value {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
                     }
-                    None => PredicateState::Undecided,
                 }
-            }
-            FilterPredicate::Compare { field_a, op, field_b } => {
-                let va = tb.get_buffered_value(field_a);
-                let vb = tb.get_buffered_value(field_b);
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::Compare {
+                field_a,
+                op,
+                field_b,
+            } => {
+                let normalize = |field: &str, value: &Value<'static>| {
+                    let field = tb.plan.resolve_field(field).unwrap_or(field);
+                    match tb.plan.column_type(field) {
+                        FieldType::Int64 => match value {
+                            Value::Str(s) => lexical::parse::<i64, _>(s.as_bytes())
+                                .ok()
+                                .map(Value::Int64),
+                            _ => Some(*value),
+                        },
+                        FieldType::Float64 => match value {
+                            Value::Str(s) => lexical::parse::<f64, _>(s.as_bytes())
+                                .ok()
+                                .map(Value::Float64),
+                            _ => Some(*value),
+                        },
+                        FieldType::Boolean => match value {
+                            Value::Str(s) => s.parse::<bool>().ok().map(Value::Bool),
+                            _ => Some(*value),
+                        },
+                        FieldType::Date32 => match value {
+                            Value::Str(s) => crate::columnar::parse_date32(s).map(Value::Date32),
+                            _ => Some(*value),
+                        },
+                        FieldType::Timestamp(unit) => match value {
+                            Value::Str(s) => {
+                                crate::columnar::parse_timestamp(s, unit).map(Value::Timestamp)
+                            }
+                            _ => Some(*value),
+                        },
+                        FieldType::String | FieldType::Dictionary => Some(*value),
+                    }
+                };
+                let va = tb
+                    .get_buffered_value(field_a)
+                    .and_then(|value| normalize(field_a, value));
+                let vb = tb
+                    .get_buffered_value(field_b)
+                    .and_then(|value| normalize(field_b, value));
                 match (va, vb) {
                     (Some(a), Some(b)) => {
-                        let ord = match (a, b) {
-                            (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => Some(ai.cmp(bi).into()),
-                            (crate::value::Value::Float64(af), crate::value::Value::Float64(bf)) => af.partial_cmp(bf),
-                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => (*ai as f64).partial_cmp(bf),
-                            (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => af.partial_cmp(&(*bi as f64)),
-                            (crate::value::Value::Str(a), crate::value::Value::Str(b)) => Some(a.cmp(b).into()),
-                            (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => Some(a.cmp(b).into()),
-                            _ => {
-                                let av = format!("{:?}", a);
-                                let bv = format!("{:?}", b);
-                                Some(av.cmp(&bv).into())
+                        let ord = match (&a, &b) {
+                            (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => {
+                                Some(ai.cmp(bi).into())
                             }
+                            (
+                                crate::value::Value::Float64(af),
+                                crate::value::Value::Float64(bf),
+                            ) => af.partial_cmp(bf),
+                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => {
+                                (*ai as f64).partial_cmp(bf)
+                            }
+                            (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => {
+                                af.partial_cmp(&(*bi as f64))
+                            }
+                            (crate::value::Value::Str(a), crate::value::Value::Str(b)) => {
+                                Some(a.cmp(b).into())
+                            }
+                            (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => {
+                                Some(a.cmp(b).into())
+                            }
+                            (crate::value::Value::Date32(a), crate::value::Value::Date32(b)) => {
+                                Some(a.cmp(b).into())
+                            }
+                            (
+                                crate::value::Value::Timestamp(a),
+                                crate::value::Value::Timestamp(b),
+                            ) => Some(a.cmp(b).into()),
+                            // Different logical types are not ordered. In
+                            // particular, never compare a typed number to a
+                            // string representation lexicographically.
+                            _ => None,
                         };
-                        let pass = match op {
-                            crate::plan::CompareOp::Gt => ord == Some(std::cmp::Ordering::Greater),
-                            crate::plan::CompareOp::Lt => ord == Some(std::cmp::Ordering::Less),
-                            crate::plan::CompareOp::Ge => ord.map_or(false, |o| o != std::cmp::Ordering::Less),
-                            crate::plan::CompareOp::Le => ord.map_or(false, |o| o != std::cmp::Ordering::Greater),
-                            crate::plan::CompareOp::Eq => ord == Some(std::cmp::Ordering::Equal),
-                            crate::plan::CompareOp::Ne => ord != Some(std::cmp::Ordering::Equal),
-                        };
+                        let pass = ord.is_some_and(|ord| match op {
+                            crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                            crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                            crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                            crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                            crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                            crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                        });
                         if pass {
                             PredicateState::Pass
                         } else {
@@ -993,8 +1070,7 @@ impl TableBuilder {
         let rem_bits = ncols % 64;
         let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
             && (rem_bits == 0
-                || self.row_dirty.get(full_words).copied().unwrap_or(0)
-                    == (1u64 << rem_bits) - 1);
+                || self.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem_bits) - 1);
         if is_full {
             for w in &mut self.row_dirty {
                 *w = 0;
@@ -1023,7 +1099,8 @@ impl Default for TableBuilder {
     }
 }
 
-impl ColumnarSink for TableBuilder {    #[inline]
+impl ColumnarSink for TableBuilder {
+    #[inline]
     fn begin_row(&mut self) {
         if let Some(ref mut buf) = self.row_buf {
             // Adaptive strategy: after at least one committed row, decide
@@ -1034,9 +1111,14 @@ impl ColumnarSink for TableBuilder {    #[inline]
             if buf.predicate_ordinal.is_some() && buf.buffer_worthwhile && self.row_count > 0 {
                 // Use the most accurate column count available. self.columns.len()
                 // is unreliable for sparse files where not all columns exist yet.
-                let ncols = self.frozen.as_ref().map(|f| f.num_columns() as u32)
-                    .or_else(|| (!self.plan.schema_order.is_empty())
-                        .then(|| self.plan.schema_order.len() as u32))
+                let ncols = self
+                    .frozen
+                    .as_ref()
+                    .map(|f| f.num_columns() as u32)
+                    .or_else(|| {
+                        (!self.plan.schema_order.is_empty())
+                            .then(|| self.plan.schema_order.len() as u32)
+                    })
                     .unwrap_or(self.columns.len() as u32);
                 if let Some(ordinal) = buf.predicate_ordinal {
                     if ordinal >= ncols * 4 / 5 {
@@ -1087,8 +1169,12 @@ impl ColumnarSink for TableBuilder {    #[inline]
         self.mark_predicate_slot(slot);
         let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
         let is_pred = self.is_predicate_slot(slot);
-            #[cfg(any(feature = "profiling", feature = "profile"))]
-            if is_pred { crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } else { crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+        #[cfg(any(feature = "profiling", feature = "profile"))]
+        if is_pred {
+            crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // Push value to buffer BEFORE evaluating predicate (value must be findable).
         if let Some(ref mut buf) = self.row_buf {
             if let Some(pos) = buf.fields.iter().position(|(s, _)| *s == slot) {
@@ -1128,10 +1214,10 @@ impl ColumnarSink for TableBuilder {    #[inline]
             return;
         }
         // Buffered path
-        let (state, direct) = self.row_buf.as_ref().map_or(
-            (PredicateState::Pass, false),
-            |b| (b.state, b.direct),
-        );
+        let (state, direct) = self
+            .row_buf
+            .as_ref()
+            .map_or((PredicateState::Pass, false), |b| (b.state, b.direct));
         if direct {
             // Already flushed to columns; just null-fill missing columns.
             self.null_fill_missing();
@@ -1171,7 +1257,11 @@ impl ColumnarSink for TableBuilder {    #[inline]
         // Buffered path for already-resolved name (no rename lookup)
         if self.frozen.is_some() && !self.field_index.contains_key(resolved_name) {
             if let Some(ref frozen) = self.frozen {
-                if !frozen.column_names().iter().any(|n| n.as_ref() == resolved_name) {
+                if !frozen
+                    .column_names()
+                    .iter()
+                    .any(|n| n.as_ref() == resolved_name)
+                {
                     if self.unknown_error.is_none() {
                         self.unknown_error = Some(format!(
                             "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
@@ -1188,8 +1278,12 @@ impl ColumnarSink for TableBuilder {    #[inline]
         self.mark_predicate_slot(slot);
         let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
         let is_pred = self.is_predicate_slot(slot);
-            #[cfg(any(feature = "profiling", feature = "profile"))]
-            if is_pred { crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } else { crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+        #[cfg(any(feature = "profiling", feature = "profile"))]
+        if is_pred {
+            crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(ref mut buf) = self.row_buf {
             if let Some(pos) = buf.fields.iter().position(|(s, _)| *s == slot) {
                 buf.fields[pos].1 = val_static;
@@ -1227,7 +1321,11 @@ impl ColumnarSink for TableBuilder {    #[inline]
             return;
         }
         // Adaptive: late predicate → push directly, pop-on-reject at end_row.
-        if self.row_buf.as_ref().map_or(false, |b| !b.buffer_worthwhile) {
+        if self
+            .row_buf
+            .as_ref()
+            .map_or(false, |b| !b.buffer_worthwhile)
+        {
             if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
                 self.push_field_resolved(name, value);
             } else {
@@ -1277,12 +1375,17 @@ impl ColumnarSink for TableBuilder {    #[inline]
                         return;
                     }
                 }
-            }            let slot = self.ensure_column_idx(resolved) as u32;
+            }
+            let slot = self.ensure_column_idx(resolved) as u32;
             self.mark_predicate_slot(slot);
             let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
             let is_pred = self.is_predicate_slot(slot);
             #[cfg(any(feature = "profiling", feature = "profile"))]
-            if is_pred { crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } else { crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+            if is_pred {
+                crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if let Some(ref mut buf) = self.row_buf {
                 if let Some(pos) = buf.fields.iter().position(|(s, _)| *s == slot) {
                     buf.fields[pos].1 = val_static;
@@ -1326,12 +1429,17 @@ impl ColumnarSink for TableBuilder {    #[inline]
                             return;
                         }
                     }
-                }                let slot = self.ensure_column_idx(&owned) as u32;
+                }
+                let slot = self.ensure_column_idx(&owned) as u32;
                 self.mark_predicate_slot(slot);
                 let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
                 let is_pred = self.is_predicate_slot(slot);
-            #[cfg(any(feature = "profiling", feature = "profile"))]
-            if is_pred { crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } else { crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                #[cfg(any(feature = "profiling", feature = "profile"))]
+                if is_pred {
+                    crate::engine::IS_PRED_TRUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    crate::engine::IS_PRED_FALSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 if let Some(ref mut buf) = self.row_buf {
                     if let Some(pos) = buf.fields.iter().position(|(s, _)| *s == slot) {
                         buf.fields[pos].1 = val_static;
@@ -1357,7 +1465,11 @@ impl ColumnarSink for TableBuilder {    #[inline]
 
     #[inline]
     fn row_rejected(&self) -> bool {
-        self.plan.filter.is_some() && self.row_buf.as_ref().map_or(false, |b| b.state == PredicateState::Fail)
+        self.plan.filter.is_some()
+            && self
+                .row_buf
+                .as_ref()
+                .map_or(false, |b| b.state == PredicateState::Fail)
     }
 
     #[inline]
@@ -1645,7 +1757,10 @@ mod tests {
         let engine = parse_bytes(b"X=42\nX=bad\nX=100\n", plan);
         assert_eq!(engine.num_rows(), 3);
         if let ColumnBuilder::Int64(v) = engine.get_column("X").unwrap() {
-            assert_eq!(v, &vec![Some(42), None, Some(100)]);
+            assert_eq!(
+                v.iter().map(|o| o.copied()).collect::<Vec<_>>(),
+                vec![Some(42), None, Some(100)]
+            );
         } else {
             panic!("expected Int64 builder");
         }
@@ -1657,7 +1772,7 @@ mod tests {
         plan.field_types.insert("X".to_string(), FieldType::Float64);
         let engine = parse_bytes(b"X=1.5\n", plan);
         if let ColumnBuilder::Float64(v) = engine.get_column("X").unwrap() {
-            assert!((v[0].unwrap() - 1.5).abs() < 1e-9);
+            assert!((*v.get(0).unwrap() - 1.5).abs() < 1e-9);
         } else {
             panic!("expected Float64 builder");
         }
@@ -1671,7 +1786,10 @@ mod tests {
         assert_eq!(engine.num_rows(), 3);
         if let ColumnBuilder::Dictionary { codes, dict, .. } = engine.get_column("P").unwrap() {
             assert_eq!(dict.len(), 2);
-            assert_eq!(codes, &vec![Some(0), Some(1), Some(0)]);
+            assert_eq!(
+                codes.iter().map(|o| o.copied()).collect::<Vec<_>>(),
+                vec![Some(0), Some(1), Some(0)]
+            );
         } else {
             panic!("expected Dictionary builder");
         }
@@ -1793,16 +1911,25 @@ mod tests {
             let full_words = ncols / 64;
             let rem = ncols % 64;
             let is_full = (0..full_words).all(|w| tb.row_dirty[w] == u64::MAX)
-                && (rem == 0 || tb.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem) - 1);
-            assert!(is_full, "ncols={ncols} should be full, row_dirty={:?}", tb.row_dirty);
+                && (rem == 0
+                    || tb.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem) - 1);
+            assert!(
+                is_full,
+                "ncols={ncols} should be full, row_dirty={:?}",
+                tb.row_dirty
+            );
             // Clear one bit and check not full
             if ncols > 0 {
                 let word = (ncols - 1) / 64;
                 let bit = (ncols - 1) % 64;
                 tb.row_dirty[word] &= !(1u64 << bit);
                 let is_full2 = (0..full_words).all(|w| tb.row_dirty[w] == u64::MAX)
-                    && (rem == 0 || tb.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem) - 1);
-                assert!(!is_full2, "ncols={ncols} should not be full after clearing one bit");
+                    && (rem == 0
+                        || tb.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem) - 1);
+                assert!(
+                    !is_full2,
+                    "ncols={ncols} should not be full after clearing one bit"
+                );
             }
         }
     }
@@ -1827,14 +1954,24 @@ mod tests {
         let make_filter = |a: &str, va: &str, b: &str, vb: &str| -> ExecutionPlan {
             let mut plan = ExecutionPlan::new();
             plan.filter = Some(FilterPredicate::And(
-                Box::new(FilterPredicate::Equal { field: a.to_string(), value: va.to_string() }),
-                Box::new(FilterPredicate::Equal { field: b.to_string(), value: vb.to_string() }),
+                Box::new(FilterPredicate::Equal {
+                    field: a.to_string(),
+                    value: va.to_string(),
+                }),
+                Box::new(FilterPredicate::Equal {
+                    field: b.to_string(),
+                    value: vb.to_string(),
+                }),
             ));
             plan
         };
         let r1 = parse_bytes(data, make_filter("A", "1", "B", "2"));
         let r2 = parse_bytes(data, make_filter("B", "2", "A", "1"));
-        assert_eq!(r1.num_rows(), r2.num_rows(), "C2 reorder must produce identical results");
+        assert_eq!(
+            r1.num_rows(),
+            r2.num_rows(),
+            "C2 reorder must produce identical results"
+        );
         assert_eq!(r1.num_rows(), 1); // A=1 B=2
     }
 
@@ -1848,14 +1985,24 @@ mod tests {
         let make_filter = |a: &str, va: &str, b: &str, vb: &str| -> ExecutionPlan {
             let mut plan = ExecutionPlan::new();
             plan.filter = Some(FilterPredicate::Or(
-                Box::new(FilterPredicate::Equal { field: a.to_string(), value: va.to_string() }),
-                Box::new(FilterPredicate::Equal { field: b.to_string(), value: vb.to_string() }),
+                Box::new(FilterPredicate::Equal {
+                    field: a.to_string(),
+                    value: va.to_string(),
+                }),
+                Box::new(FilterPredicate::Equal {
+                    field: b.to_string(),
+                    value: vb.to_string(),
+                }),
             ));
             plan
         };
         let r1 = parse_bytes(data, make_filter("A", "1", "B", "3"));
         let r2 = parse_bytes(data, make_filter("B", "3", "A", "1"));
-        assert_eq!(r1.num_rows(), r2.num_rows(), "Or reorder must produce identical results");
+        assert_eq!(
+            r1.num_rows(),
+            r2.num_rows(),
+            "Or reorder must produce identical results"
+        );
         assert_eq!(r1.num_rows(), 2); // rows 1 and 3
     }
 
@@ -1875,7 +2022,11 @@ mod tests {
             value: "reject".to_string(),
         });
         let engine = parse_bytes(data, plan);
-        assert_eq!(engine.num_rows(), 0, "all rows should be rejected (B != reject)");
+        assert_eq!(
+            engine.num_rows(),
+            0,
+            "all rows should be rejected (B != reject)"
+        );
 
         // Positive case: some rows pass
         let data2 = b"A=1 B=ok\nA=2 B=reject\nA=3 B=ok\n";
@@ -1938,7 +2089,11 @@ mod tests {
             tb.end_row();
         }
         let batch = tb.finish().unwrap();
-        assert_eq!(batch.num_rows(), 0, "all rows should be rejected (A=0 != 999)");
+        assert_eq!(
+            batch.num_rows(),
+            0,
+            "all rows should be rejected (A=0 != 999)"
+        );
     }
 
     #[test]
@@ -2000,7 +2155,13 @@ mod tests {
                 assert!(arr.is_null(i), "row {} should have D=null", i);
             }
             for i in 50..100 {
-                assert!(!arr.is_null(i), "row {} should not be null (D len={}, total rows={})", i, arr.len(), batch.num_rows());
+                assert!(
+                    !arr.is_null(i),
+                    "row {} should not be null (D len={}, total rows={})",
+                    i,
+                    arr.len(),
+                    batch.num_rows()
+                );
                 assert_eq!(arr.value(i), "z", "rows 50+ should have D=z");
             }
         } else {
@@ -2039,5 +2200,23 @@ mod tests {
         let batch = tb.finish().unwrap();
         // E="e" != "999" → all rows rejected
         assert_eq!(batch.num_rows(), 0, "all rows rejected (E=\"e\" != 999)");
+    }
+
+    #[test]
+    fn raw_name_helpers_apply_rename_and_drop() {
+        use crate::decoder::ColumnarSink;
+
+        let plan = ExecutionPlan::new()
+            .rename("raw", "renamed")
+            .drop("ignored");
+        let mut tb = TableBuilder::with_plan(2, Arc::new(plan));
+        tb.begin_row();
+        tb.resolve_and_put_raw(b"raw", Value::Str("value"));
+        tb.resolve_and_put_raw(b"ignored", Value::Str("not stored"));
+        tb.put_row(&[("other", Value::Str("also stored"))]);
+        tb.end_row();
+
+        assert_eq!(tb.column_names(), &["renamed", "other"]);
+        assert_eq!(tb.resolve_raw(b"raw"), Some("renamed"));
     }
 }

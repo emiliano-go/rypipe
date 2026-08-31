@@ -13,10 +13,58 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use rypipe_core::decoder::ColumnarSink;
-use rypipe_core::plan::ExecutionPlan;
-use rypipe_core::value::Value;
-use rypipe_core::Result;
+use rypipe_core::{ColumnarSink, ExecutionPlan, RecordParser, Splitter, Value};
+
+#[derive(Clone, Copy)]
+struct LineSplitter;
+
+impl Splitter for LineSplitter {
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
+        if max_chunks <= 1 || bytes.is_empty() {
+            return vec![0, bytes.len()];
+        }
+        let stride = (bytes.len() / max_chunks).max(1);
+        let mut points = vec![0];
+        let mut next = stride;
+        for (i, &byte) in bytes.iter().enumerate().skip(1) {
+            if i >= next && byte == b'\n' && points.len() < max_chunks {
+                points.push(i + 1);
+                next += stride;
+            }
+        }
+        if *points.last().unwrap() != bytes.len() {
+            points.push(bytes.len());
+        }
+        points
+    }
+
+    fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+        (sample.len() / sample.iter().filter(|&&b| b == b'\n').count().max(1)).max(1)
+    }
+}
+
+struct LineParser;
+
+impl RecordParser for LineParser {
+    fn validate(&self, bytes: &[u8]) -> rypipe_core::Result<()> {
+        simdutf8::basic::from_utf8(bytes)?;
+        Ok(())
+    }
+
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
+        let text = std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            sink.begin_row();
+            for token in line.split_whitespace() {
+                if let Some((name, value)) = token.split_once('=') {
+                    sink.put_field(name, Value::Str(value));
+                }
+            }
+            sink.end_row();
+        }
+        Ok(())
+    }
+}
 
 /// Wrapper around TableBuilder that skips finish_row (null-fill, dirty mask,
 /// filter check) by calling advance_row() only.  Isolates per-field push cost.
@@ -40,19 +88,19 @@ impl ColumnarSink for PushOnly {
         self.inner.put_field_resolved(name, value);
     }
     #[inline] fn needs_value(&self) -> bool { true }
-    fn finish(&mut self) -> Result<arrow::record_batch::RecordBatch> {
+    fn finish(&mut self) -> rypipe_core::Result<arrow::record_batch::RecordBatch> {
         self.inner.finish()
     }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).expect("usage: bench_push_tier <file.xml>");
+    let path = args.get(1).expect("usage: bench_push_tier <file.txt>");
     let data = std::fs::read(path).expect("failed to read file");
     let mb = data.len() as f64 / 1_048_576.0;
 
-    let splitter = rypipe_core::xml::CrystalXmlSplitter::with_row_tag(b"Details");
-    let decoder = rypipe_core::xml::CrystalXmlDecoder::with_row_tag(b"Details");
+    let splitter = LineSplitter;
+    let decoder = LineParser;
 
     // Validate
     decoder.validate(&data).unwrap();
@@ -90,7 +138,7 @@ fn main() {
     let stdev = (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
     let cov = stdev / mean;
 
-    println!("push_only {median:.4}s median ({best:.4}-{worst:.4}, CoV {cov:.1%})");
+    println!("push_only {median:.4}s median ({best:.4}-{worst:.4}, CoV {:.1}%)", cov * 100.0);
     println!("  {last_rows} rows, {mb:.1} MB, {:.0} MB/s", mb / median);
     println!("  ns/field: {:.0}", median * 1e9 / (last_rows as f64 * 10.0));
     println!();
