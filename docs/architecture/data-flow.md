@@ -89,7 +89,7 @@ if batch_engine.num_rows() > 0 { batches.push(batch_engine.finish()?) }  (CORE)
 apply_plan_filter(&mut batches, &plan)  // pure Compare/And reapplication only (CORE)
 ```
 
-`run_bytes` slices directly from `bytes` (used for decompressed buffers and for `Pipeline::read_bytes_stream`). `run` opens `InputBuffer`; if `Mmap` it drops the mapping after `plan_chunks` and reopens the file for `seek` plus `read_exact` per chunk (bounded RSS); if `Owned` it delegates to `run_bytes`. `MAX_SPLIT_CHUNKS = 256` caps split points.
+`run_bytes` slices directly from `bytes` (used for decompressed buffers and for `Pipeline::read_bytes_stream`). `run` opens `InputBuffer`; if `Mmap` it drops the mapping after `plan_chunks` and reopens the file for `seek` plus `read_exact` per chunk (bounded RSS); if `Owned` it delegates to `run_bytes`. `MAX_SPLIT_CHUNKS = 100_000` caps split points.
 
 ## Input buffering  (CORE)
 
@@ -115,19 +115,21 @@ Decompressed bytes are served from memory for all modes. `Pipeline::read_path` a
 
 ```
 (CORE) begin_row (no op)  // row boundaries tracked by row_count plus row_dirty
-  (ADAPTER BOUND) put_field(k, v) -> (CORE) resolve(k) (ExecutionPlan::resolve_field, one hash) -> (CORE) ensure_column_idx (single hash for field_index plus Vec push if new) -> (CORE) row_dirty[idx]=true -> (CORE) last_write_wins check (if len > row_count { pop }) -> (CORE) push_value (lexical parse or typed)
+  (ADAPTER BOUND) put_field(k, v) -> (CORE) resolve(k) (ExecutionPlan::resolve_field, one hash) -> (CORE) ensure_column_idx (single hash for field_index plus Vec push if new) -> (CORE) set dirty bit row_dirty[idx/64]|=1<<(idx%64) -> (CORE) last_write_wins check (if len > row_count { pop }) -> (CORE) push_value (lexical parse or typed)
   (ADAPTER BOUND) put_field(k, v) duplicate in same row -> (CORE) pop previous value for this row (len > row_count) then push new, dirty stays true
   ... (ADAPTER BOUND) may call put_field_resolved(r, v) after resolve(r) to avoid second hash (see Decoder)
 end_row -> (CORE) finish_row
+    // bitmask: row_dirty is Vec<u64> with (columns.len()+63)/64 words
     for (i,b) in columns.iter_mut().enumerate() {  (CORE)
-        if !row_dirty[i] { b.push(None) }  // null fill only missing (CORE)
-        else { row_dirty[i]=false }       // clear for next row (CORE)
+        let word = i/64; let bit = i%64;
+        if (row_dirty[word]>>bit)&1==0 { b.push(None) }  // null fill only missing (CORE)
+        else { row_dirty[word] &= !(1u64<<bit) }          // clear for next row (CORE)
     }
     if (CORE) filter.check(...) false { for b in columns { b.pop() } return }  // per row And/Or/Not with short circuit (CORE)
     row_count += 1  (CORE)
 ```
 
-`row_dirty` is `Vec<bool>` with the same length as `columns` (kept in sync in `ensure_column_idx` plus `take_column` plus `extend`). See [Engine](./engine.md) and [Optimizations](./optimizations.md) for why this saves 80 percent of `push(None)` calls.
+`row_dirty` is `Vec<u64>` bitmask with `(columns.len() + 63) / 64` words (kept in sync in `ensure_column_idx` plus `take_column` plus `extend`). See [Engine](./engine.md) and [Optimizations](./optimizations.md) for why this saves 80 percent of `push(None)` calls.
 
 Adapter code never touches `row_dirty`; it only emits `put_field` events. The engine owns the dirty tracking.
 

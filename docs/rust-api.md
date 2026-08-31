@@ -69,13 +69,14 @@ fn main() -> rypipe_core::Result<()> {
 If you prefer to control every step, use `TableBuilder` directly:
 
 ```rust
+use std::sync::Arc;
 use rypipe_core::{InputBuffer, TableBuilder, ExecutionPlan};
 use my_csv_adapter::{CsvDecoder, CsvSplitter}; // separate adapter crate
 use std::path::Path;
 
 fn main() -> rypipe_core::Result<()> {
     let input = InputBuffer::open(Path::new("data.csv"), false, false)?;
-    let mut builder = TableBuilder::with_plan(1024, ExecutionPlan::new());
+    let mut builder = TableBuilder::with_plan(1024, Arc::new(ExecutionPlan::new()));
 
     let decoder = CsvDecoder {
         header: vec!["id".into(), "status".into(), "amount".into()],

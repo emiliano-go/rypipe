@@ -18,15 +18,15 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Why not `entry` API:** `HashMap::entry` would also be one hash, but `Vacant` insertion still needs `schema_insert_index` which borrows `self` mutably while `entry` holds a borrow. The `get` plus `insert` split avoids the borrow checker fight and keeps the fast path as a pure `get` without allocating the key.
 
-## 3. Dirty bitmask for finish_row (engine.rs:274)
+## 3. Dirty bitmask for finish_row (engine.rs:563)
 
 **Before:** `for b in &mut columns { while b.len() < target { b.push(None) } }` iterated all columns and pushed `None` for missing ones, checking `len < target` for every column.
 
-**After:** `row_dirty: Vec<bool>` has the same length as `columns`. `push_field_resolved` sets `row_dirty[idx] = true` on first touch of the row (idempotent for duplicate fields). `finish_row` does `for (i,b) in columns.iter_mut().enumerate() { if !row_dirty[i] { b.push(None) } else { row_dirty[i]=false } }`. Only missing columns get a push; touched columns are just cleared. `reset` and `normalize` clear the mask, `take_column` keeps it in sync via `swap_remove`.
+**After:** `row_dirty: Vec<u64>` is a bitmask with `(columns.len() + 63) / 64` words. `push_field_resolved` sets the bit for column `i` via `row_dirty[i / 64] |= 1u64 << (i % 64)` on first touch of the row. `finish_row` checks each bit: if clear, pushes `None`; if set, clears the bit. Only missing columns get a push; touched columns are just cleared. `reset` and `normalize` clear the mask, `take_column` keeps it in sync.
 
-**Impact:** for 10 columns where 8 are present, this saves 80% of the `push(None)` calls and the associated `len` loads. The loop still iterates over `columns.len()` to check the bool, but a byte load plus branch is cheaper than a `Vec` push.
+**Impact:** for 10 columns where 8 are present, this saves 80% of the `push(None)` calls and the associated `len` loads. The loop iterates over bitmask words and checks each bit; a bit test plus branch is cheaper than a `Vec` push.
 
-## 4. Resolve plus put_field_resolved (decoder.rs:46, engine.rs:302)
+## 4. Resolve plus put_field_resolved (decoder.rs:65, engine.rs:542)
 
 **Before:** adapters did `if sink.wants(k) { /* decode */ sink.put_field(k, v) }` which called `ExecutionPlan::resolve_field` twice: once in `wants` (hash `field_map` then `drop_fields`) and once in `put_field`. When `field_map` or `drop_fields` is non empty, this is two hashes per field. `push_field` also did `owned = n.to_owned()` to hold the resolved name.
 
@@ -42,7 +42,7 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Why generic:** every row that has a filter pays this per row. `Equal`/`NotEqual` plus `Compare` plus `And`/`Or`/`Not` trees all use it. Vectorizing `Equal`/`NotEqual` after `finish` would be possible (see `arrow_export`), but per row is authoritative for short circuiting and missing field semantics, so the Vec path is the right intermediate.
 
-## 6. Unified schema with promotion (columnar.rs:53, merge.rs:30)
+## 6. Unified schema with promotion (columnar.rs:1043, merge.rs:30)
 
 **Before:** mixed `int64` plus `float64` or `string` plus `dictionary` across chunks was an error or silent first sighting.
 
@@ -58,12 +58,12 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Before:** `Pipeline` had only `read_bytes` (single) and `read_path` variants; bounded mode required a file path and did `File::open` plus `seek`.
 
-**After:** `Pipeline::read_bytes_par` and `read_bytes_stream` plus `BoundedExecutor::run_bytes` slice directly from `&[u8]` with no file IO. `plan_chunks` computes `bytes_per_row`, `total_rows_est`, `rows_per_batch`, `num_batches`, caps at `MAX_SPLIT_CHUNKS = 256`, then `split_points_to_ranges`. `run_bytes` is used for decompressed buffers and for adapters that hold `BytesIO` data.
+**After:** `Pipeline::read_bytes_par` and `read_bytes_stream` plus `BoundedExecutor::run_bytes` slice directly from `&[u8]` with no file IO. `plan_chunks` computes `bytes_per_row`, `total_rows_est`, `rows_per_batch`, `num_batches`, caps at `MAX_SPLIT_CHUNKS = 100_000`, then `split_points_to_ranges`. `run_bytes` is used for decompressed buffers and for adapters that hold `BytesIO` data.
 
-## 9. Arrow export and filter reapplication (arrow_export.rs:29, engine.rs:289)
+## 9. Arrow export and filter reapplication (arrow_export.rs:29, engine.rs:335)
 
 * `StrColumn` arena plus offsets plus validity is block copied to `StringArray` (two buffers).
-* Numeric builders are dense `Vec<Option<T>>` with `collect`.
+* Numeric builders are `NullableColumn<T>` with `collect`.
 * `apply_compare_filter` only reapplies pure `Compare` and `And` of `Compare` via Arrow compute; other trees are no ops because per row is authoritative. This avoids double null semantics and keeps the fast path correct.
 
 ## 10. Small but cumulative

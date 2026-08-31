@@ -18,7 +18,7 @@ Stream mode uses `BoundedExecutor`. It keeps a memory budget and parses the file
 1. Opens the file via `InputBuffer`.
 2. Estimates `bytes_per_row` from the splitter.
 3. Computes `rows_per_batch` from the budget.
-4. Splits the file into batches sized to fit the memory budget, capped at 256
+4. Splits the file into batches sized to fit the memory budget, capped at 100,000
    split points as an internal safeguard against pathological chunk counts.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates or iterates.

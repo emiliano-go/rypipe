@@ -1,6 +1,6 @@
 # Decoder API
 
-`crates/rypipe-core/src/decoder.rs` (63 lines) defines the boundary between format specific and format agnostic code. Adapters implement two traits; the engine implements the third.
+`crates/rypipe-core/src/decoder.rs` (~170 lines) defines the boundary between format specific and format agnostic code. Adapters implement two traits; the engine implements the third.
 
 ## Splitter
 
@@ -50,15 +50,23 @@ pub trait ColumnarSink {
 
 This is the event sink that decoders drive.
 
-* `begin_row` and `end_row` bracket a row. `TableBuilder` uses `row_count` plus `row_dirty` to track the row, so `begin_row` is a no op.
+* `begin_row` and `end_row` bracket a row. `TableBuilder` uses `row_count` plus `row_dirty` bitmask to track the row, so `begin_row` is a no op.
 
 * `put_field(&mut self, name: &str, value: Value<'_>)` resolves `name` via `ExecutionPlan::resolve_field` (rename then drop) and stores the value. If `resolve` returns `None` (dropped), it returns immediately.
+
+* `put_row(&mut self, fields: &[(&str, Value<'_>)])` is a convenience for adapters that already have all fields as slices. It iterates `fields` and calls `put_field` for each. Default implementation.
+
+* `resolve_raw<'a>(&'a self, raw_name: &'a [u8]) -> Option<&'a str>` resolves a field name that is still in raw byte form (e.g. from XML scanners that have not yet decoded to `&str`). Default converts via `from_utf8` then delegates to `resolve`. Avoids an intermediate `String` allocation when the parser holds raw bytes.
+
+* `resolve_and_put_raw(&mut self, raw_name: &[u8], value: Value<'_>)` combines `resolve_raw` and `put_field_resolved` in one call for raw-byte scanners. Default converts via `from_utf8` then delegates to `resolve_and_put`.
+
+* `resolve_and_put(&mut self, name: &str, value: Value<'_>)` resolves and pushes in one call, avoiding the double `resolve_field` that `wants` + `put_field` would perform. Default resolves then calls `put_field_resolved` (with an owned clone to satisfy the borrow checker). `TableBuilder` overrides to bypass the allocation.
 
 * `wants(&self, name: &str) -> bool` is the hint: return false to signal the engine will drop this field. Default is true. Adapters that do expensive extraction (entity unescaping, base64, decompression) call `if sink.wants(col) { /* decode */ sink.put_field(col, val) }` to skip work.
 
 * `resolve<'a>(&'a self, name: &'a str) -> Option<&'a str>` is the single lookup version. Default returns `Some(name)` (keep as is). `TableBuilder` overrides to `self.plan.resolve_field(name)` which returns `Some(resolved)` or `None` for dropped, borrowing from `field_map` where possible. This lets adapters do `if let Some(r) = sink.resolve(k) { /* expensive decode */ sink.put_field_resolved(r, v) }` with one hash instead of two (`wants` plus `put_field`).
 
-* `put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>)` pushes a field that is already resolved. Default delegates to `put_field` (which will resolve again). `TableBuilder` overrides to `push_field_resolved` which calls `ensure_column_idx` directly and sets `row_dirty[idx] = true` without re hashing `field_map`/`drop_fields`. This is the fast path for adapters that already called `resolve`.
+* `put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>)` pushes a field that is already resolved. Default delegates to `put_field` (which will resolve again). `TableBuilder` overrides to `push_field_resolved` which calls `ensure_column_idx` directly and sets the dirty bit for column `i` without re hashing `field_map`/`drop_fields`. This is the fast path for adapters that already called `resolve`.
 
 * `needs_value(&self) -> bool` controls whether the parser decodes values. Default is `true`. When `false`, the parser skips value extraction entirely (e.g. `raw_text_until` in XML scanners) and does not call `put_field`. Adapters must NOT decode values when `needs_value()` returns `false`; the parser will emit `put_field` with an empty value or skip the call entirely. This enables locate-only and traversal-only tiers for profiling.
 
@@ -66,9 +74,9 @@ This is the event sink that decoders drive.
 
 * `finish(&mut self) -> Result<RecordBatch>` finalizes the sink. For `TableBuilder` it does `normalize`, early `new_empty` if no columns, `auto_dict_upgrade`, `sort_columns`, and builds `Schema` plus arrays.
 
-### Why two APIs for the same thing
+### Why multiple APIs for the same thing
 
-`wants` plus `put_field` is backward compatible and simple for stringly adapters (CSV header loop). `resolve` plus `put_field_resolved` is the same semantics with one hash instead of two, and it avoids the extra `String` allocation in `push_field` when `field_map` is non empty (`owned = n.to_owned()`). The Python fusion layer and `merge.rs` already use the single lookup Vec path; adapters can choose either pair and the engine guarantees the same result. Tests in `tests/data_integrity_test.rs` (`resolve_put_field_resolved_identical_to_put_field`) assert bit identical batches across `LineParser` vs `LineParserResolved` for 1000 rows with rename, drop, filter, and typed columns across single, parallel, and bounded modes.
+`wants` plus `put_field` is backward compatible and simple for stringly adapters (CSV header loop). `resolve` plus `put_field_resolved` is the same semantics with one hash instead of two, and it avoids the extra `String` allocation in `push_field` when `field_map` is non empty. `resolve_and_put` combines both in one call. For raw-byte scanners (XML), `resolve_raw` and `resolve_and_put_raw` avoid the `from_utf8` + `to_owned` two-step. `put_row` is a batch convenience for adapters that already have fields as slices. The Python fusion layer and `merge.rs` already use the single lookup Vec path; adapters can choose any pair and the engine guarantees the same result. Tests in `tests/data_integrity_test.rs` (`resolve_put_field_resolved_identical_to_put_field`) assert bit identical batches across `LineParser` vs `LineParserResolved` for 1000 rows with rename, drop, filter, and typed columns across single, parallel, and bounded modes.
 
 ## Value
 

@@ -11,8 +11,8 @@ pub struct TableBuilder {
     pub(crate) column_order: Vec<String>,
     pub(crate) row_count: usize,
     pub(crate) estimated_rows: usize,
-    pub(crate) plan: ExecutionPlan,
-    pub(crate) row_dirty: Vec<bool>,
+    pub(crate) plan: Arc<ExecutionPlan>,
+    pub(crate) row_dirty: Vec<u64>,
 }
 ```
 
@@ -26,9 +26,9 @@ Why this shape:
 
 * `row_count: usize` is the number of committed rows. A row is not counted until `finish_row` succeeds (including filter).
 
-* `row_dirty: Vec<bool>` has the same length as `columns`. `row_dirty[i]` is true if column `i` received a value in the current uncommitted row. It lets `finish_row` null fill only missing columns and avoids a per column `while len < target` check for touched columns.
+* `row_dirty: Vec<u64>` is a bitmask word array. `row_dirty` has `(columns.len() + 63) / 64` words. A set bit at column `i` means the column received a value in the current uncommitted row. It lets `finish_row` null fill only missing columns and avoids a per column `while len < target` check for touched columns.
 
-* `estimated_rows: usize` and `plan: ExecutionPlan` are carried from `Pipeline::with_plan` and used for capacity hints and per row decisions.
+* `estimated_rows: usize` and `plan: Arc<ExecutionPlan>` are carried from `Pipeline::with_plan` and used for capacity hints and per row decisions.
 
 Constructors (`new`, `with_capacity`, `with_plan`) all initialize the three Vectors and the map as empty.
 
@@ -46,18 +46,23 @@ Adapters call `begin_row`, `put_field` (or `put_field_resolved`), `end_row` in a
 
 * `push_field` resolves the raw name (`plan.field_map` then `plan.drop_fields`) and delegates to `push_field_resolved`. Fast path: if both maps are empty, it uses `name` directly and avoids allocation and hashing in `resolve_field`.
 
-* `push_field_resolved` is the hot path (see [Optimizations](./optimizations.md) for the single lookup version). It calls `ensure_column_idx(resolved)` to get `idx`, marks `row_dirty[idx] = true`, then handles last write wins: if `columns[idx].len() > row_count`, the column already has a value for this row (duplicate field in the same row), so it pops before pushing the new value. Then `push_value` is called on the builder.
+* `push_field_resolved` is the hot path (see [Optimizations](./optimizations.md) for the single lookup version). It calls `ensure_column_idx(resolved)` to get `idx`, sets the dirty bit for column `idx` via `row_dirty[idx/64] |= 1u64 << (idx%64)`, then handles last write wins: if `columns[idx].len() > row_count`, the column already has a value for this row (duplicate field in the same row), so it pops before pushing the new value. Then `push_value` is called on the builder.
 
-* `ensure_column_idx(&mut self, name: &str) -> usize` does one hash lookup. If `field_index.get(name)` exists, it returns immediately. Otherwise it creates a `ColumnBuilder::with_capacity(est, &col_type)` where `est = estimated_rows.max(64)` and `col_type = plan.column_type(name)`, backfills `row_count` nulls (`for _ in 0..row_count { b.push(None) }`), pushes to `columns`, inserts into `field_index`, pushes `false` to `row_dirty`, and inserts into `column_order` at `schema_insert_index(name)`.
+* `ensure_column_idx(&mut self, name: &str) -> usize` does one hash lookup. If `field_index.get(name)` exists, it returns immediately. Otherwise it creates a `ColumnBuilder::with_capacity(est, &col_type)` where `est = estimated_rows.max(64)` and `col_type = plan.column_type(name)`, backfills `row_count` nulls (`for _ in 0..row_count { b.push(None) }`), pushes to `columns`, inserts into `field_index`, clears the dirty bit for the new column (ensuring `row_dirty` has enough words), and inserts into `column_order` at `schema_insert_index(name)`.
 
 * `finish_row` is where the dirty optimization matters (2C-S1). Instead of looping over all columns and doing `while b.len() < target { b.push(None) }`, it does:
 
 ```rust
+// bitmask version: row_dirty is Vec<u64> with (columns.len()+63)/64 words
+let full_words = self.row_dirty.len() - 1;
+let rem_bits = self.columns.len() % 64;
 for (i, b) in self.columns.iter_mut().enumerate() {
-    if !self.row_dirty[i] {
+    let word = i / 64;
+    let bit = i % 64;
+    if (self.row_dirty[word] >> bit) & 1 == 0 {
         b.push(None);
     } else {
-        self.row_dirty[i] = false;
+        self.row_dirty[word] &= !(1u64 << bit);
     }
 }
 if let Some(ref filter) = self.plan.filter {
@@ -69,7 +74,7 @@ if let Some(ref filter) = self.plan.filter {
 self.row_count += 1;
 ```
 
-Only missing columns get a `push(None)`; touched columns are just cleared for the next row. For 10 columns where 8 are present each row, this saves 80% of the null fill pushes and the associated `len` checks. The loop still iterates over `columns.len()` to check the bool, but the bool check is a single byte load versus a `len` load plus branch and push.
+Only missing columns get a `push(None)`; touched columns are just cleared for the next row. For 10 columns where 8 are present each row, this saves 80% of the null fill pushes and the associated `len` checks. The bitmask word load plus bit test is cheaper than a `Vec` push per column.
 
 Filter is evaluated per row via `FilterPredicate::check` with `(&columns, &field_index, row_index, &plan)`. If it fails, each column is popped (undoing the row) and `row_count` is not advanced. Dirty was already cleared, so the next row starts clean. For `And`/`Or`/`Not` trees, `check` short circuits.
 
@@ -77,7 +82,7 @@ Filter is evaluated per row via `FilterPredicate::check` with `(&columns, &field
 
 * `reset` clears `columns`, `field_index`, `column_order`, `row_dirty`, and resets `row_count` to zero while keeping `plan` and `estimated_rows`.
 
-* `normalize` truncates any column with `len > row_count` (partial row from a truncated chunk) and clears `row_dirty` to all false. Idempotent.
+* `normalize` truncates any column with `len > row_count` (partial row from a truncated chunk) and zeros `row_dirty`. Idempotent.
 
 * `auto_dict_upgrade` iterates `&mut self.columns` and calls `try_upgrade_to_dict(512, max_ratio, max_size)` when `plan.auto_dict` is true. Threshold defaults are 0.05 ratio and 256 entries. It is called from `finish` before sorting.
 
@@ -105,9 +110,9 @@ impl ColumnarSink for TableBuilder {
 
 ## Invariants
 
-* `columns.len() == field_index.len() == row_dirty.len()` always.
+* `columns.len() == field_index.len()` and `row_dirty.len() == (columns.len() + 63) / 64` always.
 * `columns.len() == column_order.len()` after each successful `finish_row` or `extend`, but during a row `columns` may be larger than `row_count+1` before `finish_row` completes.
-* `row_dirty[i]` is true exactly when `columns[i].len() == row_count + 1` and the column was touched this row; after `finish_row` all entries are false.
+* `row_dirty` bit `i` is set exactly when `columns[i].len() == row_count + 1` and the column was touched this row; after `finish_row` all bits are clear.
 * `take_column` keeps the three vectors in sync via swap remove patching.
 
 ## Tests

@@ -178,10 +178,11 @@ let batches = pipeline.read_bytes_stream(data_bytes, MemoryBudget::new(64 * 1024
 ### Low level direct TableBuilder  (CORE)
 
 ```rust
+use std::sync::Arc;
 use rypipe_core::{ExecutionPlan, TableBuilder, ColumnarSink, Value}; // (CORE)
 use std::path::Path; // (CORE)
 
-let plan = ExecutionPlan::new().drop("internal_id"); // (CORE)
+let plan: Arc<ExecutionPlan> = Arc::new(ExecutionPlan::new().drop("internal_id")); // (CORE)
 let input = rypipe_core::InputBuffer::open(Path::new("data.log"), false, false)?; // (CORE) handles mmap plus gzip/zstd/lz4
 let mut builder = TableBuilder::with_plan(1024, plan); // (CORE)
 LogParser.validate(input.as_slice())?; // (ADAPTER BOUND)

@@ -34,29 +34,29 @@ Operations:
 
 * `append(&mut self, other: &StrColumn)` merges another column by base shifting offsets: `base = self.data.len() as i32`, then `self.offsets.extend(other.offsets[1..].iter().map(|o| o + base))`. This is O(n) in offsets, not in bytes.
 
-* `to_arrow() -> Result<ArrayRef>` builds an Arrow `StringArray` by wrapping the three buffers with `OffsetBuffer`, `Buffer`, and `NullBuffer`. When all validity are true, `nulls` is `None`. This is a block copy of two buffers, not per cell.
+* `to_arrow(&mut self) -> Result<ArrayRef>` builds an Arrow `StringArray` by wrapping the three buffers with `OffsetBuffer`, `Buffer`, and `NullBuffer`. When all validity are true, `nulls` is `None`. This is a block copy of two buffers, not per cell.
 
 ## ColumnBuilder
 
 ```rust
 pub(crate) enum ColumnBuilder {
     String(StrColumn),
-    Int64(Vec<Option<i64>>),
-    Float64(Vec<Option<f64>>),
-    Boolean(Vec<Option<bool>>),
-    Date32(Vec<Option<i32>>),
-    Timestamp(TimeUnit, Vec<Option<i64>>),
-    Dictionary { codes: Vec<Option<i32>>, dict: Vec<String>, index: HashMap<String, i32> },
+    Int64(NullableColumn<i64>),
+    Float64(NullableColumn<f64>),
+    Boolean(NullableColumn<bool>),
+    Date32(NullableColumn<i32>),
+    Timestamp(TimeUnit, NullableColumn<i64>),
+    Dictionary { codes: NullableColumn<i32>, dict: Vec<String>, index: HashMap<String, i32> },
 }
 ```
 
-Each variant stores a dense `Vec<Option<T>>` (or `StrColumn` for strings). There is exactly one builder per column, created by `ExecutionPlan::column_type` at first use.
+Each variant stores a `NullableColumn<T>` (or `StrColumn` for strings). There is exactly one builder per column, created by `ExecutionPlan::column_type` at first use.
 
 * `String` is `StrColumn`.
-* `Int64`, `Float64`, `Boolean` are `Vec<Option<T>>` with `lexical::parse` for string inputs.
-* `Date32(Vec<Option<i32>>)` stores days since epoch. Parsing uses `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`.
-* `Timestamp(TimeUnit, Vec<Option<i64>>)` stores raw integers in the column's `TimeUnit` (Second, Millisecond, Microsecond, Nanosecond). Parsing tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`, then bare `"%Y-%m-%d"` as midnight. Timezone handling is left to adapters that emit `Value::Timestamp` directly.
-* `Dictionary { codes, dict, index }` stores `codes: Vec<Option<i32>>` plus `dict: Vec<String>` (id to string) and `index: HashMap<String,i32>` (string to id). This is the write path for `FieldType::Dictionary` and for auto dict upgrade.
+* `Int64`, `Float64`, `Boolean` are `NullableColumn<T>` with `lexical::parse` for string inputs.
+* `Date32(NullableColumn<i32>)` stores days since epoch. Parsing uses `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`.
+* `Timestamp(TimeUnit, NullableColumn<i64>)` stores raw integers in the column's `TimeUnit` (Second, Millisecond, Microsecond, Nanosecond). Parsing tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`, then bare `"%Y-%m-%d"` as midnight. Timezone handling is left to adapters that emit `Value::Timestamp` directly.
+* `Dictionary { codes, dict, index }` stores `codes: NullableColumn<i32>` plus `dict: Vec<String>` (id to string) and `index: HashMap<String,i32>` (string to id). This is the write path for `FieldType::Dictionary` and for auto dict upgrade.
 
 Variant keys for unification (10 strings):
 
