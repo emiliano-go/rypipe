@@ -106,6 +106,63 @@ pub unsafe fn utf8_after_chunk_validation(b: &[u8]) -> &str {
 }
 
 // ---------------------------------------------------------------------------
+// S10c: Generic delimiter scanning for TSV/CSV
+// ---------------------------------------------------------------------------
+
+/// Find the field delimiter and quote/escape byte in one SIMD pass.
+///
+/// For CSV/TSV parsing, this replaces two separate `memchr` calls with a
+/// single `memchr2` scan. Returns `(position, matched_byte)` where
+/// `matched_byte` is either the delimiter or the quote.
+///
+/// Example: `find_delimiter_or_quote(data, 0, b',', b'"')` finds the first
+/// comma or double-quote in the data.
+#[inline]
+pub fn find_delimiter_or_quote(
+    hay: &[u8],
+    from: usize,
+    delimiter: u8,
+    quote: u8,
+) -> Option<(usize, u8)> {
+    find2(hay, from, delimiter, quote)
+}
+
+/// Scan a delimited field, respecting quoted regions.
+///
+/// Returns the end position (byte after the delimiter or end of input).
+/// When a quote is encountered, scans forward to the matching close quote
+/// before resuming delimiter search. This is the portable half of crxml's
+/// fused scan for CSV/TSV.
+pub fn scan_delimited_field(
+    bytes: &[u8],
+    start: usize,
+    delimiter: u8,
+    quote: u8,
+) -> usize {
+    let mut pos = start;
+    while pos < bytes.len() {
+        match find2(bytes, pos, delimiter, quote) {
+            Some((rel, b)) if b == quote => {
+                // Skip quoted region: find closing quote.
+                pos = rel + 1;
+                while let Some(q_rel) = memchr::memchr(quote, &bytes[pos..]) {
+                    // Check for escaped quote (double quote).
+                    if pos + q_rel + 1 < bytes.len() && bytes[pos + q_rel + 1] == quote {
+                        pos += q_rel + 2; // skip escaped quote
+                    } else {
+                        return pos + q_rel + 1; // past closing quote
+                    }
+                }
+                return bytes.len(); // unterminated quote
+            }
+            Some((rel, _)) => return rel + 1, // past delimiter
+            None => return bytes.len(),        // no more delimiters
+        }
+    }
+    bytes.len()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
