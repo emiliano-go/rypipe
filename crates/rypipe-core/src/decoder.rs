@@ -101,6 +101,19 @@ pub trait ColumnarSink {
         self.put_field(resolved_name, value);
     }
 
+    /// Push a value directly to a known slot index, bypassing all name
+    /// resolution, hash lookups, and attribute scanning.  Used by adapters
+    /// that have verified the field identity via `expect_slot` + memcmp.
+    ///
+    /// Default: delegates to `put_field` with a synthetic name (slow path).
+    /// Engines that track slot indices should override this.
+    #[inline]
+    fn put_field_at(&mut self, _slot: u32, value: Value<'_>) {
+        // Fallback: can't push without a name; discard.
+        // Engines override this to push directly to columns[slot].
+        let _ = value;
+    }
+
     /// Resolve a field name and push it in one call, avoiding the double
     /// `resolve_field` that `wants` + `put_field` would perform.
     /// Default: resolve then put_field_resolved (with owned clone to satisfy

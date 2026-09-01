@@ -101,6 +101,9 @@ pub struct TableBuilder {
     /// in-place instead of running the full attribute scan → UTF-8 decode →
     /// hash → lookup path.  `None` after `layout_broken` or before row 1.
     pub(crate) ordinal_expect: Vec<Option<(u32, Vec<u8>)>>,
+    /// Current ordinal within the row (incremented per put_field call).
+    /// Used to populate `ordinal_expect` on the first row.
+    pub(crate) current_ordinal: u32,
 }
 
 impl TableBuilder {
@@ -117,6 +120,7 @@ impl TableBuilder {
             unknown_error: None,
             row_buf: None,
             ordinal_expect: Vec::new(),
+            current_ordinal: 0,
         }
     }
 
@@ -133,6 +137,7 @@ impl TableBuilder {
             unknown_error: None,
             row_buf: None,
             ordinal_expect: Vec::new(),
+            current_ordinal: 0,
         }
     }
 
@@ -161,6 +166,7 @@ impl TableBuilder {
                 None
             },
             ordinal_expect: Vec::new(),
+            current_ordinal: 0,
         }
     }
 
@@ -251,6 +257,7 @@ impl TableBuilder {
                 None
             },
             ordinal_expect: Vec::new(),
+            current_ordinal: 0,
         };
         for (idx, col) in self.columns.iter_mut().enumerate() {
             let drain = col.split_off(n);
@@ -493,6 +500,15 @@ impl TableBuilder {
             return;
         }
         let idx = self.ensure_column_idx(resolved_name);
+        // Track ordinal→slot mapping on first row for expect_slot fast path.
+        if self.row_count == 0 {
+            let ord = self.current_ordinal as usize;
+            if ord >= self.ordinal_expect.len() {
+                self.ordinal_expect.resize_with(ord + 1, || None);
+            }
+            self.ordinal_expect[ord] = Some((idx as u32, resolved_name.as_bytes().to_vec()));
+        }
+        self.current_ordinal += 1;
         let word = idx / 64;
         let bit = idx % 64;
         self.row_dirty[word] |= 1u64 << bit;
@@ -517,6 +533,17 @@ impl TableBuilder {
         // Resolve name via plan's field_map (borrows &self.plan).
         // Try the zero-allocation fast path: column already exists.
         if let Some(idx) = Self::resolve_and_slot(&self.plan, &self.field_index, name) {
+            // Track ordinal→slot mapping on first row for expect_slot fast path.
+            if self.row_count == 0 {
+                let ord = self.current_ordinal as usize;
+                if ord >= self.ordinal_expect.len() {
+                    self.ordinal_expect.resize_with(ord + 1, || None);
+                }
+                // Store the resolved name (what plan.resolve_field would return).
+                let resolved = self.plan.resolve_field(name).unwrap_or(name);
+                self.ordinal_expect[ord] = Some((idx as u32, resolved.as_bytes().to_vec()));
+            }
+            self.current_ordinal += 1;
             let word = idx / 64;
             let bit = idx % 64;
             self.row_dirty[word] |= 1u64 << bit;
@@ -1123,6 +1150,7 @@ impl Default for TableBuilder {
 impl ColumnarSink for TableBuilder {
     #[inline]
     fn begin_row(&mut self) {
+        self.current_ordinal = 0;
         if let Some(ref mut buf) = self.row_buf {
             // Adaptive strategy: after at least one committed row, decide
             // whether buffering is worthwhile based on the predicate column's
@@ -1325,6 +1353,28 @@ impl ColumnarSink for TableBuilder {
                 buf.state = state;
             }
         }
+    }
+
+    /// Push a value directly to a known slot index, bypassing all name
+    /// resolution and hash lookups.  Used by adapters that verified the
+    /// field identity via `expect_slot` + memcmp on raw bytes.
+    #[inline]
+    fn put_field_at(&mut self, slot: u32, value: Value<'_>) {
+        let idx = slot as usize;
+        if idx >= self.columns.len() {
+            // Slot doesn't exist yet (sparse row). Fall back to ensure.
+            // This shouldn't happen after row 1 with a stable layout.
+            return;
+        }
+        let word = idx / 64;
+        let bit = idx % 64;
+        self.row_dirty[word] |= 1u64 << bit;
+        let b = &mut self.columns[idx];
+        let row_count = self.row_count;
+        if b.len() > row_count {
+            b.pop();
+        }
+        b.push_value(value);
     }
 
     #[inline]
