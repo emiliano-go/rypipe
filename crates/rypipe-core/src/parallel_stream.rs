@@ -629,6 +629,10 @@ mod tests {
     struct NullSplitter;
 
     impl Splitter for NullSplitter {
+        fn next_record_start(&self, _bytes: &[u8], _from: usize) -> Option<usize> {
+            None
+        }
+
         fn find_split_points(&self, bytes: &[u8], _max_chunks: usize) -> Vec<usize> {
             vec![0, bytes.len()]
         }
