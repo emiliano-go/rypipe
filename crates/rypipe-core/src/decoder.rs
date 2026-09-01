@@ -185,6 +185,11 @@ pub trait ColumnarSink {
     #[inline]
     fn layout_broken(&mut self, _ordinal: u32) {}
 
+    /// Reset the ordinal counter for child-element tracking.  Called after
+    /// row-tag attributes are emitted so child ordinals start at 0.
+    #[inline]
+    fn reset_child_ordinal(&mut self) {}
+
     /// Finalize the sink into an Arrow `RecordBatch`.
     fn finish(&mut self) -> Result<RecordBatch>;
 }
