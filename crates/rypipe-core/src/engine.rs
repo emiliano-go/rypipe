@@ -96,6 +96,11 @@ pub struct TableBuilder {
     /// `None` when `plan.filter` is `None` — unfiltered parses carry zero
     /// overhead from predicate machinery.
     pub(crate) row_buf: Option<Box<RowBuffer>>,
+    /// Per-ordinal layout expectation: after row 1, each ordinal maps to a
+    /// (slot_index, raw_name) pair.  The adapter can memcmp the raw bytes
+    /// in-place instead of running the full attribute scan → UTF-8 decode →
+    /// hash → lookup path.  `None` after `layout_broken` or before row 1.
+    pub(crate) ordinal_expect: Vec<Option<(u32, Vec<u8>)>>,
 }
 
 impl TableBuilder {
@@ -111,6 +116,7 @@ impl TableBuilder {
             frozen: None,
             unknown_error: None,
             row_buf: None,
+            ordinal_expect: Vec::new(),
         }
     }
 
@@ -126,6 +132,7 @@ impl TableBuilder {
             frozen: None,
             unknown_error: None,
             row_buf: None,
+            ordinal_expect: Vec::new(),
         }
     }
 
@@ -153,6 +160,7 @@ impl TableBuilder {
             } else {
                 None
             },
+            ordinal_expect: Vec::new(),
         }
     }
 
@@ -242,6 +250,7 @@ impl TableBuilder {
             } else {
                 None
             },
+            ordinal_expect: Vec::new(),
         };
         for (idx, col) in self.columns.iter_mut().enumerate() {
             let drain = col.split_off(n);
@@ -1512,6 +1521,30 @@ impl ColumnarSink for TableBuilder {
 
         let schema = Arc::new(Schema::new(fields));
         Ok(RecordBatch::try_new(schema, arrays)?)
+    }
+
+    #[inline]
+    fn expect_slot(&self, ordinal: u32) -> Option<(u32, &[u8])> {
+        self.ordinal_expect
+            .get(ordinal as usize)
+            .and_then(|entry| entry.as_ref())
+            .map(|(slot, raw)| (*slot, raw.as_slice()))
+    }
+
+    #[inline]
+    fn record_slot(&mut self, ordinal: u32, slot: u32, raw_name: &[u8]) {
+        let idx = ordinal as usize;
+        if idx >= self.ordinal_expect.len() {
+            self.ordinal_expect.resize_with(idx + 1, || None);
+        }
+        self.ordinal_expect[idx] = Some((slot, raw_name.to_vec()));
+    }
+
+    #[inline]
+    fn layout_broken(&mut self, ordinal: u32) {
+        if let Some(entry) = self.ordinal_expect.get_mut(ordinal as usize) {
+            *entry = None;
+        }
     }
 }
 
