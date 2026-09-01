@@ -334,19 +334,18 @@ impl StrColumn {
 }
 
 /// Flat primitive-column storage: one contiguous data array + a validity
-/// bitmap (1 byte per row, upgradeable to bitpacked later). Mirrors
-/// [`StrColumn`] layout but for `Copy` types.
+/// bitmap (one bit per row). Mirrors [`StrColumn`] layout but for `Copy` types.
 #[derive(Clone)]
 pub(crate) struct PrimColumn<T: Copy> {
     data: Vec<T>,
-    validity: Vec<bool>,
+    validity: ValidityBitmap,
 }
 
 impl<T: Copy + Default> PrimColumn<T> {
     fn with_capacity(cap: usize) -> Self {
         PrimColumn {
             data: Vec::with_capacity(cap),
-            validity: Vec::with_capacity(cap),
+            validity: ValidityBitmap::with_capacity(cap),
         }
     }
 
@@ -367,36 +366,35 @@ impl<T: Copy + Default> PrimColumn<T> {
     fn split_off(&mut self, n: usize) -> Self {
         assert!(n <= self.len());
         let other_data = self.data[..n].to_vec();
-        let other_validity = self.validity[..n].to_vec();
         self.data.drain(..n);
-        self.validity.drain(..n);
+        let other_validity = self.validity.split_off(n);
         PrimColumn { data: other_data, validity: other_validity }
     }
 
     pub(crate) fn get(&self, i: usize) -> Option<T> {
-        if *self.validity.get(i)? { Some(self.data[i]) } else { None }
+        if self.validity.is_valid(i) { Some(self.data[i]) } else { None }
     }
 
     /// Move all values from `other` onto the end of `self`.
     fn append(&mut self, other: &PrimColumn<T>) {
         self.data.extend_from_slice(&other.data);
-        self.validity.extend_from_slice(&other.validity);
+        self.validity.append(&other.validity);
     }
 }
 
 impl<T: Copy + Default> Default for PrimColumn<T> {
     fn default() -> Self {
-        PrimColumn { data: Vec::new(), validity: Vec::new() }
+        PrimColumn { data: Vec::new(), validity: ValidityBitmap::default() }
     }
 }
 
 impl<T: Copy> PrimColumn<T> {
     fn bytes_used(&self) -> usize {
-        self.data.len() * std::mem::size_of::<T>() + self.validity.len()
+        self.data.len() * std::mem::size_of::<T>() + self.validity.bytes_used()
     }
 
     fn capacity_bytes(&self) -> usize {
-        self.data.capacity() * std::mem::size_of::<T>() + self.validity.capacity()
+        self.data.capacity() * std::mem::size_of::<T>() + self.validity.capacity_bytes()
     }
 
     /// Zero-copy Arrow export: moves data and validity buffers into a
@@ -407,14 +405,9 @@ impl<T: Copy> PrimColumn<T> {
     where
         A::Native: From<T>,
     {
-        use arrow::buffer::{BooleanBuffer, NullBuffer, ScalarBuffer};
+        use arrow::buffer::{ScalarBuffer};
         let data = std::mem::take(&mut self.data);
-        let validity = std::mem::take(&mut self.validity);
-        let nulls = if validity.iter().all(|&v| v) {
-            None
-        } else {
-            Some(NullBuffer::new(BooleanBuffer::from(validity)))
-        };
+        let nulls = self.validity.into_arrow();
         let buf: ScalarBuffer<A::Native> = data.into_iter().map(A::Native::from).collect();
         let arr = PrimitiveArray::<A>::try_new(buf, nulls)?;
         Ok(Arc::new(arr))
