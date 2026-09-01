@@ -720,6 +720,7 @@ impl TableBuilder {
     fn get_buffered_str(&self, field: &str) -> Option<String> {
         match self.get_buffered_value(field) {
             Some(Value::Str(s)) => Some(s.to_string()),
+            Some(Value::Owned(s)) => Some(s.clone()),
             Some(Value::Int64(i)) => Some(i.to_string()),
             Some(Value::Float64(f)) => Some(f.to_string()),
             Some(Value::Bool(b)) => Some(b.to_string()),
@@ -780,33 +781,33 @@ impl TableBuilder {
                 let normalize = |field: &str, value: &Value<'static>| {
                     let field = tb.plan.resolve_field(field).unwrap_or(field);
                     match tb.plan.column_type(field) {
-                        FieldType::Int64 => match value {
-                            Value::Str(s) => lexical::parse::<i64, _>(s.as_bytes())
+                        FieldType::Int64 => match value.as_str() {
+                            Some(s) => lexical::parse::<i64, _>(s.as_bytes())
                                 .ok()
                                 .map(Value::Int64),
-                            _ => Some(*value),
+                            _ => Some(value.clone()),
                         },
-                        FieldType::Float64 => match value {
-                            Value::Str(s) => lexical::parse::<f64, _>(s.as_bytes())
+                        FieldType::Float64 => match value.as_str() {
+                            Some(s) => lexical::parse::<f64, _>(s.as_bytes())
                                 .ok()
                                 .map(Value::Float64),
-                            _ => Some(*value),
+                            _ => Some(value.clone()),
                         },
-                        FieldType::Boolean => match value {
-                            Value::Str(s) => s.parse::<bool>().ok().map(Value::Bool),
-                            _ => Some(*value),
+                        FieldType::Boolean => match value.as_str() {
+                            Some(s) => s.parse::<bool>().ok().map(Value::Bool),
+                            _ => Some(value.clone()),
                         },
-                        FieldType::Date32 => match value {
-                            Value::Str(s) => crate::columnar::parse_date32(s).map(Value::Date32),
-                            _ => Some(*value),
+                        FieldType::Date32 => match value.as_str() {
+                            Some(s) => crate::columnar::parse_date32(s).map(Value::Date32),
+                            _ => Some(value.clone()),
                         },
-                        FieldType::Timestamp(unit) => match value {
-                            Value::Str(s) => {
+                        FieldType::Timestamp(unit) => match value.as_str() {
+                            Some(s) => {
                                 crate::columnar::parse_timestamp(s, unit).map(Value::Timestamp)
                             }
-                            _ => Some(*value),
+                            _ => Some(value.clone()),
                         },
-                        FieldType::String | FieldType::Dictionary => Some(*value),
+                        FieldType::String | FieldType::Dictionary => Some(value.clone()),
                     }
                 };
                 let va = tb
@@ -831,9 +832,6 @@ impl TableBuilder {
                             (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => {
                                 af.partial_cmp(&(*bi as f64))
                             }
-                            (crate::value::Value::Str(a), crate::value::Value::Str(b)) => {
-                                Some(a.cmp(b))
-                            }
                             (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => {
                                 Some(a.cmp(b))
                             }
@@ -844,10 +842,11 @@ impl TableBuilder {
                                 crate::value::Value::Timestamp(a),
                                 crate::value::Value::Timestamp(b),
                             ) => Some(a.cmp(b)),
-                            // Different logical types are not ordered. In
-                            // particular, never compare a typed number to a
-                            // string representation lexicographically.
-                            _ => None,
+                            // String comparison: covers Str, Owned, and mixed
+                            (a, b) => match (a.as_str(), b.as_str()) {
+                                (Some(a), Some(b)) => Some(a.cmp(b)),
+                                _ => None,
+                            },
                         };
                         let pass = ord.is_some_and(|ord| match op {
                             crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
@@ -933,7 +932,7 @@ impl TableBuilder {
                 if b.len() > self.row_count {
                     b.pop();
                 }
-                b.push_value(*val);
+                b.push_value(val.clone());
             }
             // Null-fill missing columns and handle filter/dirty, then increment row_count.
             // Skip null-fill when called mid-row (buf.direct = true): the remaining
@@ -1145,7 +1144,7 @@ impl ColumnarSink for TableBuilder {
         }
         let slot = self.ensure_column_idx(&resolved) as u32;
         self.mark_predicate_slot(slot);
-        let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
+        let val_static: Value<'static> = value.into_static();
         let is_pred = self.is_predicate_slot(slot);
         #[cfg(feature = "profile")]
         if is_pred {
@@ -1254,7 +1253,7 @@ impl ColumnarSink for TableBuilder {
         }
         let slot = self.ensure_column_idx(resolved_name) as u32;
         self.mark_predicate_slot(slot);
-        let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
+        let val_static: Value<'static> = value.into_static();
         let is_pred = self.is_predicate_slot(slot);
         #[cfg(feature = "profile")]
         if is_pred {
@@ -1313,10 +1312,13 @@ impl ColumnarSink for TableBuilder {
         // Direct mode: predicate already passed, push directly to columns.
         if let Some(ref buf) = self.row_buf {
             if buf.direct {
-                let resolved = name;
-                if self.frozen.is_some() && !self.field_index.contains_key(resolved) {
+                let resolved = match self.plan.resolve_field(name) {
+                    Some(r) => r.to_owned(),
+                    None => return, // field is dropped
+                };
+                if self.frozen.is_some() && !self.field_index.contains_key(resolved.as_str()) {
                     if let Some(ref frozen) = self.frozen {
-                        if !frozen.column_names().iter().any(|n| n.as_ref() == resolved) {
+                        if !frozen.column_names().iter().any(|n| n.as_ref() == resolved.as_str()) {
                             if self.unknown_error.is_none() {
                                 self.unknown_error = Some(format!(
                                     "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
@@ -1327,7 +1329,7 @@ impl ColumnarSink for TableBuilder {
                         }
                     }
                 }
-                self.push_field_resolved(resolved, value);
+                self.push_field_resolved(&resolved, value);
                 return;
             }
         }
@@ -1352,7 +1354,7 @@ impl ColumnarSink for TableBuilder {
             }
             let slot = self.ensure_column_idx(resolved) as u32;
             self.mark_predicate_slot(slot);
-            let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
+            let val_static: Value<'static> = value.into_static();
             let is_pred = self.is_predicate_slot(slot);
             #[cfg(feature = "profile")]
             if is_pred {
@@ -1406,7 +1408,7 @@ impl ColumnarSink for TableBuilder {
                 }
                 let slot = self.ensure_column_idx(&owned) as u32;
                 self.mark_predicate_slot(slot);
-                let val_static: Value<'static> = unsafe { std::mem::transmute(value) };
+                let val_static: Value<'static> = value.into_static();
                 let is_pred = self.is_predicate_slot(slot);
                 #[cfg(feature = "profile")]
                 if is_pred {

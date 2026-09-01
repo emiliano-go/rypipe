@@ -453,6 +453,7 @@ impl ColumnBuilder {
         match value {
             Value::Null => self.push(None),
             Value::Str(s) => self.push_str(Some(s)),
+            Value::Owned(ref s) => self.push_str(Some(s.as_str())),
             Value::Int64(i) => match self {
                 ColumnBuilder::Int64(v) => v.push(Some(i)),
                 ColumnBuilder::Float64(v) => v.push(Some(i as f64)),
