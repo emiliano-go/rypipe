@@ -71,7 +71,7 @@ pub fn find2(hay: &[u8], from: usize, a: u8, b: u8) -> Option<(usize, u8)> {
 /// Check if bytes at position `at` start with the given literal.
 #[inline]
 pub fn starts_with<const N: usize>(hay: &[u8], at: usize, lit: &[u8; N]) -> bool {
-    hay[at..].get(..N).map_or(false, |s| s == lit)
+    at + N <= hay.len() && hay[at..at + N] == *lit
 }
 
 /// Find a multi-byte literal using `memmem::Finder`.
@@ -186,7 +186,7 @@ mod tests {
         let data = b"a,b,c";
         assert_eq!(find2(data, 0, b'a', b'b'), Some((0, b'a')));
         assert_eq!(find2(data, 0, b'b', b'a'), Some((0, b'a')));
-        assert_eq!(find2(data, 1, b'b', b'c'), Some((1, b'b')));
+        assert_eq!(find2(data, 1, b'b', b'c'), Some((2, b'b')));
     }
 
     #[test]
