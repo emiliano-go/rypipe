@@ -73,25 +73,20 @@ impl Splitter for FrameSplitter {
         if from >= bytes.len() {
             return None;
         }
-        // Find the next complete frame starting at or after `from`
-        let mut cursor = from;
-        while cursor < bytes.len() {
-            if bytes[cursor] != b'@' {
-                return None;
-            }
-            let header_start = cursor + 1;
-            let colon_rel = bytes[header_start..]
-                .iter()
-                .position(|&byte| byte == b':')?;
-            let colon = header_start + colon_rel;
-            let body_len = decimal(&bytes[header_start..colon])?;
-            let end = colon.checked_add(1)?.checked_add(body_len)?;
-            if end > bytes.len() {
-                return None;
-            }
-            return Some(end);
+        if bytes[from] != b'@' {
+            return None;
         }
-        None
+        let header_start = from + 1;
+        let colon_rel = bytes[header_start..]
+            .iter()
+            .position(|&byte| byte == b':')?;
+        let colon = header_start + colon_rel;
+        let body_len = decimal(&bytes[header_start..colon])?;
+        let end = colon.checked_add(1)?.checked_add(body_len)?;
+        if end > bytes.len() {
+            return None;
+        }
+        Some(end)
     }
     fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
         if bytes.is_empty() || max_chunks <= 1 {
