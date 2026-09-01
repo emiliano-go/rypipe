@@ -185,19 +185,18 @@ impl ParallelExecutor {
                 }
                 let col_name = unify_col.unwrap();
                 // Build seed from first chunk, unify, remap.
-                let first_dict = if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } =
-                    &engines[0].columns[engines[0].field_index[&col_name]]
-                {
-                    dict.clone()
-                } else {
-                    return engines_to_record_batches(engines, &plan);
-                };
+                let first_dict =
+                    if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } =
+                        &engines[0].columns[engines[0].field_index[&col_name]]
+                    {
+                        dict.clone()
+                    } else {
+                        return engines_to_record_batches(engines, &plan);
+                    };
                 let seed = crate::dict::SeedDict::new(first_dict);
                 let col_refs: Vec<&crate::columnar::ColumnBuilder> = engines
                     .iter()
-                    .filter_map(|e| {
-                        e.field_index.get(&col_name).map(|&idx| &e.columns[idx])
-                    })
+                    .filter_map(|e| e.field_index.get(&col_name).map(|&idx| &e.columns[idx]))
                     .collect();
                 let (unified_dict, remaps) = crate::dict::unify_dictionaries(&seed, &col_refs);
                 // Build unified dict values and index for replace_dict.

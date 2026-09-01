@@ -821,34 +821,69 @@ impl TableBuilder {
                 match (va, vb) {
                     (Some(ref a), Some(ref b)) => {
                         let ord = match (a, b) {
-                            (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => Some(ai.cmp(bi).into()),
-                            (crate::value::Value::Float64(af), crate::value::Value::Float64(bf)) => af.partial_cmp(bf),
-                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => ((*ai as f64).partial_cmp(bf)),
-                            (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => af.partial_cmp(&(*bi as f64)),
+                            (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => {
+                                Some(ai.cmp(bi).into())
+                            }
+                            (
+                                crate::value::Value::Float64(af),
+                                crate::value::Value::Float64(bf),
+                            ) => af.partial_cmp(bf),
+                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => {
+                                ((*ai as f64).partial_cmp(bf))
+                            }
+                            (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => {
+                                af.partial_cmp(&(*bi as f64))
+                            }
                             (crate::value::Value::Str(a), crate::value::Value::Str(b)) => {
-                                let resolved_a = tb.plan.resolve_field(field_a).unwrap_or(field_a.as_str());
-                                let resolved_b = tb.plan.resolve_field(field_b).unwrap_or(field_b.as_str());
+                                let resolved_a =
+                                    tb.plan.resolve_field(field_a).unwrap_or(field_a.as_str());
+                                let resolved_b =
+                                    tb.plan.resolve_field(field_b).unwrap_or(field_b.as_str());
                                 let type_a = tb.plan.field_types.get(resolved_a);
                                 let type_b = tb.plan.field_types.get(resolved_b);
                                 match (type_a, type_b) {
-                                    (Some(crate::plan::FieldType::Int64), Some(crate::plan::FieldType::Int64)) => {
-                                        let ai: i64 = lexical::parse(a.as_bytes()).ok().unwrap_or(0);
-                                        let bi: i64 = lexical::parse(b.as_bytes()).ok().unwrap_or(0);
+                                    (
+                                        Some(crate::plan::FieldType::Int64),
+                                        Some(crate::plan::FieldType::Int64),
+                                    ) => {
+                                        let ai: i64 =
+                                            lexical::parse(a.as_bytes()).ok().unwrap_or(0);
+                                        let bi: i64 =
+                                            lexical::parse(b.as_bytes()).ok().unwrap_or(0);
                                         Some(ai.cmp(&bi).into())
                                     }
-                                    (Some(crate::plan::FieldType::Float64), Some(crate::plan::FieldType::Float64)) => {
-                                        let af: f64 = lexical::parse(a.as_bytes()).ok().unwrap_or(0.0);
-                                        let bf: f64 = lexical::parse(b.as_bytes()).ok().unwrap_or(0.0);
+                                    (
+                                        Some(crate::plan::FieldType::Float64),
+                                        Some(crate::plan::FieldType::Float64),
+                                    ) => {
+                                        let af: f64 =
+                                            lexical::parse(a.as_bytes()).ok().unwrap_or(0.0);
+                                        let bf: f64 =
+                                            lexical::parse(b.as_bytes()).ok().unwrap_or(0.0);
                                         af.partial_cmp(&bf)
                                     }
-                                    (Some(crate::plan::FieldType::Int64), Some(crate::plan::FieldType::Float64)) => {
-                                        let ai: f64 = lexical::parse::<i64, _>(a.as_bytes()).ok().unwrap_or(0) as f64;
-                                        let bf: f64 = lexical::parse(b.as_bytes()).ok().unwrap_or(0.0);
+                                    (
+                                        Some(crate::plan::FieldType::Int64),
+                                        Some(crate::plan::FieldType::Float64),
+                                    ) => {
+                                        let ai: f64 = lexical::parse::<i64, _>(a.as_bytes())
+                                            .ok()
+                                            .unwrap_or(0)
+                                            as f64;
+                                        let bf: f64 =
+                                            lexical::parse(b.as_bytes()).ok().unwrap_or(0.0);
                                         ai.partial_cmp(&bf)
                                     }
-                                    (Some(crate::plan::FieldType::Float64), Some(crate::plan::FieldType::Int64)) => {
-                                        let af: f64 = lexical::parse(a.as_bytes()).ok().unwrap_or(0.0);
-                                        let bi: f64 = lexical::parse::<i64, _>(b.as_bytes()).ok().unwrap_or(0) as f64;
+                                    (
+                                        Some(crate::plan::FieldType::Float64),
+                                        Some(crate::plan::FieldType::Int64),
+                                    ) => {
+                                        let af: f64 =
+                                            lexical::parse(a.as_bytes()).ok().unwrap_or(0.0);
+                                        let bi: f64 = lexical::parse::<i64, _>(b.as_bytes())
+                                            .ok()
+                                            .unwrap_or(0)
+                                            as f64;
                                         af.partial_cmp(&bi)
                                     }
                                     // Mixed typed/untyped or String vs non-numeric type:
@@ -857,16 +892,23 @@ impl TableBuilder {
                                     // Both untyped (String): fall back to lexicographic.
                                     (None, None) => Some(a.cmp(&b).into()),
                                     // Both Timestamp: parse and compare as i64.
-                                    (Some(crate::plan::FieldType::Timestamp(ua)), Some(crate::plan::FieldType::Timestamp(ub))) => {
+                                    (
+                                        Some(crate::plan::FieldType::Timestamp(ua)),
+                                        Some(crate::plan::FieldType::Timestamp(ub)),
+                                    ) => {
                                         let ta = crate::columnar::parse_timestamp(a.as_ref(), *ua);
-                                        let tb_val = crate::columnar::parse_timestamp(b.as_ref(), *ub);
+                                        let tb_val =
+                                            crate::columnar::parse_timestamp(b.as_ref(), *ub);
                                         match (ta, tb_val) {
                                             (Some(ai), Some(bi)) => Some(ai.cmp(&bi).into()),
                                             _ => None,
                                         }
                                     }
                                     // Both Date32: parse and compare as i32.
-                                    (Some(crate::plan::FieldType::Date32), Some(crate::plan::FieldType::Date32)) => {
+                                    (
+                                        Some(crate::plan::FieldType::Date32),
+                                        Some(crate::plan::FieldType::Date32),
+                                    ) => {
                                         let da = crate::columnar::parse_date32(a.as_ref());
                                         let db = crate::columnar::parse_date32(b.as_ref());
                                         match (da, db) {
@@ -878,7 +920,9 @@ impl TableBuilder {
                                     _ => None,
                                 }
                             }
-                            (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => Some(a.cmp(b).into()),
+                            (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => {
+                                Some(a.cmp(b).into())
+                            }
                             _ => {
                                 let av = format!("{:?}", a);
                                 let bv = format!("{:?}", b);
@@ -1378,7 +1422,11 @@ impl ColumnarSink for TableBuilder {
                 };
                 if self.frozen.is_some() && !self.field_index.contains_key(resolved.as_str()) {
                     if let Some(ref frozen) = self.frozen {
-                        if !frozen.column_names().iter().any(|n| n.as_ref() == resolved.as_str()) {
+                        if !frozen
+                            .column_names()
+                            .iter()
+                            .any(|n| n.as_ref() == resolved.as_str())
+                        {
                             if self.unknown_error.is_none() {
                                 self.unknown_error = Some(format!(
                                     "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
@@ -1515,7 +1563,12 @@ impl ColumnarSink for TableBuilder {
             return false;
         }
         // Check that every wanted bit is set in row_dirty.
-        let dirty = self.row_dirty.iter().copied().reduce(|a, b| a | b).unwrap_or(0);
+        let dirty = self
+            .row_dirty
+            .iter()
+            .copied()
+            .reduce(|a, b| a | b)
+            .unwrap_or(0);
         (dirty & mask) == mask
     }
 
@@ -2135,7 +2188,11 @@ mod tests {
             tb.begin_row();
             // Owned values, as produced by entity unescaping in an adapter.
             let a = Cow::Owned(format!("value-{i}-unescaped"));
-            let b = Cow::Owned(if i % 2 == 0 { "ok".to_string() } else { "no".to_string() });
+            let b = Cow::Owned(if i % 2 == 0 {
+                "ok".to_string()
+            } else {
+                "no".to_string()
+            });
             tb.resolve_and_put("A", Value::Str(a));
             tb.resolve_and_put("B", Value::Str(b));
             tb.end_row();

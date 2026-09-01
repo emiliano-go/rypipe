@@ -113,7 +113,9 @@ fn main() {
     // Warmup
     {
         let plan = ExecutionPlan::new();
-        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)) };
+        let mut sink = PushOnly {
+            inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)),
+        };
         parser.parse_chunk(&data, &mut sink).unwrap();
     }
 
@@ -123,7 +125,9 @@ fn main() {
     let mut last_rows = 0usize;
     for _ in 0..n {
         let plan = ExecutionPlan::new();
-        let mut sink = PushOnly { inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)) };
+        let mut sink = PushOnly {
+            inner: rypipe_core::TableBuilder::with_plan(est, Arc::new(plan)),
+        };
         let t0 = Instant::now();
         parser.parse_chunk(&data, &mut sink).unwrap();
         let dt = t0.elapsed().as_secs_f64();
@@ -140,7 +144,10 @@ fn main() {
     let cov = stdev / mean;
     let fields_total = last_rows * fields_per_row;
 
-    println!("push_only {median:.4}s median ({best:.4}-{worst:.4}, CoV {:.1}%)", cov * 100.0);
+    println!(
+        "push_only {median:.4}s median ({best:.4}-{worst:.4}, CoV {:.1}%)",
+        cov * 100.0
+    );
     println!("  {last_rows} rows, {mb:.1} MB, {:.0} MB/s", mb / median);
     println!("  ns/field: {:.0}", median * 1e9 / fields_total as f64);
     println!();
