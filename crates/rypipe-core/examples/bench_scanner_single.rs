@@ -66,11 +66,12 @@ impl RecordParser for TsvParser {
             sink.begin_row();
             for token in line.split('\t') {
                 if let Some((k, v)) = token.split_once('=') {
-                    if sink.needs_resolve() && !sink.wants(k) {
-                        continue;
-                    }
                     if sink.needs_value() {
-                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
+                        // Fast path: resolve once, then push with the resolved name.
+                        sink.resolve_and_put(k, Value::Str(Cow::Borrowed(v)));
+                    } else if sink.needs_resolve() {
+                        // Locate-only path: count the field without extracting its value.
+                        sink.put_field(k, Value::Null);
                     }
                 }
             }

@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use rypipe_core::{
     bounded::MemoryBudget, decoder::ColumnarSink, decoder::RecordParser, decoder::Splitter,
-    pipeline::Pipeline, plan::FieldType, value::Value, Result,
+    parallel::chunk_profile, pipeline::Pipeline, plan::FieldType, value::Value, Result,
 };
 
 const ROWS: usize = 5_000_000;
@@ -38,13 +38,16 @@ impl Splitter for TsvSplitter {
             return vec![0, bytes.len()];
         }
         let mut points = vec![0usize];
-        let mut last = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'\n' {
-                let next = i + 1;
-                if next > last && points.len() < max_chunks {
+        let target = bytes.len() / max_chunks;
+        for i in 1..max_chunks {
+            let approx = i * target;
+            // Find the next newline after the approximate boundary so each
+            // chunk ends on a row boundary. This gives roughly equal sizes
+            // instead of the old first-K-newlines behaviour.
+            if let Some(off) = memchr::memchr(b'\n', &bytes[approx..]) {
+                let next = approx + off + 1;
+                if next > *points.last().unwrap() && next < bytes.len() {
                     points.push(next);
-                    last = next;
                 }
             }
         }
@@ -79,9 +82,10 @@ impl RecordParser for TsvParser {
             sink.begin_row();
             for token in line.split('\t') {
                 if let Some((k, v)) = token.split_once('=') {
-                    if sink.wants(k) {
-                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
-                    }
+                    // Fast path: resolve once, then push with the resolved name.
+                    // Avoids the wants() + put_field() double probe and the
+                    // to_owned() fallback in the default resolve_and_put.
+                    sink.resolve_and_put(k, Value::Str(Cow::Borrowed(v)));
                 }
             }
             sink.end_row();
@@ -90,17 +94,31 @@ impl RecordParser for TsvParser {
     }
 }
 
-fn current_rss_kb() -> Option<usize> {
+#[derive(Clone, Copy, Default)]
+struct Rss {
+    total_kb: usize,
+    anon_kb: usize,
+    file_kb: usize,
+}
+
+fn current_rss() -> Option<Rss> {
     #[cfg(target_os = "linux")]
     {
         let file = File::open("/proc/self/status").ok()?;
+        let mut rss = Rss::default();
         for line in std::io::BufReader::new(file).lines() {
             let line = line.ok()?;
             if let Some(rest) = line.strip_prefix("VmRSS:") {
-                return rest.split_whitespace().next().and_then(|n| n.parse().ok());
+                rss.total_kb = rest.split_whitespace().next().and_then(|n| n.parse().ok())?;
+            } else if let Some(rest) = line.strip_prefix("RssAnon:") {
+                rss.anon_kb = rest.split_whitespace().next().and_then(|n| n.parse().ok())?;
+            } else if let Some(rest) = line.strip_prefix("RssFile:") {
+                rss.file_kb = rest.split_whitespace().next().and_then(|n| n.parse().ok())?;
             }
         }
+        return Some(rss);
     }
+    #[allow(unreachable_code)]
     None
 }
 
@@ -124,8 +142,15 @@ fn run(name: &str, input_bytes: usize, rounds: usize, f: impl Fn() -> Result<usi
     let (med, cov, rows) = median_of(rounds, &f);
     let rows_per_sec = rows as f64 / med;
     let mb_per_sec = input_bytes as f64 / med / 1_000_000.0;
-    let memory = current_rss_kb()
-        .map(|kb| format!("{:6.0} MB", kb as f64 / 1024.0))
+    let memory = current_rss()
+        .map(|rss| {
+            format!(
+                "{:6.0} MB ({:6.0} anon + {:6.0} file)",
+                rss.total_kb as f64 / 1024.0,
+                rss.anon_kb as f64 / 1024.0,
+                rss.file_kb as f64 / 1024.0
+            )
+        })
         .unwrap_or_else(|| "  N/A  ".to_string());
     let cov_pct = cov * 100.0;
     println!(
@@ -161,11 +186,17 @@ fn main() -> Result<()> {
 
     run("parallel (4 chunks)", bytes, rounds, || {
         let batches = pipeline.read_path_par(&path, 4, false, false)?;
+        let (split_ns, sum_ns, max_ns, count) = chunk_profile();
+        eprintln!("    [par4 profile] split={:.2}ms chunks_sum={:.2}ms max={:.2}ms count={}",
+                  split_ns as f64 / 1e6, sum_ns as f64 / 1e6, max_ns as f64 / 1e6, count);
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())
     });
 
     run("parallel (8 chunks)", bytes, rounds, || {
         let batches = pipeline.read_path_par(&path, 8, false, false)?;
+        let (split_ns, sum_ns, max_ns, count) = chunk_profile();
+        eprintln!("    [par8 profile] split={:.2}ms chunks_sum={:.2}ms max={:.2}ms count={}",
+                  split_ns as f64 / 1e6, sum_ns as f64 / 1e6, max_ns as f64 / 1e6, count);
         Ok(batches.iter().map(|b| b.num_rows()).sum::<usize>())
     });
 
