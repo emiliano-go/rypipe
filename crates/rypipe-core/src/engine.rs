@@ -1596,6 +1596,11 @@ impl ColumnarSink for TableBuilder {
             *entry = None;
         }
     }
+
+    #[inline]
+    fn reset_child_ordinal(&mut self) {
+        self.current_ordinal = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
