@@ -822,14 +822,14 @@ impl TableBuilder {
                     (Some(ref a), Some(ref b)) => {
                         let ord = match (a, b) {
                             (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => {
-                                Some(ai.cmp(bi).into())
+                                Some(ai.cmp(bi))
                             }
                             (
                                 crate::value::Value::Float64(af),
                                 crate::value::Value::Float64(bf),
                             ) => af.partial_cmp(bf),
                             (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => {
-                                ((*ai as f64).partial_cmp(bf))
+                                (*ai as f64).partial_cmp(bf)
                             }
                             (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => {
                                 af.partial_cmp(&(*bi as f64))
@@ -850,7 +850,7 @@ impl TableBuilder {
                                             lexical::parse(a.as_bytes()).ok().unwrap_or(0);
                                         let bi: i64 =
                                             lexical::parse(b.as_bytes()).ok().unwrap_or(0);
-                                        Some(ai.cmp(&bi).into())
+                                        Some(ai.cmp(&bi))
                                     }
                                     (
                                         Some(crate::plan::FieldType::Float64),
@@ -890,7 +890,7 @@ impl TableBuilder {
                                     // type mismatch — fail the comparison.
                                     (Some(_), None) | (None, Some(_)) => None,
                                     // Both untyped (String): fall back to lexicographic.
-                                    (None, None) => Some(a.cmp(&b).into()),
+                                    (None, None) => Some(a.cmp(b)),
                                     // Both Timestamp: parse and compare as i64.
                                     (
                                         Some(crate::plan::FieldType::Timestamp(ua)),
@@ -900,7 +900,7 @@ impl TableBuilder {
                                         let tb_val =
                                             crate::columnar::parse_timestamp(b.as_ref(), *ub);
                                         match (ta, tb_val) {
-                                            (Some(ai), Some(bi)) => Some(ai.cmp(&bi).into()),
+                                            (Some(ai), Some(bi)) => Some(ai.cmp(&bi)),
                                             _ => None,
                                         }
                                     }
@@ -912,7 +912,7 @@ impl TableBuilder {
                                         let da = crate::columnar::parse_date32(a.as_ref());
                                         let db = crate::columnar::parse_date32(b.as_ref());
                                         match (da, db) {
-                                            (Some(ai), Some(bi)) => Some(ai.cmp(&bi).into()),
+                                            (Some(ai), Some(bi)) => Some(ai.cmp(&bi)),
                                             _ => None,
                                         }
                                     }
@@ -921,12 +921,12 @@ impl TableBuilder {
                                 }
                             }
                             (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => {
-                                Some(a.cmp(b).into())
+                                Some(a.cmp(b))
                             }
                             _ => {
                                 let av = format!("{:?}", a);
                                 let bv = format!("{:?}", b);
-                                Some(av.cmp(&bv).into())
+                                Some(av.cmp(&bv))
                             }
                         };
                         let pass = ord.is_some_and(|ord| match op {

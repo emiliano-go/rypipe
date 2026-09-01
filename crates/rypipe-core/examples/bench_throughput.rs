@@ -218,10 +218,9 @@ fn current_rss() -> Option<Rss> {
 
 fn adaptive_median(f: impl Fn() -> Result<usize>) -> (f64, f64, usize, usize) {
     let mut times: Vec<f64> = Vec::with_capacity(31);
-    let mut last_rows = 0;
 
     // Warmup
-    last_rows = f().expect("warmup failed");
+    let mut last_rows = f().expect("warmup failed");
 
     // Adaptive: sample until 1.31 × CoV ≤ 5%, capped at 31.
     for n in 1..=31 {
@@ -255,6 +254,7 @@ fn adaptive_median(f: impl Fn() -> Result<usize>) -> (f64, f64, usize, usize) {
 // S2e: Steady-state (20× inner loop for fast configs)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn steady_state(f: impl Fn() -> Result<usize>) -> (f64, usize) {
     let mut times: Vec<f64> = Vec::with_capacity(20);
     let mut last_rows = 0;
@@ -275,6 +275,7 @@ fn steady_state(f: impl Fn() -> Result<usize>) -> (f64, usize) {
 
 struct BenchConfig {
     name: &'static str,
+    #[allow(dead_code)]
     rounds: usize,
 }
 
@@ -412,26 +413,26 @@ fn main() -> Result<()> {
             .type_as("count", FieldType::Int64),
     );
 
-    let configs = vec![BenchConfig {
+    let configs = [BenchConfig {
         name: "single-thread",
         rounds: 7,
     }];
 
     println!("-- single-thread --");
-    if only_config.map_or(true, |c| c == 0) {
+    if only_config.is_none_or(|c| c == 0) {
         run_config(&configs[0], &pipeline, &path, bytes);
     }
 
     println!("\n-- parallel --");
     for (i, chunks) in [4, 8, 16].iter().enumerate() {
         let cfg_idx = i + 1;
-        if only_config.map_or(true, |c| c == cfg_idx) {
+        if only_config.is_none_or(|c| c == cfg_idx) {
             run_par_config(&format!("par{chunks}"), &pipeline, &path, bytes, *chunks);
         }
     }
 
     println!("\n-- streaming --");
-    if only_config.map_or(true, |c| c == 4) {
+    if only_config.is_none_or(|c| c == 4) {
         run_stream_config(
             "bounded 64 MiB",
             &pipeline,

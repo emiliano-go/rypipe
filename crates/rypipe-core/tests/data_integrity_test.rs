@@ -469,7 +469,7 @@ fn plan_filter_six_rows_no_data_loss() {
     let single = p.read_bytes(data).unwrap();
     assert_eq!(single.num_rows(), 4, "single");
     let par = p.read_bytes_par(data, 2).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
     assert_batches_equal(&[single], &stream);
 }
@@ -482,7 +482,7 @@ fn plan_filter_resolve_and_put_six_rows() {
     let single = p.read_bytes(data).unwrap();
     assert_eq!(single.num_rows(), 4, "single resolve_and_put");
     let par = p.read_bytes_par(data, 2).unwrap();
-    assert_batches_equal(&[single.clone()], &par);
+    assert_batches_equal(std::slice::from_ref(&single), &par);
     let stream = p.read_bytes_stream(data, MemoryBudget::new(128)).unwrap();
     assert_batches_equal(&[single], &stream);
 }
@@ -684,7 +684,8 @@ fn direct_table_builder_extend_preserves_all_rows_and_columns() {
         t1.put_field(k, Value::Str(Cow::Borrowed(v)));
     }
     t1.end_row();
-    for (k, v) in [("A", "3")] {
+    {
+        let (k, v) = ("A", "3");
         t1.put_field(k, Value::Str(Cow::Borrowed(v)));
     }
     t1.end_row();

@@ -4,7 +4,6 @@ pub(crate) mod table_builder;
 
 pub use locate::LocateOnly;
 pub use predicate::PredicateState;
-pub(crate) use predicate::RowBuffer;
 pub use table_builder::TableBuilder;
 
 // Re-export for backward compatibility — existing code does `use crate::engine::*`.
