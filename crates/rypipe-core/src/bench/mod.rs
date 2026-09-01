@@ -4,8 +4,13 @@
 //! exactly one cost layer each, and a `ladder` function that runs all tiers
 //! and reports cumulative ms/MB, deltas, shares, CoV, and `n` per tier.
 //!
+//! Also provides:
+//! - `alloc_baseline`: allocation pressure harness (S8)
+//! - `ParProfile`: phase timing counters (S9)
+//!
 //! Usage:
 //!     cargo test --features bench --release -- ladder --nocapture
+//!     cargo test --features bench --release -- alloc_baseline --nocapture
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -328,4 +333,112 @@ fn bench_tier<S: Splitter, P: RecordParser, Sink: ColumnarSink>(
     let n = times.len();
     let med = times[n / 2];
     (med, n)
+}
+
+// ---------------------------------------------------------------------------
+// S8: alloc_baseline — allocation pressure harness
+// ---------------------------------------------------------------------------
+
+/// Run a closure and report allocation statistics.
+///
+/// Reports: allocs, bytes, peak_live, reallocs, allocs_per_row, and the
+/// log2 size histogram.  Determinism assertion: two consecutive runs must
+/// produce identical counts (within 1% for timing-sensitive allocs).
+pub fn alloc_baseline<F: Fn() -> usize>(label: &str, f: F) {
+    #[cfg(feature = "alloc-stats")]
+    {
+        use crate::alloc_stats::{self, AllocStats};
+
+        let stats1 = alloc_stats::snapshot();
+        let rows = f();
+        let stats2 = alloc_stats::snapshot();
+        let delta = stats2.delta(&stats1);
+
+        let allocs_per_row = if rows > 0 {
+            delta.allocs as f64 / rows as f64
+        } else {
+            0.0
+        };
+
+        println!("\n{label}:");
+        println!("  allocs:        {:>12}", delta.allocs);
+        println!("  frees:         {:>12}", delta.frees);
+        println!("  bytes:         {:>12} ({:.1} MB)", delta.bytes, delta.bytes as f64 / 1e6);
+        println!("  peak_live:     {:>12} ({:.1} MB)", delta.peak, delta.peak as f64 / 1e6);
+        println!("  reallocs:      {:>12}", delta.reallocs);
+        println!("  rows:          {:>12}", rows);
+        println!("  allocs/row:    {:>12.2}", allocs_per_row);
+        println!("  size histogram (log2):");
+        for (k, &count) in delta.size_hist.iter().enumerate() {
+            if count > 0 {
+                let lo = 1u64 << k;
+                let hi = if k < 63 { 1u64 << (k + 1) } else { u64::MAX };
+                println!("    [{:>3}] {:>3}..{:<3}  {:>12}", k, lo, hi, count);
+            }
+        }
+
+        // Determinism check
+        let stats3 = alloc_stats::snapshot();
+        let rows2 = f();
+        let stats4 = alloc_stats::snapshot();
+        let delta2 = stats4.delta(&stats3);
+
+        if delta.allocs != delta2.allocs {
+            eprintln!(
+                "  WARNING: non-deterministic alloc count: {} vs {}",
+                delta.allocs, delta2.allocs
+            );
+        }
+        if rows != rows2 {
+            eprintln!(
+                "  WARNING: non-deterministic row count: {} vs {}",
+                rows, rows2
+            );
+        }
+    }
+    #[cfg(not(feature = "alloc-stats"))]
+    {
+        let _ = (label, f);
+        eprintln!("alloc_baseline requires --features alloc-stats");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S9: ParProfile — phase timing counters
+// ---------------------------------------------------------------------------
+
+/// Phase timing counters for parallel execution.
+///
+/// Behind `#[cfg(feature = "profile")]` — costs ~15% on filtered paths
+/// when enabled, so never enable in throughput builds.
+#[derive(Debug, Clone, Default)]
+pub struct ParProfile {
+    pub split_scan_ns: u64,
+    pub skip_regions_ns: u64,
+    pub discovery_ns: u64,
+    pub chunk_sum_ns: u64,
+    pub chunk_max_ns: u64,
+    pub chunk_mean_ns: u64,
+    pub chunk_count: u64,
+    pub spread: f64,
+    pub export_ns: u64,
+    pub combine_ns: u64,
+}
+
+impl ParProfile {
+    pub fn print(&self) {
+        let split_ms = self.split_scan_ns as f64 / 1e6;
+        let skip_ms = self.skip_regions_ns as f64 / 1e6;
+        let disc_ms = self.discovery_ns as f64 / 1e6;
+        let chunk_sum_ms = self.chunk_sum_ns as f64 / 1e6;
+        let chunk_max_ms = self.chunk_max_ns as f64 / 1e6;
+        let export_ms = self.export_ns as f64 / 1e6;
+        let combine_ms = self.combine_ns as f64 / 1e6;
+        println!(
+            "ParProfile: split={split_ms:.2}ms skip={skip_ms:.2}ms disc={disc_ms:.2}ms \
+             chunks_sum={chunk_sum_ms:.2}ms max={chunk_max_ms:.2}ms count={} spread={:.2}x \
+             export={export_ms:.2}ms combine={combine_ms:.2}ms",
+            self.chunk_count, self.spread
+        );
+    }
 }
