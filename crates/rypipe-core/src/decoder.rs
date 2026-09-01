@@ -149,6 +149,29 @@ pub trait ColumnarSink {
         false
     }
 
+    /// After the layout is learned, the expected (slot, raw name bytes) at
+    /// this ordinal position in the record.  The adapter can compare the
+    /// raw bytes in-place (one memcmp) instead of running the full
+    /// attribute scan → UTF-8 decode → hash → lookup path.
+    ///
+    /// Return `None` to fall back to the generic path.  Default: `None`.
+    #[inline]
+    fn expect_slot(&self, _ordinal: u32) -> Option<(u32, &[u8])> {
+        None
+    }
+
+    /// Adapter reports the slot it resolved for `ordinal` so the engine
+    /// can cache it for subsequent rows.  Called after the adapter resolves
+    /// a field via the generic path (wants + resolve + put_field_resolved).
+    #[inline]
+    fn record_slot(&mut self, _ordinal: u32, _slot: u32, _raw_name: &[u8]) {}
+
+    /// Adapter reports that the layout expected at `ordinal` did not match.
+    /// The engine should invalidate its cached expectation and fall back to
+    /// generic resolution for subsequent rows.
+    #[inline]
+    fn layout_broken(&mut self, _ordinal: u32) {}
+
     /// Finalize the sink into an Arrow `RecordBatch`.
     fn finish(&mut self) -> Result<RecordBatch>;
 }
