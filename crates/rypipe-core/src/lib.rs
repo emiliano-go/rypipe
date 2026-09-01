@@ -27,6 +27,7 @@ pub mod parallel;
 pub mod parallel_stream;
 pub mod pipeline;
 pub mod plan;
+pub mod scan;
 pub mod schema;
 pub mod streaming;
 pub mod value;
