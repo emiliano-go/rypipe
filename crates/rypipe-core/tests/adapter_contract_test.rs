@@ -69,6 +69,30 @@ fn complete_frame_ends(bytes: &[u8]) -> Vec<usize> {
 }
 
 impl Splitter for FrameSplitter {
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        if from >= bytes.len() {
+            return None;
+        }
+        // Find the next complete frame starting at or after `from`
+        let mut cursor = from;
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'@' {
+                return None;
+            }
+            let header_start = cursor + 1;
+            let colon_rel = bytes[header_start..]
+                .iter()
+                .position(|&byte| byte == b':')?;
+            let colon = header_start + colon_rel;
+            let body_len = decimal(&bytes[header_start..colon])?;
+            let end = colon.checked_add(1)?.checked_add(body_len)?;
+            if end > bytes.len() {
+                return None;
+            }
+            return Some(end);
+        }
+        None
+    }
     fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
         if bytes.is_empty() || max_chunks <= 1 {
             return vec![0, bytes.len()];
@@ -158,8 +182,8 @@ impl RecordParser for FrameParser {
             };
 
             sink.begin_row();
-            sink.put_field("id", Value::Str(id));
-            sink.put_field("note", Value::Str(note));
+            sink.put_field("id", Value::Str(std::borrow::Cow::Borrowed(id)));
+            sink.put_field("note", Value::Str(std::borrow::Cow::Borrowed(note)));
             sink.end_row();
             cursor = end;
         }

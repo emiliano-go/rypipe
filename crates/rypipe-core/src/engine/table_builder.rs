@@ -2346,9 +2346,9 @@ mod tests {
             .drop("ignored");
         let mut tb = TableBuilder::with_plan(2, Arc::new(plan));
         tb.begin_row();
-        tb.resolve_and_put_raw(b"raw", Value::Str("value"));
-        tb.resolve_and_put_raw(b"ignored", Value::Str("not stored"));
-        tb.put_row(&[("other", Value::Str("also stored"))]);
+        tb.resolve_and_put_raw(b"raw", Value::Str(Cow::Borrowed("value")));
+        tb.resolve_and_put_raw(b"ignored", Value::Str(Cow::Borrowed("not stored")));
+        tb.put_row(&[("other", Value::Str(Cow::Borrowed("also stored")))]);
         tb.end_row();
 
         assert_eq!(tb.column_names(), &["renamed", "other"]);

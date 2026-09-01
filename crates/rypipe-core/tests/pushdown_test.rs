@@ -459,6 +459,12 @@ fn test_parallel_panic_propagates_message() {
     struct AnySplitter;
 
     impl rypipe_core::Splitter for AnySplitter {
+        fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+            if from >= bytes.len() {
+                return None;
+            }
+            Some((from + 1).min(bytes.len()))
+        }
         fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
             vec![0, bytes.len().max(1) / max_chunks.max(1), bytes.len()]
         }
@@ -485,6 +491,16 @@ fn test_parallel_panic_propagates_message() {
 struct LineSplitter;
 
 impl rypipe_core::Splitter for LineSplitter {
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        if from >= bytes.len() {
+            return None;
+        }
+        let start = if bytes[from] == b'\n' { from + 1 } else { from };
+        if start >= bytes.len() {
+            return None;
+        }
+        memchr::memchr(b'\n', &bytes[start..]).map(|rel| start + rel + 1)
+    }
     fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
         if max_chunks <= 1 || bytes.is_empty() {
             return vec![0, bytes.len()];

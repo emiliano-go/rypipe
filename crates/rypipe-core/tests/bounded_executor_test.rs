@@ -42,6 +42,16 @@ impl RecordParser for LineParser {
 struct LineSplitter;
 
 impl Splitter for LineSplitter {
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        if from >= bytes.len() {
+            return None;
+        }
+        let start = if bytes[from] == b'\n' { from + 1 } else { from };
+        if start >= bytes.len() {
+            return None;
+        }
+        memchr::memchr(b'\n', &bytes[start..]).map(|rel| start + rel + 1)
+    }
     fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
         if max_chunks <= 1 || bytes.is_empty() {
             return vec![0, bytes.len()];
