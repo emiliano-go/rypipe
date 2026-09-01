@@ -55,8 +55,8 @@ pub trait ColumnarSink {
     /// behavior.
     #[inline]
     fn put_row(&mut self, fields: &[(&str, Value<'_>)]) {
-        for &(name, value) in fields {
-            self.put_field(name, value);
+        for (name, value) in fields {
+            self.put_field(name, value.clone());
         }
     }
 
