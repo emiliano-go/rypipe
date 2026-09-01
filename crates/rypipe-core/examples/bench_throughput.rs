@@ -180,11 +180,20 @@ fn current_rss() -> Option<Rss> {
         for line in std::io::BufReader::new(file).lines() {
             let line = line.ok()?;
             if let Some(rest) = line.strip_prefix("VmRSS:") {
-                rss.total_kb = rest.split_whitespace().next().and_then(|n| n.parse().ok())?;
+                rss.total_kb = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())?;
             } else if let Some(rest) = line.strip_prefix("RssAnon:") {
-                rss.anon_kb = rest.split_whitespace().next().and_then(|n| n.parse().ok())?;
+                rss.anon_kb = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())?;
             } else if let Some(rest) = line.strip_prefix("RssFile:") {
-                rss.file_kb = rest.split_whitespace().next().and_then(|n| n.parse().ok())?;
+                rss.file_kb = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())?;
             }
         }
         return Some(rss);
@@ -216,8 +225,7 @@ fn adaptive_median(f: impl Fn() -> Result<usize>) -> (f64, f64, usize, usize) {
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let med = times[n / 2];
         let mean = times.iter().sum::<f64>() / n as f64;
-        let stdev =
-            (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+        let stdev = (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
         let cov = stdev / mean;
         if 1.31 * cov <= 0.05 {
             return (med, cov, last_rows, n);
@@ -394,12 +402,10 @@ fn main() -> Result<()> {
             .type_as("count", FieldType::Int64),
     );
 
-    let configs = vec![
-        BenchConfig {
-            name: "single-thread",
-            rounds: 7,
-        },
-    ];
+    let configs = vec![BenchConfig {
+        name: "single-thread",
+        rounds: 7,
+    }];
 
     println!("-- single-thread --");
     if only_config.map_or(true, |c| c == 0) {
@@ -410,13 +416,7 @@ fn main() -> Result<()> {
     for (i, chunks) in [4, 8, 16].iter().enumerate() {
         let cfg_idx = i + 1;
         if only_config.map_or(true, |c| c == cfg_idx) {
-            run_par_config(
-                &format!("par{chunks}"),
-                &pipeline,
-                &path,
-                bytes,
-                *chunks,
-            );
+            run_par_config(&format!("par{chunks}"), &pipeline, &path, bytes, *chunks);
         }
     }
 

@@ -658,7 +658,11 @@ fn test_equal_filter_via_resolve_and_put() {
     });
 
     let batch = parse_bytes_resolve(b"A=yes B=1\nA=no B=2\nA=yes B=3\n", plan);
-    assert_eq!(batch.num_rows(), 2, "Equal filter via resolve_and_put should keep 2 rows");
+    assert_eq!(
+        batch.num_rows(),
+        2,
+        "Equal filter via resolve_and_put should keep 2 rows"
+    );
     let a = batch.column_by_name("A").unwrap().as_string::<i32>();
     assert_eq!(a.value(0), "yes");
     assert_eq!(a.value(1), "yes");
@@ -673,7 +677,11 @@ fn test_not_equal_filter_via_resolve_and_put() {
     });
 
     let batch = parse_bytes_resolve(b"A=keep B=1\nA=skip B=2\nA=keep B=3\n", plan);
-    assert_eq!(batch.num_rows(), 2, "NotEqual filter via resolve_and_put should keep 2 rows");
+    assert_eq!(
+        batch.num_rows(),
+        2,
+        "NotEqual filter via resolve_and_put should keep 2 rows"
+    );
     let a = batch.column_by_name("A").unwrap().as_string::<i32>();
     assert_eq!(a.value(0), "keep");
     assert_eq!(a.value(1), "keep");

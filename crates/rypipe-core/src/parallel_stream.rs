@@ -327,13 +327,18 @@ impl ParallelStreamingExecutor {
                 } else {
                     let opts = DiscoveryOpts::default();
                     let sig = crate::schema::layout_signature(actual_bytes, &opts);
-                    let cached = crate::schema::SCHEMA_CACHE.read().unwrap().get(&sig).cloned();
+                    let cached = crate::schema::SCHEMA_CACHE
+                        .read()
+                        .unwrap()
+                        .get(&sig)
+                        .cloned();
                     let (schema, order) = if let Some(order) = cached {
                         crate::schema::SCHEMA_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
                         (FrozenSchema::from_discovered(&order, &plan), order)
                     } else {
                         crate::schema::SCHEMA_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-                        let (schema, order) = discover_schema(actual_bytes, &parser, &plan, splitter);
+                        let (schema, order) =
+                            discover_schema(actual_bytes, &parser, &plan, splitter);
                         (schema, Arc::new(order))
                     };
                     if !order.is_empty() {

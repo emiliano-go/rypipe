@@ -209,14 +209,22 @@ pub struct TierResult {
 
 impl LadderReport {
     pub fn print(&self) {
-        println!("\n{:<20} {:>10} {:>10} {:>12} {:>12} {:>8} {:>6} {:>4}", 
-            "tier", "time(s)", "delta(s)", "cum ms/MB", "Δ ms/MB", "share%", "CoV%", "n");
+        println!(
+            "\n{:<20} {:>10} {:>10} {:>12} {:>12} {:>8} {:>6} {:>4}",
+            "tier", "time(s)", "delta(s)", "cum ms/MB", "Δ ms/MB", "share%", "CoV%", "n"
+        );
         println!("{}", "-".repeat(90));
         for t in &self.tiers {
             println!(
                 "{:<20} {:10.4} {:10.4} {:12.3} {:12.3} {:7.1}% {:5.1}% {:4}",
-                t.name, t.time_s, t.delta_s, t.cum_ms_per_mb, t.delta_ms_per_mb,
-                t.share_pct, t.cov_pct, t.n
+                t.name,
+                t.time_s,
+                t.delta_s,
+                t.cum_ms_per_mb,
+                t.delta_ms_per_mb,
+                t.share_pct,
+                t.cov_pct,
+                t.n
             );
         }
     }
@@ -243,14 +251,16 @@ pub fn ladder<S: Splitter, P: RecordParser>(
     let (t_noop, n) = bench_tier::<S, P, NoopSink>(splitter, parser, bytes, &mut NoopSink, rounds);
 
     // Tier 2: Traverse
-    let (t_trav, n) = bench_tier::<S, P, TraverseSink>(splitter, parser, bytes, &mut TraverseSink, rounds);
+    let (t_trav, n) =
+        bench_tier::<S, P, TraverseSink>(splitter, parser, bytes, &mut TraverseSink, rounds);
 
     // Tier 3: Locate
     let mut loc = crate::engine::LocateOnly::new(ExecutionPlan::new());
     let (t_loc, n) = bench_tier(splitter, parser, bytes, &mut loc, rounds);
 
     // Tier 4: Extract
-    let (t_ext, n) = bench_tier::<S, P, ExtractOnly>(splitter, parser, bytes, &mut ExtractOnly, rounds);
+    let (t_ext, n) =
+        bench_tier::<S, P, ExtractOnly>(splitter, parser, bytes, &mut ExtractOnly, rounds);
 
     // Tier 5: Push
     let mut push = PushOnly::new(Arc::clone(&plan));
@@ -265,19 +275,37 @@ pub fn ladder<S: Splitter, P: RecordParser>(
     let (t_full, n) = bench_tier(splitter, parser, bytes, &mut tb, rounds);
 
     let times = [t_noop, t_trav, t_loc, t_ext, t_push, t_build, t_full];
-    let names = ["scan_only", "traverse", "locate", "extract", "push", "build", "full_parse"];
-    let deltas: Vec<f64> = times.iter().scan(0.0, |acc, &t| {
-        let d = t - *acc;
-        *acc = t;
-        Some(d)
-    }).collect();
+    let names = [
+        "scan_only",
+        "traverse",
+        "locate",
+        "extract",
+        "push",
+        "build",
+        "full_parse",
+    ];
+    let deltas: Vec<f64> = times
+        .iter()
+        .scan(0.0, |acc, &t| {
+            let d = t - *acc;
+            *acc = t;
+            Some(d)
+        })
+        .collect();
 
     let total = t_full;
-    let tiers: Vec<TierResult> = times.iter().zip(deltas.iter()).zip(names.iter())
+    let tiers: Vec<TierResult> = times
+        .iter()
+        .zip(deltas.iter())
+        .zip(names.iter())
         .map(|((&time, &delta), &name)| {
             let cum_ms = time / mb * 1000.0;
             let delta_ms = delta / mb * 1000.0;
-            let share = if total > 0.0 { delta / total * 100.0 } else { 0.0 };
+            let share = if total > 0.0 {
+                delta / total * 100.0
+            } else {
+                0.0
+            };
             TierResult {
                 name,
                 time_s: time,
@@ -308,7 +336,9 @@ pub fn ladder<S: Splitter, P: RecordParser>(
         assert!(
             t.time_s >= prev - 0.0001,
             "ladder not monotonic: {} ({:.4}) < previous ({:.4})",
-            t.name, t.time_s, prev
+            t.name,
+            t.time_s,
+            prev
         );
         prev = t.time_s;
     }
@@ -363,8 +393,16 @@ pub fn alloc_baseline<F: Fn() -> usize>(label: &str, f: F) {
         println!("\n{label}:");
         println!("  allocs:        {:>12}", delta.allocs);
         println!("  frees:         {:>12}", delta.frees);
-        println!("  bytes:         {:>12} ({:.1} MB)", delta.bytes, delta.bytes as f64 / 1e6);
-        println!("  peak_live:     {:>12} ({:.1} MB)", delta.peak, delta.peak as f64 / 1e6);
+        println!(
+            "  bytes:         {:>12} ({:.1} MB)",
+            delta.bytes,
+            delta.bytes as f64 / 1e6
+        );
+        println!(
+            "  peak_live:     {:>12} ({:.1} MB)",
+            delta.peak,
+            delta.peak as f64 / 1e6
+        );
         println!("  reallocs:      {:>12}", delta.reallocs);
         println!("  rows:          {:>12}", rows);
         println!("  allocs/row:    {:>12.2}", allocs_per_row);

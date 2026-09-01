@@ -384,11 +384,18 @@ impl<T: Copy + Default> PrimColumn<T> {
         let other_data = self.data[..n].to_vec();
         self.data.drain(..n);
         let other_validity = self.validity.split_off(n);
-        PrimColumn { data: other_data, validity: other_validity }
+        PrimColumn {
+            data: other_data,
+            validity: other_validity,
+        }
     }
 
     pub(crate) fn get(&self, i: usize) -> Option<T> {
-        if self.validity.is_valid(i) { Some(self.data[i]) } else { None }
+        if self.validity.is_valid(i) {
+            Some(self.data[i])
+        } else {
+            None
+        }
     }
 
     /// Move all values from `other` onto the end of `self`.
@@ -400,7 +407,10 @@ impl<T: Copy + Default> PrimColumn<T> {
 
 impl<T: Copy + Default> Default for PrimColumn<T> {
     fn default() -> Self {
-        PrimColumn { data: Vec::new(), validity: ValidityBitmap::default() }
+        PrimColumn {
+            data: Vec::new(),
+            validity: ValidityBitmap::default(),
+        }
     }
 }
 
@@ -415,9 +425,7 @@ impl<T: Copy> PrimColumn<T> {
 
     /// Zero-copy Arrow export: moves data and validity buffers into a
     /// `PrimitiveArray` via `ScalarBuffer` and `NullBuffer`.
-    fn to_arrow<A: arrow::array::ArrowPrimitiveType>(
-        &mut self,
-    ) -> Result<ArrayRef>
+    fn to_arrow<A: arrow::array::ArrowPrimitiveType>(&mut self) -> Result<ArrayRef>
     where
         A::Native: From<T>,
     {
@@ -683,7 +691,10 @@ impl ColumnBuilder {
                 )));
             }
             let float_data: Vec<f64> = v.data.into_iter().map(|n| n as f64).collect();
-            *self = ColumnBuilder::Float64(PrimColumn { data: float_data, validity: v.validity });
+            *self = ColumnBuilder::Float64(PrimColumn {
+                data: float_data,
+                validity: v.validity,
+            });
             return Ok(());
         }
 
@@ -809,9 +820,7 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => v.bytes_used(),
             ColumnBuilder::Date32(v) => v.bytes_used(),
             ColumnBuilder::Timestamp(_, v) => v.bytes_used(),
-            ColumnBuilder::Dictionary { codes, dict, .. } => {
-                codes.len() * 4 + dict.len() * 16
-            }
+            ColumnBuilder::Dictionary { codes, dict, .. } => codes.len() * 4 + dict.len() * 16,
         }
     }
 
@@ -1011,7 +1020,11 @@ impl ColumnBuilder {
 
     /// Replace the dictionary values and index (after unification).
     /// No-op if not a Dictionary variant.
-    pub(crate) fn replace_dict(&mut self, new_dict: Vec<String>, new_index: rustc_hash::FxHashMap<String, i32>) {
+    pub(crate) fn replace_dict(
+        &mut self,
+        new_dict: Vec<String>,
+        new_index: rustc_hash::FxHashMap<String, i32>,
+    ) {
         if let ColumnBuilder::Dictionary { dict, index, .. } = self {
             *dict = new_dict;
             *index = new_index;

@@ -8,8 +8,8 @@
 #[cfg(test)]
 use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, LazyLock, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use rustc_hash::{FxHashMap, FxHasher};
 

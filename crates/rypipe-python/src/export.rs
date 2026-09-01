@@ -47,8 +47,7 @@ pub fn record_batches_to_pyarrow<'py>(
     combine: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     if !combine {
-        return record_batches_to_pyarrow_batches(py, batches)
-            .map(|list| list.into_any());
+        return record_batches_to_pyarrow_batches(py, batches).map(|list| list.into_any());
     }
 
     let pa = PyModule::import(py, "pyarrow")?;

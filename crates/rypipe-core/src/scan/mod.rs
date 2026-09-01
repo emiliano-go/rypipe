@@ -133,12 +133,7 @@ pub fn find_delimiter_or_quote(
 /// When a quote is encountered, scans forward to the matching close quote
 /// before resuming delimiter search. This is the portable half of crxml's
 /// fused scan for CSV/TSV.
-pub fn scan_delimited_field(
-    bytes: &[u8],
-    start: usize,
-    delimiter: u8,
-    quote: u8,
-) -> usize {
+pub fn scan_delimited_field(bytes: &[u8], start: usize, delimiter: u8, quote: u8) -> usize {
     let mut pos = start;
     while pos < bytes.len() {
         match find2(bytes, pos, delimiter, quote) {
@@ -156,7 +151,7 @@ pub fn scan_delimited_field(
                 return bytes.len(); // unterminated quote
             }
             Some((rel, _)) => return rel + 1, // past delimiter
-            None => return bytes.len(),        // no more delimiters
+            None => return bytes.len(),       // no more delimiters
         }
     }
     bytes.len()

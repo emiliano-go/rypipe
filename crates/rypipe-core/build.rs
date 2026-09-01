@@ -26,11 +26,7 @@ fn main() {
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
-    let build_sha = if dirty {
-        format!("{sha}-dirty")
-    } else {
-        sha
-    };
+    let build_sha = if dirty { format!("{sha}-dirty") } else { sha };
 
     println!("cargo:rustc-env=RYPIPE_BUILD_SHA={build_sha}");
 }
