@@ -10,6 +10,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(feature = "alloc-stats")]
 pub mod alloc_stats;
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod arrow_export;
 pub mod block_masks;
 pub mod bounded;

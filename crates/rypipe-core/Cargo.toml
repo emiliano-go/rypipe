@@ -24,6 +24,8 @@ zstd = ["dep:zstd"]
 lz4 = ["dep:lz4_flex"]
 compress-all = ["gzip", "zstd", "lz4"]
 alloc-stats = []
+# Tier ladder for cost decomposition (bench module).
+bench = []
 # Alias for crxml's "profile" feature — activates the same profiling counters
 # in engine.rs that the "profiling" feature does.
 profile = []
