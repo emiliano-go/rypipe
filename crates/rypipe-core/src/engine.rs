@@ -818,11 +818,11 @@ impl TableBuilder {
                     .get_buffered_value(field_b)
                     .and_then(|value| normalize(field_b, value));
                 match (va, vb) {
-                    (Some(a), Some(b)) => {
+                    (Some(ref a), Some(ref b)) => {
                         let ord = match (a, b) {
                             (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => Some(ai.cmp(bi).into()),
                             (crate::value::Value::Float64(af), crate::value::Value::Float64(bf)) => af.partial_cmp(bf),
-                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => (*ai as f64).partial_cmp(bf),
+                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => ((*ai as f64).partial_cmp(bf)),
                             (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => af.partial_cmp(&(*bi as f64)),
                             (crate::value::Value::Str(a), crate::value::Value::Str(b)) => {
                                 let resolved_a = tb.plan.resolve_field(field_a).unwrap_or(field_a.as_str());
@@ -854,11 +854,11 @@ impl TableBuilder {
                                     // type mismatch — fail the comparison.
                                     (Some(_), None) | (None, Some(_)) => None,
                                     // Both untyped (String): fall back to lexicographic.
-                                    (None, None) => Some(a.cmp(b).into()),
+                                    (None, None) => Some(a.cmp(&b).into()),
                                     // Both Timestamp: parse and compare as i64.
                                     (Some(crate::plan::FieldType::Timestamp(ua)), Some(crate::plan::FieldType::Timestamp(ub))) => {
-                                        let ta = crate::columnar::parse_timestamp(a, *ua);
-                                        let tb_val = crate::columnar::parse_timestamp(b, *ub);
+                                        let ta = crate::columnar::parse_timestamp(a.as_ref(), *ua);
+                                        let tb_val = crate::columnar::parse_timestamp(b.as_ref(), *ub);
                                         match (ta, tb_val) {
                                             (Some(ai), Some(bi)) => Some(ai.cmp(&bi).into()),
                                             _ => None,
@@ -866,8 +866,8 @@ impl TableBuilder {
                                     }
                                     // Both Date32: parse and compare as i32.
                                     (Some(crate::plan::FieldType::Date32), Some(crate::plan::FieldType::Date32)) => {
-                                        let da = crate::columnar::parse_date32(a);
-                                        let db = crate::columnar::parse_date32(b);
+                                        let da = crate::columnar::parse_date32(a.as_ref());
+                                        let db = crate::columnar::parse_date32(b.as_ref());
                                         match (da, db) {
                                             (Some(ai), Some(bi)) => Some(ai.cmp(&bi).into()),
                                             _ => None,
@@ -883,31 +883,6 @@ impl TableBuilder {
                                 let bv = format!("{:?}", b);
                                 Some(av.cmp(&bv).into())
                             }
-                            (
-                                crate::value::Value::Float64(af),
-                                crate::value::Value::Float64(bf),
-                            ) => af.partial_cmp(bf),
-                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => {
-                                (*ai as f64).partial_cmp(bf)
-                            }
-                            (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => {
-                                af.partial_cmp(&(*bi as f64))
-                            }
-                            (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => {
-                                Some(a.cmp(b))
-                            }
-                            (crate::value::Value::Date32(a), crate::value::Value::Date32(b)) => {
-                                Some(a.cmp(b))
-                            }
-                            (
-                                crate::value::Value::Timestamp(a),
-                                crate::value::Value::Timestamp(b),
-                            ) => Some(a.cmp(b)),
-                            // String comparison: covers Str, Owned, and mixed
-                            (a, b) => match (a.as_str(), b.as_str()) {
-                                (Some(a), Some(b)) => Some(a.cmp(b)),
-                                _ => None,
-                            },
                         };
                         let pass = ord.is_some_and(|ord| match op {
                             crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,

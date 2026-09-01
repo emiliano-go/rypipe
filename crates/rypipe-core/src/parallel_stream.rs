@@ -118,7 +118,7 @@ fn discover_schema<P: crate::decoder::RecordParser>(
     parser: &P,
     plan: &crate::plan::ExecutionPlan,
     splitter: &dyn crate::decoder::Splitter,
-) -> FrozenSchema {
+) -> (FrozenSchema, Vec<String>) {
     let t0 = std::time::Instant::now();
     // Explicit schema already handled by caller; this is auto-discovery.
     let opts = DiscoveryOpts::default();
@@ -166,11 +166,12 @@ fn discover_schema<P: crate::decoder::RecordParser>(
     let elapsed = t0.elapsed().as_nanos() as u64;
     DISCOVERY_NS.store(elapsed, Ordering::Relaxed);
     let _ = splitter; // keep splitter in signature for future alignment
-    if order.is_empty() {
+    let schema = if order.is_empty() {
         FrozenSchema::from_plan(&[], plan)
     } else {
         FrozenSchema::from_discovered(&order, plan)
-    }
+    };
+    (schema, order)
 }
 
 /// Public helper for batch workloads: discover the schema once and reuse.
@@ -189,7 +190,21 @@ pub fn discover_schema_for_bytes<P: crate::decoder::RecordParser>(
         let names: Vec<&str> = plan.schema_order.iter().map(|s| s.as_str()).collect();
         return FrozenSchema::from_plan(&names, plan);
     }
-    discover_schema(bytes, parser, plan, splitter)
+    let opts = DiscoveryOpts::default();
+    let sig = crate::schema::layout_signature(bytes, &opts);
+    {
+        let cache = crate::schema::SCHEMA_CACHE.read().unwrap();
+        if let Some(order) = cache.get(&sig) {
+            crate::schema::SCHEMA_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            return FrozenSchema::from_discovered(order, plan);
+        }
+    }
+    crate::schema::SCHEMA_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    let (schema, order) = discover_schema(bytes, parser, plan, splitter);
+    if !order.is_empty() {
+        crate::schema::insert_schema_cache(sig, Arc::new(order));
+    }
+    schema
 }
 
 /// Parallel streaming executor: parses chunks concurrently with bounded memory.
@@ -310,7 +325,21 @@ impl ParallelStreamingExecutor {
                     let names: Vec<&str> = plan.schema_order.iter().map(|s| s.as_str()).collect();
                     Some(FrozenSchema::from_plan(&names, &plan))
                 } else {
-                    Some(discover_schema(actual_bytes, &parser, &plan, splitter))
+                    let opts = DiscoveryOpts::default();
+                    let sig = crate::schema::layout_signature(actual_bytes, &opts);
+                    let cached = crate::schema::SCHEMA_CACHE.read().unwrap().get(&sig).cloned();
+                    let (schema, order) = if let Some(order) = cached {
+                        crate::schema::SCHEMA_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                        (FrozenSchema::from_discovered(&order, &plan), order)
+                    } else {
+                        crate::schema::SCHEMA_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+                        let (schema, order) = discover_schema(actual_bytes, &parser, &plan, splitter);
+                        (schema, Arc::new(order))
+                    };
+                    if !order.is_empty() {
+                        crate::schema::insert_schema_cache(sig, order);
+                    }
+                    Some(schema)
                 }
             }
         };
@@ -439,9 +468,9 @@ impl ParallelStreamingExecutor {
                         // Unordered (either opted out or fell back): deliver immediately.
                         consumer.consume(batch)?;
                     }
-                } else {
-                    // Unordered: deliver immediately regardless of sequence.
-                    consumer.consume(batch)?;
+                }
+                Err(_) => {
+                    // Skip failed chunks (logged upstream).
                 }
             }
         }
@@ -555,5 +584,95 @@ impl Iterator for ParallelStreamingBatchIterator {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::decoder::{ColumnarSink, RecordParser, Splitter};
+    use crate::plan::ExecutionPlan;
+    use crate::schema::{clear_schema_cache, schema_cache_stats};
+    use crate::value::Value;
+
+    /// Minimal parser: newline-separated rows of `key=value\t...` tokens.
+    #[derive(Clone, Debug, Default)]
+    struct NameValueParser;
+
+    impl RecordParser for NameValueParser {
+        fn validate(&self, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+            let text = std::str::from_utf8(bytes).map_err(|e| crate::Error::Plan(e.to_string()))?;
+            for line in text.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                sink.begin_row();
+                for token in line.split('\t') {
+                    if let Some((k, v)) = token.split_once('=') {
+                        sink.resolve_and_put(k, Value::Str(Cow::Borrowed(v)));
+                    }
+                }
+                sink.end_row();
+            }
+            Ok(())
+        }
+    }
+
+    /// Trivial splitter: one chunk covering the whole input.
+    struct NullSplitter;
+
+    impl Splitter for NullSplitter {
+        fn find_split_points(&self, bytes: &[u8], _max_chunks: usize) -> Vec<usize> {
+            vec![0, bytes.len()]
+        }
+
+        fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+            let n = sample.iter().filter(|&&b| b == b'\n').count().max(1);
+            sample.len() / n
+        }
+    }
+
+    fn names(schema: &FrozenSchema) -> Vec<&str> {
+        schema.column_names().iter().map(|s| s.as_ref()).collect()
+    }
+
+    #[test]
+    fn schema_cache_hits_misses_and_plan_changes() {
+        clear_schema_cache();
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+
+        // First layout: miss.
+        let bytes = b"a=1\tb=2\na=3\tb=4\n";
+        let plan = ExecutionPlan::new();
+        let s1 = discover_schema_for_bytes(bytes, &splitter, &parser, &plan);
+        assert_eq!(names(&s1), vec!["a", "b"]);
+        assert_eq!(schema_cache_stats(), (0, 1));
+
+        // Same layout: hit.
+        let s2 = discover_schema_for_bytes(bytes, &splitter, &parser, &plan);
+        assert_eq!(names(&s2), vec!["a", "b"]);
+        assert_eq!(schema_cache_stats(), (1, 1));
+
+        // Different layout: new miss.
+        let bytes2 = b"c=1\td=2\n";
+        let s3 = discover_schema_for_bytes(bytes2, &splitter, &parser, &plan);
+        assert_eq!(names(&s3), vec!["c", "d"]);
+        assert_eq!(schema_cache_stats(), (1, 2));
+
+        // Same layout as the first parse but with a different plan:
+        // cache hit, but the applied schema differs.
+        let mut renamed = ExecutionPlan::new();
+        renamed.field_map.insert("a".to_string(), "x".to_string());
+        let s4 = discover_schema_for_bytes(bytes, &splitter, &parser, &renamed);
+        assert_eq!(names(&s4), vec!["x", "b"]);
+        assert_eq!(schema_cache_stats(), (2, 2));
     }
 }
