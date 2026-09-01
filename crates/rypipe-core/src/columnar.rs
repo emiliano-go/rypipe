@@ -190,6 +190,22 @@ impl<T: Default + Clone> NullableColumn<T> {
     }
 }
 
+impl NullableColumn<i32> {
+    /// Remap dictionary codes in place using a pre-built map.
+    /// Null entries are skipped; valid entries have `values[i] = map[values[i]]`.
+    pub(crate) fn remap_codes(&mut self, map: &[i32]) {
+        for i in 0..self.len() {
+            if self.validity.is_valid(i) {
+                let v = &mut self.values[i];
+                debug_assert!((*v as usize) < map.len(), "code out of bounds in remap");
+                unsafe {
+                    *v = *map.get_unchecked(*v as usize);
+                }
+            }
+        }
+    }
+}
+
 /// A borrowed, typed view of a single stored value, used for native-typed
 /// filter evaluation without allocating.
 #[derive(Debug, PartialEq)]
@@ -982,6 +998,24 @@ impl ColumnBuilder {
             }
         }
         *self = ColumnBuilder::Dictionary { codes, dict, index };
+    }
+
+    /// Mutable access to dictionary codes for in-place remap.
+    /// Returns `None` if not a Dictionary variant.
+    pub(crate) fn dict_codes_mut(&mut self) -> Option<&mut NullableColumn<i32>> {
+        match self {
+            ColumnBuilder::Dictionary { codes, .. } => Some(codes),
+            _ => None,
+        }
+    }
+
+    /// Replace the dictionary values and index (after unification).
+    /// No-op if not a Dictionary variant.
+    pub(crate) fn replace_dict(&mut self, new_dict: Vec<String>, new_index: rustc_hash::FxHashMap<String, i32>) {
+        if let ColumnBuilder::Dictionary { dict, index, .. } = self {
+            *dict = new_dict;
+            *index = new_index;
+        }
     }
 
     /// Arrow logical type for this column.

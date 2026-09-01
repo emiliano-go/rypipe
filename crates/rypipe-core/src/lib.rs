@@ -16,6 +16,7 @@ pub mod bounded;
 pub mod columnar;
 pub mod consumer;
 pub mod decoder;
+pub mod dict;
 pub mod engine;
 pub mod error;
 pub mod input;
