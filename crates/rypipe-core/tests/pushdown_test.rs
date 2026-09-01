@@ -209,7 +209,8 @@ fn test_compare_typed_columns() {
     assert_eq!(a.value(1), 5);
 }
 
-/// Mismatched non-numeric types (Str vs Int64) fail every row.
+/// Mismatched types (Int64 vs String) are cast to Utf8 for comparison.
+/// "1" < "x" is true lexicographically, so both rows pass.
 #[test]
 fn test_compare_type_mismatch_fails_rows() {
     let mut plan = ExecutionPlan::new();
@@ -221,7 +222,7 @@ fn test_compare_type_mismatch_fails_rows() {
     });
 
     let batch = parse_bytes(b"A=1 S=x\nA=2 S=y\n", plan);
-    assert_eq!(batch.num_rows(), 0);
+    assert_eq!(batch.num_rows(), 2);
 }
 
 /// Rows missing either compared field are rejected.
