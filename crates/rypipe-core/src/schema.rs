@@ -7,9 +7,11 @@
 
 #[cfg(test)]
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 
 use crate::plan::{ExecutionPlan, FieldType};
 
@@ -48,6 +50,72 @@ impl Default for DiscoveryOpts {
             window_bytes: 2 * 1024 * 1024, // 2 MiB
         }
     }
+}
+
+/// Maximum number of entries kept in the schema-discovery cache.  The cache
+/// is per-process and unbounded by default; cap it to avoid slow growth over
+/// long-running sessions with many distinct layouts.
+pub const SCHEMA_CACHE_CAP: usize = 128;
+
+/// Global layout-keyed cache for discovered raw field-name order.
+/// Key is `(file_len, sample_hash)`; value is the raw order from a previous
+/// full discovery. The current plan is applied to the cached order on hit.
+pub static SCHEMA_CACHE: LazyLock<RwLock<FxHashMap<(u64, u64), Arc<Vec<String>>>>> =
+    LazyLock::new(|| RwLock::new(FxHashMap::default()));
+
+/// Number of schema-discovery cache hits.
+pub static SCHEMA_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+/// Number of schema-discovery cache misses.
+pub static SCHEMA_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Compute a cheap layout signature for schema-discovery caching.
+/// Small files are hashed in full; large files hash several strided windows
+/// so that identical length + leading window is no longer enough to collide.
+pub fn layout_signature(bytes: &[u8], opts: &DiscoveryOpts) -> (u64, u64) {
+    let mut hasher = FxHasher::default();
+    if (bytes.len() as u64) < opts.full_scan_threshold {
+        bytes.hash(&mut hasher);
+    } else {
+        // Hash a few windows spread through the file.  This makes the key
+        // much less likely to collide for same-sized exports from the same
+        // template with different trailing columns.
+        let n = 4usize;
+        let w = opts.window_bytes.min(bytes.len());
+        for i in 0..n {
+            let start = (bytes.len() - w) * i / n.max(1);
+            bytes[start..start + w].hash(&mut hasher);
+        }
+    }
+    (bytes.len() as u64, hasher.finish())
+}
+
+/// Insert a discovered layout into the cache, evicting the oldest entry if
+/// the cache is at capacity.  `FxHashMap` does not track insertion order, so
+/// we evict an arbitrary key; for a bounded cache this is sufficient and
+/// avoids adding an LRU dependency.
+pub fn insert_schema_cache(sig: (u64, u64), order: Arc<Vec<String>>) {
+    let mut cache = SCHEMA_CACHE.write().unwrap();
+    if cache.len() >= SCHEMA_CACHE_CAP {
+        if let Some(oldest) = cache.keys().next().copied() {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(sig, order);
+}
+
+/// Clear the discovery cache and reset its hit/miss counters.
+pub fn clear_schema_cache() {
+    SCHEMA_CACHE.write().unwrap().clear();
+    SCHEMA_CACHE_HITS.store(0, Ordering::Relaxed);
+    SCHEMA_CACHE_MISSES.store(0, Ordering::Relaxed);
+}
+
+/// Return the current cache hit and miss counts.
+pub fn schema_cache_stats() -> (u64, u64) {
+    (
+        SCHEMA_CACHE_HITS.load(Ordering::Relaxed),
+        SCHEMA_CACHE_MISSES.load(Ordering::Relaxed),
+    )
 }
 
 /// What to do when a field appears in the file but not in the schema.

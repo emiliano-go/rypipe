@@ -32,16 +32,25 @@ pub fn record_batches_to_pyarrow_batches<'py>(
     Ok(list)
 }
 
-/// Export a slice of Arrow `RecordBatch`es to a single `pyarrow.Table`.
+/// Export a slice of Arrow `RecordBatch`es to Python.
 ///
-/// Mirrors crxml's `concat_tables` logic:
-/// * If all batch schemas match, concatenate without promotion.
-/// * If schemas differ (e.g. auto-dict promotion), use
-///   `promote_options="default"`.
-pub fn record_batches_to_pyarrow_table<'py>(
+/// * `combine=false` (the default) returns a Python list of
+///   `pyarrow.RecordBatch` objects — no concatenation, no promotion copy.
+/// * `combine=true` returns a single `pyarrow.Table` by concatenating the
+///   batches (matching the behaviour of the old `record_batches_to_pyarrow_table`).
+///
+/// This is the engine-side default: keep the chunked `Vec<RecordBatch>`
+/// representation unless the caller explicitly needs one big table.
+pub fn record_batches_to_pyarrow<'py>(
     py: Python<'py>,
     batches: &[RecordBatch],
+    combine: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if !combine {
+        return record_batches_to_pyarrow_batches(py, batches)
+            .map(|list| list.into_any());
+    }
+
     let pa = PyModule::import(py, "pyarrow")?;
 
     if batches.is_empty() {
@@ -76,4 +85,21 @@ pub fn record_batches_to_pyarrow_table<'py>(
         kwargs.set_item("promote_options", "default")?;
         Ok(pa.call_method("concat_tables", (tables,), Some(&kwargs))?)
     }
+}
+
+/// Export a slice of Arrow `RecordBatch`es to a single `pyarrow.Table`.
+///
+/// Mirrors crxml's `concat_tables` logic:
+/// * If all batch schemas match, concatenate without promotion.
+/// * If schemas differ (e.g. auto-dict promotion), use
+///   `promote_options="default"`.
+///
+/// This is a convenience wrapper around [`record_batches_to_pyarrow`] with
+/// `combine=true`. New code should call `record_batches_to_pyarrow` directly
+/// and default to `combine=false`.
+pub fn record_batches_to_pyarrow_table<'py>(
+    py: Python<'py>,
+    batches: &[RecordBatch],
+) -> PyResult<Bound<'py, PyAny>> {
+    record_batches_to_pyarrow(py, batches, true)
 }
