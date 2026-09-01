@@ -119,7 +119,7 @@ pub fn unify_dictionaries(
             for s in dict {
                 let k: Box<str> = s.clone().into_boxed_str();
                 let g = *global_index.get(&k).unwrap();
-                let local = *index.get(&k).unwrap();
+                let local = *index.get(k.as_ref()).unwrap();
                 if g != local {
                     is_identity = false;
                 }

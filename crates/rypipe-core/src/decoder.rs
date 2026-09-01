@@ -162,6 +162,26 @@ pub trait ColumnarSink {
         false
     }
 
+    /// Whether every wanted column for the current row already has a value.
+    /// The adapter can byte-jump to the row close tag when this returns true,
+    /// skipping remaining fields.  Composes with `row_rejected` (a row can
+    /// be satisfied OR rejected, both short-circuit).
+    ///
+    /// Default: false (never short-circuit).
+    #[inline]
+    fn row_satisfied(&self) -> bool {
+        false
+    }
+
+    /// Bitmask of columns that the projection wants.  Bit `i` is set iff
+    /// column `i` is in the output schema.  The adapter can test membership
+    /// with `(wanted_mask >> slot) & 1 == 1` instead of a virtual call per
+    /// field.  Returns empty mask (all zeros) when no projection is active.
+    #[inline]
+    fn wanted_mask(&self) -> u64 {
+        0
+    }
+
     /// After the layout is learned, the expected (slot, raw name bytes) at
     /// this ordinal position in the record.  The adapter can compare the
     /// raw bytes in-place (one memcmp) instead of running the full

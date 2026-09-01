@@ -1544,6 +1544,45 @@ impl ColumnarSink for TableBuilder {
     }
 
     #[inline]
+    fn row_satisfied(&self) -> bool {
+        let mask = self.wanted_mask();
+        if mask == 0 {
+            return false;
+        }
+        // Check that every wanted bit is set in row_dirty.
+        let dirty = self.row_dirty.iter().copied().reduce(|a, b| a | b).unwrap_or(0);
+        (dirty & mask) == mask
+    }
+
+    #[inline]
+    fn wanted_mask(&self) -> u64 {
+        // Build mask from plan schema_order or field_index.
+        if !self.plan.schema_order.is_empty() {
+            let mut mask = 0u64;
+            for name in &self.plan.schema_order {
+                if let Some(&idx) = self.field_index.get(name.as_str()) {
+                    if idx < 64 {
+                        mask |= 1u64 << idx;
+                    }
+                }
+            }
+            mask
+        } else if self.plan.drop_fields.is_empty() && self.plan.field_map.is_empty() {
+            // No projection: all columns wanted. Return 0 to disable short-circuit.
+            0
+        } else {
+            // drop_fields active: wanted = all columns minus dropped.
+            let mut mask = 0u64;
+            for (name, &idx) in &self.field_index {
+                if idx < 64 && !self.plan.drop_fields.contains(name) {
+                    mask |= 1u64 << idx;
+                }
+            }
+            mask
+        }
+    }
+
+    #[inline]
     fn finish(&mut self) -> Result<RecordBatch> {
         if let Some(err) = self.unknown_error.take() {
             return Err(crate::Error::Merge(err));

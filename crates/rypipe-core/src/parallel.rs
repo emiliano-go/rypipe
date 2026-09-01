@@ -147,15 +147,12 @@ impl ParallelExecutor {
             // Per-chunk upgrade in parallel (was serial after merge)
             engines.par_iter_mut().for_each(|e| e.auto_dict_upgrade());
             if schemas_consistent(&engines) {
-                // Check if any dict columns need unification (usually not, if seed covered)
-                // For now, try fast path; if dictionaries differ, fall through to merge
-                // TODO Phase 0 seed would make this usually identity; for now we check
-                let mut needs_unify = false;
+                // Find first dict column that needs unification across chunks.
+                let mut unify_col: Option<String> = None;
                 for col_name in &engines[0].column_order.clone() {
                     let first_idx = engines[0].field_index.get(col_name).copied();
                     if let Some(idx) = first_idx {
                         if engines[0].columns[idx].variant_key() == "dictionary" {
-                            // Check if all chunks have same dict for this column
                             let first_dict =
                                 if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } =
                                     &engines[0].columns[idx]
@@ -171,22 +168,63 @@ impl ParallelExecutor {
                                     } = &e.columns[j]
                                     {
                                         if dict != first_dict {
-                                            needs_unify = true;
+                                            unify_col = Some(col_name.clone());
                                             break;
                                         }
                                     }
                                 }
                             }
-                            if needs_unify {
+                            if unify_col.is_some() {
                                 break;
                             }
                         }
                     }
                 }
-                if !needs_unify {
+                if unify_col.is_none() {
                     return engines_to_record_batches(engines, &plan);
                 }
-                // If needs unify, fall through to merge path for now (will be handled by dict.rs unify in 8c)
+                let col_name = unify_col.unwrap();
+                // Build seed from first chunk, unify, remap.
+                let first_dict = if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } =
+                    &engines[0].columns[engines[0].field_index[&col_name]]
+                {
+                    dict.clone()
+                } else {
+                    return engines_to_record_batches(engines, &plan);
+                };
+                let seed = crate::dict::SeedDict::new(first_dict);
+                let col_refs: Vec<&crate::columnar::ColumnBuilder> = engines
+                    .iter()
+                    .filter_map(|e| {
+                        e.field_index.get(&col_name).map(|&idx| &e.columns[idx])
+                    })
+                    .collect();
+                let (unified_dict, remaps) = crate::dict::unify_dictionaries(&seed, &col_refs);
+                // Build unified dict values and index for replace_dict.
+                let mut new_dict = Vec::with_capacity(unified_dict.offsets.len() - 1);
+                for w in unified_dict.offsets.windows(2) {
+                    let start = w[0] as usize;
+                    let end = w[1] as usize;
+                    let s = std::str::from_utf8(&unified_dict.data[start..end])
+                        .unwrap_or("")
+                        .to_owned();
+                    new_dict.push(s);
+                }
+                let new_index: HashMap<String, i32> = new_dict
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.clone(), i as i32))
+                    .collect();
+                // Apply remap to each chunk, then replace dict.
+                for (e, remap) in engines.iter_mut().zip(remaps.iter()) {
+                    if let Some(idx) = e.field_index.get(&col_name).copied() {
+                        if let Some(codes) = e.columns[idx].dict_codes_mut() {
+                            codes.remap_codes(&remap.map);
+                        }
+                        e.columns[idx].replace_dict(new_dict.clone(), new_index.clone());
+                    }
+                }
+                return engines_to_record_batches(engines, &plan);
             }
         }
 
