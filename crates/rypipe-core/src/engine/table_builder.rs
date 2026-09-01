@@ -32,45 +32,10 @@ use smallvec::SmallVec;
 
 use crate::columnar::ColumnBuilder;
 use crate::decoder::ColumnarSink;
+use crate::engine::predicate::{PredicateState, RowBuffer};
 use crate::plan::{ExecutionPlan, FieldType, FilterPredicate};
 use crate::value::Value;
 use crate::Result;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum PredicateState {
-    #[default]
-    Undecided,
-    Pass,
-    Fail,
-}
-
-/// Heap-allocated row buffer for predicate-first deferred materialization.
-/// Boxed so that unfiltered parses (the common case) don't carry 1 KB of
-/// inline SmallVec in every `TableBuilder`.
-pub(crate) struct RowBuffer {
-    /// Per-row field buffer: `(slot_index, value)`. u32 is the column index
-    /// from `field_index`, eliminating per-field String allocation.
-    pub(crate) fields: SmallVec<[(u32, Value<'static>); 32]>,
-    pub(crate) state: PredicateState,
-    /// Bitmask of predicate column slots. Bit `i` is set when slot `i` appears
-    /// in the filter predicate. For ≤64 columns this is a single u64; above
-    /// 64 it grows like `row_dirty`.
-    pub(crate) predicate_mask: SmallVec<[u64; 1]>,
-    /// When true, the predicate has already resolved to Pass and remaining
-    /// fields are pushed directly to columns (no buffering).
-    pub(crate) direct: bool,
-    /// Learned ordinal of the predicate column (0-based), set after the first
-    /// row. When the predicate is late (> 4/5 of columns), buffering is a net
-    /// loss — we switch to direct push + pop-on-reject instead.
-    pub(crate) predicate_ordinal: Option<u32>,
-    /// Whether the adaptive strategy has decided buffering is worthwhile.
-    /// True by default; set to false on row 2 when predicate_ordinal is late.
-    pub(crate) buffer_worthwhile: bool,
-    /// Resolved predicate field names, cached once by `build_predicate_mask`.
-    /// Used to check newly-created columns against the filter without cloning
-    /// the filter tree on every non-predicate field.
-    pub(crate) pred_names: SmallVec<[String; 4]>,
-}
 
 /// Generic columnar table builder.  Implements `ColumnarSink` so any decoder
 /// can feed it field/value events; at the end it produces an Arrow
@@ -1645,75 +1610,6 @@ impl ColumnarSink for TableBuilder {
 // ---------------------------------------------------------------------------
 // LocateOnly sink — walk rows, resolve field names, decode nothing.
 // ---------------------------------------------------------------------------
-
-/// A zero-allocation sink that counts rows and fields without decoding or
-/// storing any values.  Use this to measure the cost of the scan + locate
-/// phase independently from extract + store.
-pub struct LocateOnly {
-    pub row_count: usize,
-    pub field_count: usize,
-    pub distinct_fields: rustc_hash::FxHashSet<String>,
-    plan: ExecutionPlan,
-}
-
-impl LocateOnly {
-    pub fn new(plan: ExecutionPlan) -> Self {
-        Self {
-            row_count: 0,
-            field_count: 0,
-            distinct_fields: rustc_hash::FxHashSet::default(),
-            plan,
-        }
-    }
-
-    /// Total fields seen across all rows.
-    pub fn total_fields(&self) -> usize {
-        self.field_count
-    }
-
-    /// Number of distinct field names encountered.
-    pub fn num_distinct_fields(&self) -> usize {
-        self.distinct_fields.len()
-    }
-}
-
-impl ColumnarSink for LocateOnly {
-    #[inline]
-    fn begin_row(&mut self) {}
-
-    #[inline]
-    fn put_field(&mut self, name: &str, _value: Value<'_>) {
-        self.field_count += 1;
-        if let Some(resolved) = self.plan.resolve_field(name) {
-            self.distinct_fields.insert(resolved.to_owned());
-        }
-    }
-
-    #[inline]
-    fn end_row(&mut self) {
-        self.row_count += 1;
-    }
-
-    #[inline]
-    fn wants(&self, _name: &str) -> bool {
-        true
-    }
-
-    #[inline]
-    fn needs_value(&self) -> bool {
-        false
-    }
-
-    #[inline]
-    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
-        self.plan.resolve_field(name)
-    }
-
-    fn finish(&mut self) -> Result<RecordBatch> {
-        let schema = Arc::new(Schema::empty());
-        Ok(RecordBatch::new_empty(schema))
-    }
-}
 
 #[cfg(test)]
 mod tests {
