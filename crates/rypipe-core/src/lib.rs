@@ -4,6 +4,8 @@
 //! small decoder API (`Splitter` + `RecordParser` + `ColumnarSink`).  It has
 //! no format-specific logic and no Python/FFI dependencies.
 
+#![allow(unexpected_cfgs)]
+
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

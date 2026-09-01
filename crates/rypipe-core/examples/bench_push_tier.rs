@@ -105,7 +105,7 @@ fn main() {
         let first_line_end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
         data[..first_line_end]
             .split(|&b| b == b'\t')
-            .filter(|t| t.iter().any(|&b| b == b'='))
+            .filter(|t| t.contains(&b'='))
             .count()
             .max(1)
     };

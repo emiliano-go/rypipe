@@ -57,10 +57,13 @@ impl Default for DiscoveryOpts {
 /// long-running sessions with many distinct layouts.
 pub const SCHEMA_CACHE_CAP: usize = 128;
 
+type SchemaCacheKey = (u64, u64);
+type SchemaCacheValue = Arc<Vec<String>>;
+
 /// Global layout-keyed cache for discovered raw field-name order.
 /// Key is `(file_len, sample_hash)`; value is the raw order from a previous
 /// full discovery. The current plan is applied to the cached order on hit.
-pub static SCHEMA_CACHE: LazyLock<RwLock<FxHashMap<(u64, u64), Arc<Vec<String>>>>> =
+pub static SCHEMA_CACHE: LazyLock<RwLock<FxHashMap<SchemaCacheKey, SchemaCacheValue>>> =
     LazyLock::new(|| RwLock::new(FxHashMap::default()));
 
 /// Number of schema-discovery cache hits.

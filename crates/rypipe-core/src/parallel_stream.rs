@@ -595,7 +595,6 @@ impl Iterator for ParallelStreamingBatchIterator {
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
-    use std::sync::Arc;
 
     use super::*;
     use crate::decoder::{ColumnarSink, RecordParser, Splitter};

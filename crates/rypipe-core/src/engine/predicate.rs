@@ -1,6 +1,3 @@
-use std::cmp::Ordering;
-
-use crate::plan::FilterPredicate;
 use crate::value::Value;
 use smallvec::SmallVec;
 
@@ -43,6 +40,7 @@ pub(crate) struct RowBuffer {
 }
 
 impl RowBuffer {
+    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
             fields: SmallVec::new(),

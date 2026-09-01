@@ -76,7 +76,7 @@ pub struct DictValues {
 ///
 /// Works with `ColumnBuilder::Dictionary { codes, dict, index }`.
 /// Seed codes are `0..seed.len()`, overflow are `seed.len()..`.
-pub fn unify_dictionaries(
+pub(crate) fn unify_dictionaries(
     seed: &SeedDict,
     locals: &[&ColumnBuilder],
 ) -> (DictValues, Vec<RemapTable>) {
@@ -146,12 +146,10 @@ pub fn apply_remap(codes: &mut [Option<i32>], remap: &RemapTable) {
     if remap.is_identity {
         return;
     }
-    for c in codes.iter_mut() {
-        if let Some(v) = c {
-            debug_assert!((*v as usize) < remap.map.len(), "code out of bounds");
-            unsafe {
-                *v = *remap.map.get_unchecked(*v as usize);
-            }
+    for v in codes.iter_mut().flatten() {
+        debug_assert!((*v as usize) < remap.map.len(), "code out of bounds");
+        unsafe {
+            *v = *remap.map.get_unchecked(*v as usize);
         }
     }
 }

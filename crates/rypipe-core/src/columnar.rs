@@ -151,12 +151,14 @@ impl<T: Default + Clone> NullableColumn<T> {
     pub(crate) fn get(&self, i: usize) -> Option<&T> {
         self.validity.is_valid(i).then(|| &self.values[i])
     }
+    #[allow(dead_code)]
     fn bytes_used(&self) -> usize {
         self.values.len() * std::mem::size_of::<T>() + self.validity.bytes_used()
     }
     fn capacity_bytes(&self) -> usize {
         self.values.capacity() * std::mem::size_of::<T>() + self.validity.capacity_bytes()
     }
+    #[allow(dead_code)]
     fn append(&mut self, other: &mut Self) {
         self.values.append(&mut other.values);
         self.validity.append(&other.validity);
@@ -173,6 +175,7 @@ impl<T: Default + Clone> NullableColumn<T> {
 }
 
 impl<T: Default + Clone> NullableColumn<T> {
+    #[allow(dead_code)]
     fn from_options(values: impl IntoIterator<Item = Option<T>>) -> Self {
         let mut result = Self::with_capacity(0);
         for value in values {
@@ -425,6 +428,7 @@ impl<T: Copy> PrimColumn<T> {
 
     /// Zero-copy Arrow export: moves data and validity buffers into a
     /// `PrimitiveArray` via `ScalarBuffer` and `NullBuffer`.
+    #[allow(clippy::wrong_self_convention)]
     fn to_arrow<A: arrow::array::ArrowPrimitiveType>(&mut self) -> Result<ArrayRef>
     where
         A::Native: From<T>,
@@ -442,6 +446,7 @@ impl<T: Copy> PrimColumn<T> {
 impl PrimColumn<bool> {
     /// Zero-copy Arrow export for booleans: packs `Vec<bool>` into a
     /// `BooleanBuffer` for `BooleanArray`.
+    #[allow(clippy::wrong_self_convention)]
     fn to_arrow_bool(&mut self) -> Result<ArrayRef> {
         use arrow::buffer::{BooleanBuffer, ScalarBuffer};
         let data = std::mem::take(&mut self.data);

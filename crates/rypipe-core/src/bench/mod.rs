@@ -19,7 +19,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
 use crate::decoder::{ColumnarSink, RecordParser, Splitter};
-use crate::engine::{PredicateState, TableBuilder};
+use crate::engine::TableBuilder;
 use crate::plan::ExecutionPlan;
 use crate::value::Value;
 use crate::Result;
@@ -76,7 +76,6 @@ impl ColumnarSink for TraverseSink {
 
 /// Tier 3: Locate — wants + resolve, no put_field (uses LocateOnly from engine).
 /// Re-exported from `crate::engine::LocateOnly`.
-
 /// Tier 4: Extract — extract value, discard (no push to columns).
 pub struct ExtractOnly;
 
@@ -248,27 +247,27 @@ pub fn ladder<S: Splitter, P: RecordParser>(
     let mb = bytes.len() as f64 / 1_000_000.0;
 
     // Tier 1: Noop
-    let (t_noop, n) = bench_tier::<S, P, NoopSink>(splitter, parser, bytes, &mut NoopSink, rounds);
+    let (t_noop, _n) = bench_tier::<S, P, NoopSink>(splitter, parser, bytes, &mut NoopSink, rounds);
 
     // Tier 2: Traverse
-    let (t_trav, n) =
+    let (t_trav, _n) =
         bench_tier::<S, P, TraverseSink>(splitter, parser, bytes, &mut TraverseSink, rounds);
 
     // Tier 3: Locate
     let mut loc = crate::engine::LocateOnly::new(ExecutionPlan::new());
-    let (t_loc, n) = bench_tier(splitter, parser, bytes, &mut loc, rounds);
+    let (t_loc, _n) = bench_tier(splitter, parser, bytes, &mut loc, rounds);
 
     // Tier 4: Extract
-    let (t_ext, n) =
+    let (t_ext, _n) =
         bench_tier::<S, P, ExtractOnly>(splitter, parser, bytes, &mut ExtractOnly, rounds);
 
     // Tier 5: Push
     let mut push = PushOnly::new(Arc::clone(&plan));
-    let (t_push, n) = bench_tier(splitter, parser, bytes, &mut push, rounds);
+    let (t_push, _n) = bench_tier(splitter, parser, bytes, &mut push, rounds);
 
     // Tier 6: Build
     let mut build = BuildOnly::new(Arc::clone(&plan));
-    let (t_build, n) = bench_tier(splitter, parser, bytes, &mut build, rounds);
+    let (t_build, _n) = bench_tier(splitter, parser, bytes, &mut build, rounds);
 
     // Tier 7: Full (TableBuilder + finish)
     let mut tb = TableBuilder::with_plan(0, Arc::clone(&plan));
@@ -347,7 +346,7 @@ pub fn ladder<S: Splitter, P: RecordParser>(
 }
 
 fn bench_tier<S: Splitter, P: RecordParser, Sink: ColumnarSink>(
-    splitter: &S,
+    _splitter: &S,
     parser: &P,
     bytes: &[u8],
     sink: &mut Sink,
@@ -377,7 +376,7 @@ fn bench_tier<S: Splitter, P: RecordParser, Sink: ColumnarSink>(
 pub fn alloc_baseline<F: Fn() -> usize>(label: &str, f: F) {
     #[cfg(feature = "alloc-stats")]
     {
-        use crate::alloc_stats::{self, AllocStats};
+        use crate::alloc_stats::{self};
 
         let stats1 = alloc_stats::snapshot();
         let rows = f();
