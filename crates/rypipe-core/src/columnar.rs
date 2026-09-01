@@ -17,7 +17,7 @@ use crate::value::Value;
 use crate::Result;
 
 /// Compact one-bit-per-row validity storage.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct ValidityBitmap {
     bits: Vec<u8>,
     len: usize,
@@ -405,11 +405,27 @@ impl<T: Copy> PrimColumn<T> {
     where
         A::Native: From<T>,
     {
-        use arrow::buffer::{ScalarBuffer};
+        use arrow::buffer::ScalarBuffer;
         let data = std::mem::take(&mut self.data);
-        let nulls = self.validity.into_arrow();
+        let validity = std::mem::take(&mut self.validity);
+        let nulls = validity.into_arrow();
         let buf: ScalarBuffer<A::Native> = data.into_iter().map(A::Native::from).collect();
         let arr = PrimitiveArray::<A>::try_new(buf, nulls)?;
+        Ok(Arc::new(arr))
+    }
+}
+
+impl PrimColumn<bool> {
+    /// Zero-copy Arrow export for booleans: packs `Vec<bool>` into a
+    /// `BooleanBuffer` for `BooleanArray`.
+    fn to_arrow_bool(&mut self) -> Result<ArrayRef> {
+        use arrow::buffer::{BooleanBuffer, ScalarBuffer};
+        let data = std::mem::take(&mut self.data);
+        let validity = std::mem::take(&mut self.validity);
+        let nulls = validity.into_arrow();
+        let buf: ScalarBuffer<u8> = data.iter().map(|&b| b as u8).collect();
+        let bool_buf = BooleanBuffer::new(buf.into(), 0, data.len());
+        let arr = BooleanArray::new(bool_buf, nulls);
         Ok(Arc::new(arr))
     }
 }
@@ -862,7 +878,7 @@ impl ColumnBuilder {
             ColumnBuilder::Timestamp(_, v) => v.get(index).map(TypedValue::Timestamp),
             ColumnBuilder::Dictionary { codes, dict, .. } => codes
                 .get(index)
-                .and_then(|code| code.map(|idx| TypedValue::Str(dict[idx as usize].as_str()))),
+                .map(|&idx| TypedValue::Str(dict[idx as usize].as_str())),
         }
     }
 
@@ -1042,17 +1058,7 @@ impl ColumnBuilder {
             ColumnBuilder::String(v) => v.to_arrow()?,
             ColumnBuilder::Int64(v) => v.to_arrow::<arrow::datatypes::Int64Type>()?,
             ColumnBuilder::Float64(v) => v.to_arrow::<arrow::datatypes::Float64Type>()?,
-            ColumnBuilder::Boolean(v) => {
-                use arrow::buffer::{BooleanBuffer, NullBuffer};
-                let data = std::mem::take(&mut v.data);
-                let validity = std::mem::take(&mut v.validity);
-                let nulls = if validity.iter().all(|&v| v) {
-                    None
-                } else {
-                    Some(NullBuffer::new(BooleanBuffer::from(validity)))
-                };
-                Arc::new(BooleanArray::new(BooleanBuffer::from(data), nulls))
-            }
+            ColumnBuilder::Boolean(v) => v.to_arrow_bool()?,
             ColumnBuilder::Date32(v) => v.to_arrow::<arrow::datatypes::Date32Type>()?,
             ColumnBuilder::Timestamp(unit, v) => match unit {
                 TimeUnit::Second => v.to_arrow::<TimestampSecondType>()?,
