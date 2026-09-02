@@ -13,6 +13,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+# NOTE: Arrow version mismatch with rypipe-core (=55.2.0). This is intentional:
+# rypipe-core pins 55.2.0 for stability; rypipe-python needs pyo3 0.29 (abi3-py310)
+# which requires Arrow 59.x. The C Data Interface handles the crossing via FFI.
+# crxml (the main consumer) uses Arrow 55.2.0 directly, not rypipe-python.
 arrow = { version = "59.2", default-features = false, features = ["pyarrow", "ffi"] }
 rypipe-core = { path = "../rypipe-core" }
 mimalloc = { version = "0.1", default-features = false }
