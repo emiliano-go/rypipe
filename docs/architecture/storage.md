@@ -75,7 +75,8 @@ O(n) in offsets, not in bytes.
 ### Capacity
 
 `with_capacity(cap)` reserves `cap+1` offsets and `cap*16` data bytes.
-`Pipeline` passes `cap = bytes.len() / 512` (min 64) or `estimated_rows`.
+`Pipeline` passes `cap = (bytes.len() / est).max(64)` where
+`est = estimate_bytes_per_row(sample).max(512)`.
 
 ## Numeric and temporal parsing
 
@@ -85,8 +86,8 @@ When a `Value::Str` is pushed to a typed column, the string is parsed:
 - **Float64**: `lexical::parse::<f64, _>(s.as_bytes())`
 - **Boolean**: `s.parse::<bool>()` — accepts "true"/"false"/"1"/"0"
 - **Date32**: `chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")` minus Unix epoch
-- **Timestamp**: tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`,
-  then bare date as midnight. Converts via `and_utc()` to the target TimeUnit.
+- **Timestamp**: tries `"%Y-%m-%dT%H:%M:%S%.f"`, then
+  `"%Y-%m-%d %H:%M:%S%.f"`, then bare date as midnight. Converts via `and_utc()` to the target TimeUnit.
 
 Unparseable strings become `None`. Cross-type `Value::Int64` into `Float64`
 widens; into `String` stringifies; into `Dictionary` encodes. Other

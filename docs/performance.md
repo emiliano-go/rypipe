@@ -74,9 +74,10 @@ reader.
 ### `auto_dict`
 
 When `auto_dict=True`, string columns with low cardinality are upgraded to
-dictionary encoding. This reduces memory and can speed up downstream operations,
-but it forces a serial merge of all chunk builders in parallel mode, which
-raises peak RSS and removes the fast per-chunk export path.
+dictionary encoding. This reduces memory and can speed up downstream operations.
+In parallel mode, the incremental dict path performs per-chunk upgrade in
+parallel, then unifies dictionaries (tiny serial). The fast per-chunk export
+path is preserved when schemas are consistent across chunks.
 
 Use `auto_dict=True` when:
 
@@ -103,13 +104,18 @@ and makes output column order deterministic across chunks.
 
 `ParallelExecutor` has two internal paths:
 
-- **Fast path**: when `auto_dict` is false and there is no `Compare` filter,
-  each chunk is exported as its own `RecordBatch` in parallel. No serial merge.
-- **Merge path**: when `auto_dict` or a `Compare` filter is enabled, chunk
-  builders are merged sequentially before export. Peak RSS is higher.
+- **Fast path**: when `auto_dict` is false and schemas are consistent across
+  chunks, each chunk is exported as its own `RecordBatch` in parallel. No
+  serial merge. Compare filters are applied per-row during parse AND
+  reapplied after export via `apply_compare_filter`, so they do not force
+  the merge path.
+- **Merge path**: when `auto_dict` is enabled or schemas are inconsistent,
+  chunk builders are merged sequentially before export. Peak RSS is higher.
 
-If you need both a `Compare` filter and maximum throughput, consider filtering
-after export in Python/Arrow instead.
+If you need both a `Compare` filter and maximum throughput, the fast path
+already handles it (Compare is applied post-export). For `auto_dict` with
+Compare, the incremental dict path preserves the fast path when schemas
+are consistent.
 
 ## GIL behavior
 
