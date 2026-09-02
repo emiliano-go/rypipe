@@ -1,6 +1,6 @@
 # rypipe documentation
 
-`rypipe` is a format-agnostic columnar engine that turns byte streams into
+`rypipe` is a format-agnostic data ingestion framework that turns byte streams into
 Apache Arrow record batches. It separates **format-specific** parsing from
 **format-agnostic** execution, so the same engine can parse XML, JSON, CSV,
 HTML, or any other row-oriented format once you provide a small adapter.

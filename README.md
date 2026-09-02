@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Format-agnostic columnar ingestion engine with Rust core and Python bindings.</strong>
+  <strong>Format-agnostic data ingestion framework with Rust core and Python bindings.</strong>
 </p>
 
 <p align="center">

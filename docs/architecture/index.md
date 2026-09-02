@@ -36,7 +36,7 @@ column storage.
 **Core** (format agnostic, lives in `rypipe` crates, reused by every adapter):
 how do I store rows as typed columns, how do I rename, drop, cast, filter,
 and reorder, how do I export to Arrow, how do I parallelize while staying
-inside a memory budget. This code knows the columnar engine and nothing about
+inside a memory budget. This code knows the ingestion framework and nothing about
 any file format.
 
 Adapters live in separate packages. `rypipe` ships zero parsers. The boundary

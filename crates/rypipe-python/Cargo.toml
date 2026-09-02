@@ -3,7 +3,7 @@ name = "rypipe-python"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "PyO3 bindings over the rypipe-core columnar engine"
+description = "PyO3 bindings over the rypipe-core ingestion framework"
 repository = "https://github.com/emiliano-go/rypipe"
 authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
 
