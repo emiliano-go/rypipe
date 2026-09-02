@@ -1,12 +1,12 @@
 //! Six-tier single-threaded benchmark for `perf stat`.
 //!
 //! Each tier removes exactly one cost layer:
-//!   1. **scan_only** — memchr newline scan (pure byte walk ceiling).
-//!   2. **traverse** — full parser walk, find field extents, no resolve, no put_field.
-//!   3. **locate** — + wants() + resolve(), no put_field.
-//!   4. **push_only** — + extract + push, no finish_row (per-field push only).
-//!   5. **build_only** — + finish_row (null-fill, dirty mask, filter).
-//!   6. **full_parse** — + Arrow export (finish() → to_arrow).
+//!   1. **scan_only**: memchr newline scan (pure byte walk ceiling).
+//!   2. **traverse**: full parser walk, find field extents, no resolve, no put_field.
+//!   3. **locate**: + wants() + resolve(), no put_field.
+//!   4. **push_only**: + extract + push, no finish_row (per-field push only).
+//!   5. **build_only**: + finish_row (null-fill, dirty mask, filter).
+//!   6. **full_parse**: + Arrow export (finish() → to_arrow).
 //!
 //! Run with:
 //!
@@ -82,7 +82,7 @@ impl RecordParser for TsvParser {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 1: scan_only — memchr newline scan
+// Tier 1: scan_only: memchr newline scan
 // ---------------------------------------------------------------------------
 
 fn bench_scan_only(data: &[u8]) -> (usize, f64) {
@@ -94,7 +94,7 @@ fn bench_scan_only(data: &[u8]) -> (usize, f64) {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 2: traverse — walk rows, find fields, no resolve, no put_field
+// Tier 2: traverse: walk rows, find fields, no resolve, no put_field
 // ---------------------------------------------------------------------------
 
 struct TraverseOnly;
@@ -137,7 +137,7 @@ fn bench_traverse(data: &[u8]) -> (usize, usize, f64) {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3: locate — wants() + resolve(), no put_field
+// Tier 3: locate: wants() + resolve(), no put_field
 // ---------------------------------------------------------------------------
 
 fn bench_locate(data: &[u8], plan: ExecutionPlan) -> (usize, usize, f64) {
@@ -151,7 +151,7 @@ fn bench_locate(data: &[u8], plan: ExecutionPlan) -> (usize, usize, f64) {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 4: push_only — extract + push, no finish_row
+// Tier 4: push_only: extract + push, no finish_row
 // ---------------------------------------------------------------------------
 
 /// Wrapper around TableBuilder that skips finish_row (null-fill, dirty mask,
@@ -194,7 +194,7 @@ impl ColumnarSink for PushOnly {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 5: build_only — push + finish_row, no Arrow export
+// Tier 5: build_only: push + finish_row, no Arrow export
 // ---------------------------------------------------------------------------
 
 fn bench_build_only(data: &[u8], plan: ExecutionPlan) -> (usize, f64) {
@@ -209,7 +209,7 @@ fn bench_build_only(data: &[u8], plan: ExecutionPlan) -> (usize, f64) {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 6: full_parse — push + finish_row + Arrow export
+// Tier 6: full_parse: push + finish_row + Arrow export
 // ---------------------------------------------------------------------------
 
 fn bench_full_parse(data: &[u8], plan: ExecutionPlan) -> (usize, f64) {
@@ -286,8 +286,8 @@ fn main() {
     let (rows6, t6) = bench_full_parse(&data, plan_full);
 
     // Assertions: tiers must visit the same data
-    assert!(rows3 > 0, "locate produced zero rows — likely DCE'd");
-    assert!(fields3 > 0, "locate saw zero fields — likely DCE'd");
+    assert!(rows3 > 0, "locate produced zero rows; likely DCE'd");
+    assert!(fields3 > 0, "locate saw zero fields; likely DCE'd");
     assert!(rows6 > 0, "full_parse produced zero rows");
     assert_eq!(
         rows3, rows6,

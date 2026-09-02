@@ -35,7 +35,7 @@ pub fn record_batches_to_pyarrow_batches<'py>(
 /// Export a slice of Arrow `RecordBatch`es to Python.
 ///
 /// * `combine=false` (the default) returns a Python list of
-///   `pyarrow.RecordBatch` objects — no concatenation, no promotion copy.
+///   `pyarrow.RecordBatch` objects: no concatenation, no promotion copy.
 /// * `combine=true` returns a single `pyarrow.Table` by concatenating the
 ///   batches (matching the behaviour of the old `record_batches_to_pyarrow_table`).
 ///

@@ -16,7 +16,7 @@ use rypipe_core::{
 };
 
 // ---------------------------------------------------------------------------
-// Helpers — same format as pushdown_test.rs: lines like `A=1 B=2`.
+// Helpers: same format as pushdown_test.rs: lines like `A=1 B=2`.
 
 #[derive(Clone, Debug, Default)]
 struct LineSplitter;
@@ -165,7 +165,7 @@ fn test_not_equal_leaf() {
         filter: Some(FilterPredicate::not(eq("S", "yes"))),
         ..Default::default()
     };
-    // Not(Eq) — row1 fails Eq but Not keeps? No, Eq true → Not false → dropped.
+    // Not(Eq): row1 fails Eq but Not keeps? No, Eq true → Not false → dropped.
     // row2 Eq false → Not true → kept. row3 S missing → Eq false → Not true → kept.
     assert_eq!(parse_bytes(data, plan).num_rows(), 2);
 }
@@ -205,7 +205,7 @@ fn test_nested_and_inside_or() {
 
 #[test]
 fn test_not_of_and_via_de_morgan() {
-    // !(A==x AND B==y) — plain: row1 passes both so dropped; all others kept.
+    // !(A==x AND B==y): plain: row1 passes both so dropped; all others kept.
     let data = b"A=x B=y\nA=x B=z\nA=w B=y\n";
     let plan = ExecutionPlan {
         filter: Some(FilterPredicate::not(FilterPredicate::all(

@@ -140,7 +140,7 @@ Key points:
 - Emit `Value::Str` for stringly formats; emit typed `Value` variants when the
   format has native numbers/booleans. `Value::Str` wraps a `Cow<'_, str>`:
   borrow from the input buffer when possible, and move an owned `String` in
-  when extraction allocates (entity unescaping, base64 decode, …) — the
+  when extraction allocates (entity unescaping, base64 decode, …); the
   buffered filter path may hold values past the end of your parse function,
   so a borrow of a temporary would dangle.
 - Do not call `end_row()` for partial trailing rows; the engine will discard

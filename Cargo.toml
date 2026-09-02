@@ -27,3 +27,13 @@ inherits = "release"
 debug = 2
 strip = false
 panic = "unwind"
+
+# S10a: perf profile: thin LTO, fewer codegen units, debug symbols for
+# `perf annotate --source`. Creates a third target directory.
+[profile.perf]
+inherits = "release"
+lto = "thin"
+codegen-units = 4
+debug = 1
+strip = "none"
+split-debuginfo = "unpacked"

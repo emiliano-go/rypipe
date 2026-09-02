@@ -58,7 +58,7 @@ pub struct TableBuilder {
     pub(crate) frozen: Option<std::sync::Arc<crate::schema::FrozenSchema>>,
     pub(crate) unknown_error: Option<String>,
     /// Heap-allocated row buffer for predicate-first deferred materialization.
-    /// `None` when `plan.filter` is `None` — unfiltered parses carry zero
+    /// `None` when `plan.filter` is `None`; unfiltered parses carry zero
     /// overhead from predicate machinery.
     pub(crate) row_buf: Option<Box<RowBuffer>>,
     /// Per-ordinal layout expectation: after row 1, each ordinal maps to a
@@ -393,7 +393,7 @@ impl TableBuilder {
         }
         // Frozen schema: any new column not pre-sized by ensure_schema is an
         // unknown field (sampling miss or file has column absent during
-        // discovery). Don't silently create it — hard-error on finish().
+        // discovery). Don't silently create it; hard-error on finish().
         // We still return a dummy idx to keep the hot path inlinable, but
         // push_field_resolved will have already early-returned after setting
         // unknown_error, so this path is only for non-frozen builders.
@@ -490,7 +490,7 @@ impl TableBuilder {
     #[inline]
     fn push_field(&mut self, name: &str, value: Value<'_>) {
         // #[inline]: fast-path (no rename/drop) is a single branch + delegate.
-        // Fast path: no rename/drop configured — zero allocation.
+        // Fast path: no rename/drop configured; zero allocation.
         if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
             self.push_field_resolved(name, value);
             return;
@@ -530,7 +530,7 @@ impl TableBuilder {
 
     /// Resolve a field name through the plan's field_map and look up its slot
     /// index. Returns `Some(slot)` only if the column already exists in
-    /// field_index. Zero allocation — borrows plan and field_index as
+    /// field_index. Zero allocation; borrows plan and field_index as
     /// separate fields.
     #[inline]
     fn resolve_and_slot(
@@ -543,7 +543,7 @@ impl TableBuilder {
     }
 
     /// Advance the row counter without null-fill, filter, or dirty-mask clear.
-    /// For benchmarking only — separates per-field push cost from per-row
+    /// For benchmarking only; separates per-field push cost from per-row
     /// finalization.
     #[doc(hidden)]
     pub fn advance_row(&mut self) {
@@ -639,7 +639,7 @@ impl TableBuilder {
             let word = slot as usize / 64;
             let bit = slot as usize % 64;
             if word < buf.predicate_mask.len() && (buf.predicate_mask[word] >> bit) & 1 == 1 {
-                return false; // already marked — no-op
+                return false; // already marked; no-op
             }
             buf.pred_names.is_empty() // need to build the mask
         });
@@ -887,7 +887,7 @@ impl TableBuilder {
                                         af.partial_cmp(&bi)
                                     }
                                     // Mixed typed/untyped or String vs non-numeric type:
-                                    // type mismatch — fail the comparison.
+                                    // type mismatch; fail the comparison.
                                     (Some(_), None) | (None, Some(_)) => None,
                                     // Both untyped (String): fall back to lexicographic.
                                     (None, None) => Some(a.cmp(b)),
@@ -979,7 +979,7 @@ impl TableBuilder {
         };
         if pass {
             // Deduplicate last-write-wins by slot index (u32).
-            // O(n) reverse scan with a u64 bitmask — first hit in reverse is
+            // O(n) reverse scan with a u64 bitmask; first hit in reverse is
             // the last write in forward order (last-write-wins).
             let ncols = self.columns.len();
             let words = ncols.div_ceil(64);
@@ -1268,7 +1268,7 @@ impl ColumnarSink for TableBuilder {
         if !buf_worthwhile {
             // Late predicate: values were pushed directly to columns.
             // finish_row null-fills missing, evaluates filter against columns,
-            // and pops on reject — exactly the pre-buffering behavior.
+            // and pops on reject; exactly the pre-buffering behavior.
             self.finish_row();
             return;
         }
@@ -1661,7 +1661,7 @@ impl ColumnarSink for TableBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// LocateOnly sink — walk rows, resolve field names, decode nothing.
+// LocateOnly sink: walk rows, resolve field names, decode nothing.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -2046,7 +2046,7 @@ mod tests {
 
     #[test]
     fn test_c2_compound_reorder() {
-        // L7: C2 reorder — Field2 == x AND Field1 == y must give the same
+        // L7: C2 reorder: Field2 == x AND Field1 == y must give the same
         // result as Field1 == y AND Field2 == x.
         let data = b"A=1 B=2\nA=2 B=2\nA=1 B=3\nA=2 B=3\n";
         let make_filter = |a: &str, va: &str, b: &str, vb: &str| -> ExecutionPlan {
@@ -2075,7 +2075,7 @@ mod tests {
 
     #[test]
     fn test_c2_or_reorder() {
-        // L7: Or reorder — same result regardless of operand order.
+        // L7: Or reorder: same result regardless of operand order.
         // Row 1: A=1 B=2 → A==1 → Pass
         // Row 2: A=2 B=2 → A!=1, B!=3 → Fail
         // Row 3: A=3 B=3 → B==3 → Pass

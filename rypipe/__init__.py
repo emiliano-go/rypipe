@@ -281,7 +281,7 @@ def iter_record_batches(
     When ``batch_size`` is ``None`` (default) it is derived from ``memory``
     and the estimated row size (like ``BoundedExecutor``). Pass ``batch_size=1``
     for the smallest possible batches (one row per batch, ~1 KB) and the lowest
-    memory footprint — only feasible when the pipeline stays in Rust.
+    memory footprint; only feasible when the pipeline stays in Rust.
 
     For the Python path, the per-batch ``pyarrow.RecordBatch`` object and the
     interpreter overhead mean true 64 KB is only reachable from Rust via
@@ -319,7 +319,7 @@ def iter_record_batches(
         return
     # Generic fallback: use bounded read then split (still materializes, but works for any adapter)
     table = read(path, format=fmt, **kwargs) if kwargs else read(path, format=fmt, **kwargs)
-    # If table is huge, this still materializes — the true streaming path requires adapter support.
+    # If table is huge, this still materializes; the true streaming path requires adapter support.
     if batch_size is None:
         yield from table.to_batches()
     else:

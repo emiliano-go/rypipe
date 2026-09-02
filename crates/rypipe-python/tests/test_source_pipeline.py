@@ -66,7 +66,7 @@ def _apply_plan(table: pa.Table, plan: dict):
             names.append(name)
         table = pa.table(columns, names=names)
 
-    # Filter — recurses into and/or/not trees so the mock matches Rust Check semantics.
+    # Filter: recurses into and/or/not trees so the mock matches Rust Check semantics.
     def _mask_for(spec) -> "pa.Array":
         if "and" in spec:
             masks = [_mask_for(s) for s in spec["and"]]
@@ -401,7 +401,7 @@ def test_filter_rows_any_or(sample_table):
 
 
 def test_filter_rows_all_and(sample_table):
-    # Alice is in NYC (both match) — only row 1
+    # Alice is in NYC (both match); only row 1
     src = _MockSource(sample_table)
     pipe = src | FilterRowsAll(
         FilterRows(field="name", op="==", value="Alice"),

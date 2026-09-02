@@ -17,7 +17,7 @@ pub const MIN_CHUNK_BYTES: usize = 2 << 20; // 2 MiB
 /// Maximum number of split chunks. Above this, scheduling overhead dominates.
 pub const MAX_SPLIT_CHUNKS: usize = 1024;
 
-/// Mode for chunk planning — parallel and streaming have different optima.
+/// Mode for chunk planning: parallel and streaming have different optima.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitMode {
     /// Parallel: peak at 4 MB chunks (measured on 533 MB, 16 cores).
@@ -38,7 +38,7 @@ pub fn plan_chunk_count(bytes: usize, threads: usize, mode: SplitMode) -> usize 
 }
 
 // ---------------------------------------------------------------------------
-// S3: SkipRegionFinder — byte ranges where a candidate boundary is invalid
+// S3: SkipRegionFinder: byte ranges where a candidate boundary is invalid
 // ---------------------------------------------------------------------------
 
 /// Finds byte ranges (comments, CDATA, quoted fields, string literals) where
@@ -51,7 +51,7 @@ pub trait SkipRegionFinder: Send + Sync {
     /// The closer for a given opener (e.g. `"-->"` for `"<!--"`).
     fn closer_for(&self, opener: &[u8]) -> &'static [u8];
 
-    /// Maximum backward scan window in bytes.  Default 64 KiB — sufficient
+    /// Maximum backward scan window in bytes.  Default 64 KiB: sufficient
     /// for most XML/CSV comments and JSON string literals.
     fn window(&self) -> usize {
         64 * 1024
@@ -61,8 +61,8 @@ pub trait SkipRegionFinder: Send + Sync {
 /// Check whether byte position `at` falls inside a skip region by scanning
 /// backward up to `finder.window()` bytes, looking for an unclosed opener.
 ///
-/// Returns `false` immediately when the file contains none of the openers
-/// — check that once per chunk, not per candidate.
+/// Returns `false` immediately when the file contains none of the openers;
+/// check that once per chunk, not per candidate.
 pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) -> bool {
     let openers = finder.openers();
     if openers.is_empty() {
@@ -79,7 +79,7 @@ pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) ->
             // Check if there's a closer between the opener and `at`.
             let between = &bytes[open_pos + opener.len()..at];
             if memchr::memmem::find(between, closer).is_none() {
-                // Unclosed opener — `at` is inside this skip region.
+                // Unclosed opener; `at` is inside this skip region.
                 return true;
             }
             search += rel + 1;
@@ -95,7 +95,7 @@ pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) ->
 /// Format-specific splitter: decides where it is safe to divide an input byte
 /// stream into independent chunks.
 ///
-/// The only required method is `next_record_start` — adapters provide the
+/// The only required method is `next_record_start`; adapters provide the
 /// record boundary logic, and the engine handles chunk planning, skip-region
 /// rejection, and deduplication.
 pub trait Splitter: Send + Sync {
@@ -277,7 +277,7 @@ pub trait ColumnarSink {
     ///
     /// Return `false` for traversal-only sinks that walk rows and find field
     /// extents but don't need to resolve names or check `wants`.  When false,
-    /// the parser skips `wants()` and `resolve()` calls entirely — it only
+    /// the parser skips `wants()` and `resolve()` calls entirely; it only
     /// locates the byte extents of each field within a row.
     ///
     /// **Note:** this method is primarily for benchmarking/profiling harnesses.
