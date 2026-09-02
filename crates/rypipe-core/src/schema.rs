@@ -244,7 +244,7 @@ mod tests {
         let mut plan = ExecutionPlan::new();
         plan.drop_fields.insert("B".to_string());
         let schema = FrozenSchema::from_plan(&["A", "B", "C"], &plan);
-        // from_plan does NOT drop — it declares the schema as-is.
+        // from_plan does NOT drop; it declares the schema as-is.
         // Drops are handled at parse time via resolve() → None.
         assert_eq!(schema.num_columns(), 3);
     }

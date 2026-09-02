@@ -37,7 +37,7 @@ impl MemoryBudget {
 /// batch count is otherwise derived from the budget, input size, and
 /// estimated bytes per row; batches may still exceed the budget when the
 /// required count exceeds this cap. Increased for 64KB streaming (50GB/64KB
-/// ≈ 800k batches) — still bounded by file scan cost.
+/// ≈ 800k batches); still bounded by file scan cost.
 const MAX_SPLIT_CHUNKS: usize = 100_000;
 
 /// Parse an input in bounded batches to stay within a memory budget.

@@ -15,7 +15,7 @@ use rypipe_core::{
 };
 
 // ---------------------------------------------------------------------------
-// Helpers — deterministic TSV-like format: lines like `A=1 B=2 C=3`
+// Helpers: deterministic TSV-like format: lines like `A=1 B=2 C=3`
 
 #[derive(Clone, Debug, Default)]
 struct LineSplitter;
@@ -326,7 +326,7 @@ fn ragged_columns_no_data_loss() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Duplicate field — last-write-wins
+// 3. Duplicate field: last-write-wins
 
 #[test]
 fn duplicate_field_last_write_wins_no_data_loss() {
@@ -345,7 +345,7 @@ fn duplicate_field_last_write_wins_no_data_loss() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Many rows, few columns — parallel vs single vs stream equivalence
+// 4. Many rows, few columns: parallel vs single vs stream equivalence
 
 #[test]
 fn many_rows_few_columns_no_data_loss() {
@@ -363,7 +363,7 @@ fn many_rows_few_columns_no_data_loss() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Many columns (50) — Vec storage correctness
+// 5. Many columns (50): Vec storage correctness
 
 #[test]
 fn many_columns_no_data_loss() {
@@ -392,7 +392,7 @@ fn many_columns_no_data_loss() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Rename / drop / filter / types / dictionary — plan correctness
+// 6. Rename / drop / filter / types / dictionary: plan correctness
 
 #[test]
 fn plan_rename_no_data_loss() {
@@ -607,7 +607,7 @@ fn resolve_put_field_resolved_identical_to_put_field() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Large dataset — 100k rows, 10 columns — all modes agree
+// 8. Large dataset: 100k rows, 10 columns; all modes agree
 
 #[test]
 fn large_dataset_all_modes_agree() {

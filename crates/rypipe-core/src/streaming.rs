@@ -16,7 +16,7 @@ use crate::Result;
 /// Channel-based consumer for the streaming iterator.
 ///
 /// Sends `Result<RecordBatch>` via a bounded channel (capacity 1) to provide
-/// backpressure — the producer blocks until the consumer calls `next()`.
+/// backpressure; the producer blocks until the consumer calls `next()`.
 struct ChannelConsumer {
     sender: SyncSender<Result<RecordBatch>>,
 }
@@ -34,7 +34,7 @@ impl BatchConsumer for ChannelConsumer {
 ///
 /// Created by `BoundedExecutor::stream` / `Pipeline::stream_batches`.
 /// Backed by a worker thread running `BoundedExecutor::run_stream` and a
-/// `sync_channel(1)` for backpressure — no accumulation into `Vec`.
+/// `sync_channel(1)` for backpressure; no accumulation into `Vec`.
 pub struct StreamingBatchIterator {
     receiver: Receiver<Result<RecordBatch>>,
     handle: Option<JoinHandle<Result<()>>>,
@@ -122,7 +122,7 @@ impl Iterator for StreamingBatchIterator {
         match self.receiver.recv() {
             Ok(res) => Some(res),
             Err(_) => {
-                // Channel closed — worker finished. Check for join errors.
+                // Channel closed; worker finished. Check for join errors.
                 self.done = true;
                 if let Some(handle) = self.handle.take() {
                     // Propagate panics as errors.
@@ -151,7 +151,7 @@ impl Drop for StreamingBatchIterator {
         // The worker will then exit when it tries to send.
         self.done = true;
         // Receiver is dropped here; handle's thread will be joined on drop
-        // via the Option<JoinHandle> — we don't block in Drop, just let it
+        // via the Option<JoinHandle>; we don't block in Drop, just let it
         // detach. The OS will clean up.
     }
 }

@@ -28,7 +28,7 @@ pub(crate) struct RowBuffer {
     pub(crate) direct: bool,
     /// Learned ordinal of the predicate column (0-based), set after the first
     /// row. When the predicate is late (> 4/5 of columns), buffering is a net
-    /// loss — we switch to direct push + pop-on-reject instead.
+    /// loss; we switch to direct push + pop-on-reject instead.
     pub(crate) predicate_ordinal: Option<u32>,
     /// Whether the adaptive strategy has decided buffering is worthwhile.
     /// True by default; set to false on row 2 when predicate_ordinal is late.

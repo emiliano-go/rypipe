@@ -5,11 +5,11 @@
 //!
 //! Filters may be flat leaf specs or arbitrarily nested boolean trees:
 //!
-//! * `{"field": "x", "op": "==", "value": "y"}` — constant equality
-//! * `{"field_a": "a", "op": ">", "field_b": "b"}` — column comparison
-//! * `{"and": [spec, ...]}` — conjunction (short-circuits on first failure)
-//! * `{"or": [spec, ...]}` — disjunction (short-circuits on first success)
-//! * `{"not": spec}` — negation
+//! * `{"field": "x", "op": "==", "value": "y"}`: constant equality
+//! * `{"field_a": "a", "op": ">", "field_b": "b"}`: column comparison
+//! * `{"and": [spec, ...]}`: conjunction (short-circuits on first failure)
+//! * `{"or": [spec, ...]}`: disjunction (short-circuits on first success)
+//! * `{"not": spec}`: negation
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;

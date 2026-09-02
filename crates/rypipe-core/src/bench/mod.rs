@@ -28,7 +28,7 @@ use crate::Result;
 // Tier sinks
 // ---------------------------------------------------------------------------
 
-/// Tier 1: Noop — boundaries only, no resolve, no value, no put_field.
+/// Tier 1: Noop: boundaries only, no resolve, no value, no put_field.
 pub struct NoopSink;
 
 impl ColumnarSink for NoopSink {
@@ -51,7 +51,7 @@ impl ColumnarSink for NoopSink {
     }
 }
 
-/// Tier 2: Traverse — walk records, no resolve, no value extraction.
+/// Tier 2: Traverse: walk records, no resolve, no value extraction.
 pub struct TraverseSink;
 
 impl ColumnarSink for TraverseSink {
@@ -74,9 +74,9 @@ impl ColumnarSink for TraverseSink {
     }
 }
 
-/// Tier 3: Locate — wants + resolve, no put_field (uses LocateOnly from engine).
+/// Tier 3: Locate: wants + resolve, no put_field (uses LocateOnly from engine).
 /// Re-exported from `crate::engine::LocateOnly`.
-/// Tier 4: Extract — extract value, discard (no push to columns).
+/// Tier 4: Extract: extract value, discard (no push to columns).
 pub struct ExtractOnly;
 
 impl ColumnarSink for ExtractOnly {
@@ -95,7 +95,7 @@ impl ColumnarSink for ExtractOnly {
     }
 }
 
-/// Tier 5: Push — scan + per-field push, no finish_row (no null-fill, no filter).
+/// Tier 5: Push: scan + per-field push, no finish_row (no null-fill, no filter).
 pub struct PushOnly {
     inner: TableBuilder,
 }
@@ -140,7 +140,7 @@ impl ColumnarSink for PushOnly {
     }
 }
 
-/// Tier 6: Build — + finish_row (null-fill, filter check), no Arrow export.
+/// Tier 6: Build: + finish_row (null-fill, filter check), no Arrow export.
 pub struct BuildOnly {
     inner: TableBuilder,
 }
@@ -365,7 +365,7 @@ fn bench_tier<S: Splitter, P: RecordParser, Sink: ColumnarSink>(
 }
 
 // ---------------------------------------------------------------------------
-// S8: alloc_baseline — allocation pressure harness
+// S8: alloc_baseline: allocation pressure harness
 // ---------------------------------------------------------------------------
 
 /// Run a closure and report allocation statistics.
@@ -441,12 +441,12 @@ pub fn alloc_baseline<F: Fn() -> usize>(label: &str, f: F) {
 }
 
 // ---------------------------------------------------------------------------
-// S9: ParProfile — phase timing counters
+// S9: ParProfile: phase timing counters
 // ---------------------------------------------------------------------------
 
 /// Phase timing counters for parallel execution.
 ///
-/// Behind `#[cfg(feature = "profile")]` — costs ~15% on filtered paths
+/// Behind `#[cfg(feature = "profile")]`; costs ~15% on filtered paths
 /// when enabled, so never enable in throughput builds.
 #[derive(Debug, Clone, Default)]
 pub struct ParProfile {
