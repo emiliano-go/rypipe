@@ -1312,7 +1312,7 @@ This page documents `crates/rypipe-core/src/columnar.rs` in full. It is the stor
 pub(crate) struct StrColumn {
     data: Vec<u8>,
     offsets: Vec<i32>,
-    validity: Vec<bool>,
+    validity: ValidityBitmap,
 }
 ```
 
@@ -1322,7 +1322,7 @@ This is exactly the Arrow `StringArray` layout (offsets plus bytes plus null bit
 
 * `offsets: Vec<i32>` has `len + 1` entries. `offsets[i] .. offsets[i+1]` is the byte range for value `i`. It is initialized with `[0]` so `push` can compute the next offset as `data.len()`.
 
-* `validity: Vec<bool>` marks null vs present. `true` means present; `false` means null (the buffer contains no bytes for that slot, but offsets still advance by 0).
+* `validity: ValidityBitmap` marks null vs present. `true` means present; `false` means null (the buffer contains no bytes for that slot, but offsets still advance by 0).
 
 Operations:
 
@@ -1345,11 +1345,11 @@ Operations:
 ```rust
 pub(crate) enum ColumnBuilder {
     String(StrColumn),
-    Int64(NullableColumn<i64>),
-    Float64(NullableColumn<f64>),
-    Boolean(NullableColumn<bool>),
-    Date32(NullableColumn<i32>),
-    Timestamp(TimeUnit, NullableColumn<i64>),
+    Int64(PrimColumn<i64>),
+    Float64(PrimColumn<f64>),
+    Boolean(PrimColumn<bool>),
+    Date32(PrimColumn<i32>),
+    Timestamp(TimeUnit, PrimColumn<i64>),
     Dictionary { codes: NullableColumn<i32>, dict: Vec<String>, index: HashMap<String, i32> },
 }
 ```
@@ -1358,8 +1358,8 @@ Each variant stores a `NullableColumn<T>` (or `StrColumn` for strings). There is
 
 * `String` is `StrColumn`.
 * `Int64`, `Float64`, `Boolean` are `NullableColumn<T>` with `lexical::parse` for string inputs.
-* `Date32(NullableColumn<i32>)` stores days since epoch. Parsing uses `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`.
-* `Timestamp(TimeUnit, NullableColumn<i64>)` stores raw integers in the column's `TimeUnit` (Second, Millisecond, Microsecond, Nanosecond). Parsing tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`, then bare `"%Y-%m-%d"` as midnight. Timezone handling is left to adapters that emit `Value::Timestamp` directly.
+* `Date32(PrimColumn<i32>)` stores days since epoch. Parsing uses `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`.
+* `Timestamp(TimeUnit, PrimColumn<i64>)` stores raw integers in the column's `TimeUnit` (Second, Millisecond, Microsecond, Nanosecond). Parsing tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `"%Y-%m-%d %H:%M:%S%.f"`, then bare `"%Y-%m-%d"` as midnight. Timezone handling is left to adapters that emit `Value::Timestamp` directly.
 * `Dictionary { codes, dict, index }` stores `codes: NullableColumn<i32>` plus `dict: Vec<String>` (id to string) and `index: HashMap<String,i32>` (string to id). This is the write path for `FieldType::Dictionary` and for auto dict upgrade.
 
 Variant keys for unification (10 strings):
@@ -1571,8 +1571,8 @@ end_row -> (CORE) finish_row
     for (i,b) in columns.iter_mut().enumerate() {  (CORE)
         let word = i/64; let bit = i%64;
         if (row_dirty[word]>>bit)&1==0 { b.push(None) }  // null fill only missing (CORE)
-        else { row_dirty[word] &= !(1u64<<bit) }          // clear for next row (CORE)
     }
+    self.row_dirty.fill(0)  // clear all bits for next row (CORE)
     if (CORE) filter.check(...) false { for b in columns { b.pop() } return }  // per row And/Or/Not with short circuit (CORE)
     row_count += 1  (CORE)
 ```
@@ -1793,6 +1793,11 @@ pub struct TableBuilder {
     pub(crate) estimated_rows: usize,
     pub(crate) plan: Arc<ExecutionPlan>,
     pub(crate) row_dirty: Vec<u64>,
+    pub(crate) frozen: Option<Arc<FrozenSchema>>,
+    pub(crate) unknown_error: Option<String>,
+    pub(crate) row_buf: Option<Box<RowBuffer>>,
+    pub(crate) ordinal_expect: Vec<Option<(u32, Vec<u8>)>>,
+    pub(crate) current_ordinal: u32,
 }
 ```
 
@@ -1834,16 +1839,23 @@ Adapters call `begin_row`, `put_field` (or `put_field_resolved`), `end_row` in a
 
 ```rust
 // bitmask version: row_dirty is Vec<u64> with (columns.len()+63)/64 words
-let full_words = self.row_dirty.len() - 1;
-let rem_bits = self.columns.len() % 64;
-for (i, b) in self.columns.iter_mut().enumerate() {
-    let word = i / 64;
-    let bit = i % 64;
-    if (self.row_dirty[word] >> bit) & 1 == 0 {
-        b.push(None);
-    } else {
-        self.row_dirty[word] &= !(1u64 << bit);
+let ncols = self.columns.len();
+let full_words = ncols / 64;
+let rem_bits = ncols % 64;
+let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
+    && (rem_bits == 0
+        || self.row_dirty.get(full_words).copied().unwrap_or(0) == (1u64 << rem_bits) - 1);
+if is_full {
+    self.row_dirty.fill(0);
+} else {
+    for (i, b) in self.columns.iter_mut().enumerate() {
+        let word = i / 64;
+        let bit = i % 64;
+        if (self.row_dirty[word] >> bit) & 1 == 0 {
+            b.push(None);
+        }
     }
+    self.row_dirty.fill(0);
 }
 if let Some(ref filter) = self.plan.filter {
     if !filter.check(&self.columns, &self.field_index, self.row_count, &self.plan) {
@@ -2330,7 +2342,7 @@ This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBui
 | `ColumnBuilder` variant | Arrow `DataType` | Array type |
 |-------------------------|-----------------|------------|
 | `String(StrColumn)` | `Utf8` | `StringArray` (OffsetBuffer plus Buffer plus NullBuffer) |
-| `Int64(NullableColumn<i64>)` | `Int64` | `Int64Array` |
+| `Int64(PrimColumn<i64>)` | `Int64` | `Int64Array` |
 | `Float64(NullableColumn<f64>)` | `Float64` | `Float64Array` |
 | `Boolean(NullableColumn<bool>)` | `Boolean` | `BooleanArray` |
 | `Date32(NullableColumn<i32>)` | `Date32` | `Date32Array` |
@@ -2341,7 +2353,7 @@ This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBui
 
 ## Null handling
 
-* `StrColumn` has `validity: Vec<bool>`. `to_arrow` builds `NullBuffer` only if some validity is false; otherwise `None` (all valid). Offsets still advance by 0 for null entries so `offsets[i]==offsets[i+1]`.
+* `StrColumn` has `validity: ValidityBitmap`. `to_arrow` builds `NullBuffer` only if some validity is false; otherwise `None` (all valid). Offsets still advance by 0 for null entries so `offsets[i]==offsets[i+1]`.
 
 * Numeric and boolean builders are `NullableColumn<T>`. `collect::<Int64Array>()` etc. preserves nulls.
 
