@@ -17,8 +17,10 @@ The splitter finds safe chunk boundaries for parallel parsing.
 
 ```rust
 pub trait Splitter: Send + Sync {
-    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize>;
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize>;
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize;
+    fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> { None }
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize>;
 }
 ```
 
@@ -1218,7 +1220,7 @@ PAGE: https://rypipe.emiliano-go.com/advanced/streaming/
 | `bounded` (collecting) | `BoundedExecutor::run` / `Pipeline::read_path_stream` → `Vec<RecordBatch>` | `budget + sum(batches)`: still grows with file size if you collect | `source.to_arrow()` with `memory="256MB"` for a single table |
 | `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | `budget + one batch`: constant | `for batch in rypipe.iter_record_batches(..., memory="64KB"):` + `ParquetWriter` |
 
-The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs:19`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs:30`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine.rs:75`) to keep RSS at `budget + batch`.
+The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs:19`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs:30`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine/table_builder.rs:75`) to keep RSS at `budget + batch`.
 
 ## Memory guarantee
 
@@ -1599,12 +1601,14 @@ PAGE: https://rypipe.emiliano-go.com/architecture/decoder/
 
 ```rust
 pub trait Splitter: Send + Sync {
-    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize>;
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize>;
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize;
+    fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> { None }
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize>;
 }
 ```
 
-* `find_split_points` returns sorted byte offsets where the input may be split. The first should be `0` and the last should be `bytes.len()`. Adjacent offsets produce one `Range`. The helper `split_points_to_ranges(&points, len) -> Vec<Range<usize>>` turns points into non empty ranges via `windows(2)` and `filter_map(|w| if start < end { Some(start..end) } else { None })`.
+The first two methods are required; `skip_regions` is optional; `find_split_points` has a default implementation.
 
 * `estimate_bytes_per_row` is used by `BoundedExecutor` to size batches (`rows_per_batch = budget / bytes_per_row`). It is called once on the whole input (or on `bytes` for `run_bytes`).
 
@@ -1616,6 +1620,8 @@ Rules for a correct splitter: points are sorted, start at a valid row boundary, 
 pub trait RecordParser: Send + Sync {
     fn validate(&self, bytes: &[u8]) -> Result<()>;
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()>;
+    fn parse_chunk_generic<S: ColumnarSink>(&self, bytes: &[u8], sink: &mut S) -> Result<()>
+    where Self: Sized;
 }
 ```
 
@@ -1780,7 +1786,7 @@ PAGE: https://rypipe.emiliano-go.com/architecture/engine/
 
 # Engine: TableBuilder
 
-`TableBuilder` (`crates/rypipe-core/src/engine.rs:16`) is the central structure. It implements `ColumnarSink` and is the only production sink that most adapters need.
+`TableBuilder` (`crates/rypipe-core/src/engine/table_builder.rs:16`) is the central structure. It implements `ColumnarSink` and is the only production sink that most adapters need.
 
 ## Structure
 
@@ -2060,7 +2066,7 @@ input bytes  [ADAPTER or CORE decides the source; InputBuffer below]
            | Str, Int64, Float64, Bool, Date32, Timestamp, Null
            v
 +---------------------+  (CORE) format agnostic
-|  TableBuilder       |  Struct in rypipe-core/src/engine.rs
+|  TableBuilder       |  Struct in rypipe-core/src/engine/table_builder.rs
 |  (ColumnarSink)     |  columns: Vec<ColumnBuilder> (CORE)
 |                     |  field_index: HashMap<String,usize> (CORE)
 |                     |  column_order: Vec<String> (CORE)
@@ -2070,7 +2076,7 @@ input bytes  [ADAPTER or CORE decides the source; InputBuffer below]
            | RecordBatch  (CORE) Arrow
            v
 +---------------------+  (CORE) format agnostic
-|  Arrow export       |  rypipe-core/src/arrow_export.rs plus engine.rs:finish
+|  Arrow export       |  rypipe-core/src/arrow_export.rs plus engine/table_builder.rs:finish
 |                     |  to_arrow_array, apply_compare_filter, null_array
 +---------------------+
            | pyarrow.Table / pandas / Polars  [PYTHON CORE] via rypipe-python C Data Interface
@@ -2091,7 +2097,7 @@ All format specific code is **ADAPTER BOUND** (separate crates, not in this repo
 | `value` | `value.rs` | CORE | `Value<'a>` enum: `Str(&str)`, `Int64`, `Float64`, `Bool`, `Date32(i32)`, `Timestamp(i64)`, `Null` |
 | `plan` | `plan.rs` | CORE | `ExecutionPlan`, `FieldType` (String, Int64, Float64, Boolean, Dictionary, Date32, Timestamp(unit)), `FilterPredicate` (Equal, NotEqual, Compare, And, Or, Not), `CompareOp` |
 | `columnar` | `columnar.rs` | CORE | `StrColumn` (arena plus offsets plus validity), `ColumnBuilder` (7 variants), dictionary `value -> i32` index, `try_upgrade_to_dict`, `unify_variants`, `promote_to_variant` |
-| `engine` | `engine.rs` | CORE | `TableBuilder` with `Vec<ColumnBuilder>`, `field_index`, `column_order`, `row_count`, `row_dirty`, `estimated_rows`, `plan`; `ensure_column_idx`, `push_field_resolved`, `push_field`, `finish_row`, `normalize`, `auto_dict_upgrade`, `sort_columns`, `finish` |
+| `engine` | `engine/table_builder.rs` | CORE | `TableBuilder` with `Vec<ColumnBuilder>`, `field_index`, `column_order`, `row_count`, `row_dirty`, `estimated_rows`, `plan`; `ensure_column_idx`, `push_field_resolved`, `push_field`, `finish_row`, `normalize`, `auto_dict_upgrade`, `sort_columns`, `finish` |
 | `decoder` | `decoder.rs` | CORE (traits) / ADAPTER BOUND (impls) | Traits `Splitter`, `RecordParser`, `ColumnarSink` (with `resolve` and `put_field_resolved`) plus `split_points_to_ranges`; adapters implement the first two, core implements the third |
 | `pipeline` | `pipeline.rs` | CORE | `Pipeline<S,P>` wiring `Splitter` plus `RecordParser` to `TableBuilder` with `read_bytes`, `read_bytes_par`, `read_bytes_stream`, `read_path`, `read_path_par`, `read_path_stream` |
 | `parallel` | `parallel.rs` | CORE | `ParallelExecutor::parse` with rayon, fast path vs merge path, `schemas_consistent` |
@@ -2149,7 +2155,7 @@ PAGE: https://rypipe.emiliano-go.com/architecture/optimizations/
 
 This page lists every optimization that makes `rypipe` fast for all adapters, not just one format. Each entry gives the file and line, what changed, why it matters, and what it replaces.
 
-## 1. Vec plus map column storage (engine.rs:16, plan.rs:280, merge.rs:30, parallel.rs:101)
+## 1. Vec plus map column storage (engine/table_builder.rs:16, plan.rs:280, merge.rs:30, parallel.rs:101)
 
 **Before:** `columns: HashMap<String, ColumnBuilder>` with `HashMap::get_mut` per field. `push_field` did `ensure_column` (`contains_key` plus `insert`) then `get_mut` (second hash) : 2 hashes per field in steady state.
 
@@ -2157,7 +2163,7 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Why generic:** every `RecordParser` calls `put_field` for every field of every row. The `Pipeline` hot loop is `validate` plus `parse_chunk` plus `push_value` plus this dispatch. Fewer hashes helps TSV at 5 fields per row as much as XML at 20 fields.
 
-## 2. Single lookup push (engine.rs:202)
+## 2. Single lookup push (engine/table_builder.rs:202)
 
 **Before:** `ensure_column` plus `get_mut` : double hash as above, plus `schema_insert_index` inside `ensure_column` scanned `column_order` even when the column already existed.
 
@@ -2165,7 +2171,7 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Why not `entry` API:** `HashMap::entry` would also be one hash, but `Vacant` insertion still needs `schema_insert_index` which borrows `self` mutably while `entry` holds a borrow. The `get` plus `insert` split avoids the borrow checker fight and keeps the fast path as a pure `get` without allocating the key.
 
-## 3. Dirty bitmask for finish_row (engine.rs:563)
+## 3. Dirty bitmask for finish_row (engine/table_builder.rs:563)
 
 **Before:** `for b in &mut columns { while b.len() < target { b.push(None) } }` iterated all columns and pushed `None` for missing ones, checking `len < target` for every column.
 
@@ -2173,7 +2179,7 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **Impact:** for 10 columns where 8 are present, this saves 80% of the `push(None)` calls and the associated `len` loads. The loop iterates over bitmask words and checks each bit; a bit test plus branch is cheaper than a `Vec` push.
 
-## 4. Resolve plus put_field_resolved (decoder.rs:65, engine.rs:542)
+## 4. Resolve plus put_field_resolved (decoder.rs:65, engine/table_builder.rs:542)
 
 **Before:** adapters did `if sink.wants(k) { /* decode */ sink.put_field(k, v) }` which called `ExecutionPlan::resolve_field` twice: once in `wants` (hash `field_map` then `drop_fields`) and once in `put_field`. When `field_map` or `drop_fields` is non empty, this is two hashes per field. `push_field` also did `owned = n.to_owned()` to hold the resolved name.
 
@@ -2207,7 +2213,7 @@ This page lists every optimization that makes `rypipe` fast for all adapters, no
 
 **After:** `Pipeline::read_bytes_par` and `read_bytes_stream` plus `BoundedExecutor::run_bytes` slice directly from `&[u8]` with no file IO. `plan_chunks` computes `bytes_per_row`, `total_rows_est`, `rows_per_batch`, `num_batches`, caps at `MAX_SPLIT_CHUNKS = 100_000`, then `split_points_to_ranges`. `run_bytes` is used for decompressed buffers and for adapters that hold `BytesIO` data.
 
-## 9. Arrow export and filter reapplication (arrow_export.rs:29, engine.rs:335)
+## 9. Arrow export and filter reapplication (arrow_export.rs:29, engine/table_builder.rs:335)
 
 * `StrColumn` arena plus offsets plus validity is block copied to `StringArray` (two buffers).
 * Numeric builders are `NullableColumn<T>` with `collect`.
@@ -2335,7 +2341,7 @@ PAGE: https://rypipe.emiliano-go.com/architecture/storage/
 
 # Storage and export
 
-This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBuilder`, dictionary, and `crates/rypipe-core/src/arrow_export.rs` plus the `finish` path in `engine.rs:289`.
+This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBuilder`, dictionary, and `crates/rypipe-core/src/arrow_export.rs` plus the `finish` path in `engine/table_builder.rs:289`.
 
 ## Arrow types produced
 
@@ -2425,7 +2431,7 @@ PAGE: https://rypipe.emiliano-go.com/crxml-adapter/
 
 Crystal Reports exports tabular data inside XML elements like `<Field Name="X"><Value>123</Value></Field>` and `<Text Name="Y"><TextValue>abc</TextValue></Text>`. `crxml` reads these exports and turns them into Arrow tables or DataFrames.
 
-On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6-3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, now also scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB (was 251/234 `quick-xml`), within 30% of columnar (was 174% gap). The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O: `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine.rs:16`, `row_dirty` `engine.rs:26`) keeps up without being the bottleneck.
+On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6-3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, now also scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB (was 251/234 `quick-xml`), within 30% of columnar (was 174% gap). The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O: `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine/table_builder.rs:16`, `row_dirty` `engine/table_builder.rs:26`) keeps up without being the bottleneck.
 
 ## How it fits into rypipe
 
@@ -2441,7 +2447,7 @@ CrystalXmlSplitter  : finds row-tag boundaries          (ADAPTER BOUND)  rypipe_
 CrystalXmlDecoder   : extracts fields from each row     (ADAPTER BOUND)  rypipe_core::RecordParser impl (crxml-core/src/xml/decoder.rs)
     |  Value events (Str, Int64, ...)  (CORE) enum
     v
-rypipe-core engine  : typed builders, filters, projection, Arrow export  (CORE)  rypipe-core/src/engine.rs plus columnar.rs plus plan.rs
+rypipe-core engine  : typed builders, filters, projection, Arrow export  (CORE)  rypipe-core/src/engine/table_builder.rs plus columnar.rs plus plan.rs
     |  RecordBatch  (CORE) Arrow
     v
 pyarrow.Table / pandas.DataFrame  [PYTHON CORE] via rypipe-python C Data Interface plus (ADAPTER BOUND) registration (crxml/rypipe_adapter.py)
@@ -2469,13 +2475,14 @@ use memchr;
 pub struct CrystalXmlSplitter { row_tag: Vec<u8> }
 
 impl Splitter for CrystalXmlSplitter {
-    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
-        let ranges = compute_splits(bytes, &self.row_tag, max_chunks);
-        let mut points = vec![0];
-        for r in ranges { points.push(r.end); }
-        points.dedup();
-        if points.last() != Some(&bytes.len()) { points.push(bytes.len()); }
-        points
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        next_row_start_fast(bytes, from, &self.row_tag).map(|pos| {
+            let after = pos + 1 + self.row_tag.len();
+            bytes[after..].iter().position(|&b| b == b'>').map(|rel| after + rel + 1).unwrap_or(bytes.len())
+        })
+    }
+    // find_split_points: use default from Splitter trait (no override needed)
+}
     }
 
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
@@ -2562,7 +2569,7 @@ The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from
 | Hand-rolled `memchr`/`memmem` scanner `scanner.rs:29` (`memchr`, `memchr3`, `Finder` `scanner.rs:569`) | No `quick-xml` event loop (was 42% wall `lib.rs:598`); SIMD `scan_open_tag` `scanner.rs:414`, `field_element` `scanner.rs:202`, `Find-er` byte-jump for dropped `Field` (`wants` `scanner.rs:210` → `find_close_after`) |
 | `memchr::memmem` row-tag scan + skip-region | SIMD `next_row_start` `splitter.rs:107`, `find_special_regions` `splitter.rs:61` (`<!--`, `<![CDATA[`) with `is_empty` fast path `scanner.rs:418` |
 | SIMD UTF-8 validation | `simdutf8` `decoder.rs:32` validates chunk bulk; `utf8_unchecked` `scanner.rs:39` + conditional `unescape` only if `b'&'` `scanner.rs:662` |
-| `rypipe-core` `Vec<ColumnBuilder>`+`field_index` `engine.rs:16` single `get` + `row_dirty` `engine.rs:26` bitmask | `push_field` was double `HashMap` probe → single `field_index.get` → `columns[idx]`; `finish_row` now only null-fills clear bits, not all `C` columns |
+| `rypipe-core` `Vec<ColumnBuilder>`+`field_index` `engine/table_builder.rs:16` single `get` + `row_dirty` `engine/table_builder.rs:26` bitmask | `push_field` was double `HashMap` probe → single `field_index.get` → `columns[idx]`; `finish_row` now only null-fills clear bits, not all `C` columns |
 | `InputBuffer` `mmap` `lib.rs:25` `auto_mmap` >50 MB + `cap` via `estimate_bytes_per_row` `splitter.rs:41` | Avoids `fs::read` `rep_movs` 3% + over-reserve `Vec` 2× |
 | Parallel fast path `parallel.rs:82` + streaming `RowSink` `lib.rs:564` | `auto_dict`/`Compare` off → per-chunk `RecordBatch` export in parallel; streaming reuses same scanner row-by-row via `scan_one_row` `scanner.rs:81` without `TableBuilder` |
 
@@ -3076,7 +3083,7 @@ Then use `perf`, `cargo flamegraph`, or `samply` to profile.
 
 ## Example: `crxml` adapter
 
-`crxml` (Crystal Reports XML, at `docs/crxml-adapter.md`) is the reference for what a good adapter looks like: hand-rolled `memchr` scanner `crxml-core/src/xml/scanner.rs` instead of `quick-xml`, shared between columnar `scan_chunk` and streaming `scan_one_row` + `RowSink` `crxml-core/src/lib.rs:564`, `Vec<ColumnBuilder>`+`field_index` + `row_dirty` bitmask in `engine.rs:16`, `InputBuffer` `mmap` auto for >50 MB (`crxml-core` `auto_mmap`), and `wants`-driven skip-bytes. On a Ryzen 5800X it holds **714 MB/s single / 2.6-3.0 GB/s parallel** (1 GB, 926k rows) and **4183 MB/s** with `drop_all` pushdown, with streaming now **508 MB/s** (2× over `quick-xml`'s 251). See `benchmarks/bench_extended.py` (104 benchmarks/file) for the full matrix (native, source×sink, pushdowns, chunk/bounded/batch/pipeline).
+`crxml` (Crystal Reports XML, at `docs/crxml-adapter.md`) is the reference for what a good adapter looks like: hand-rolled `memchr` scanner `crxml-core/src/xml/scanner.rs` instead of `quick-xml`, shared between columnar `scan_chunk` and streaming `scan_one_row` + `RowSink` `crxml-core/src/lib.rs:564`, `Vec<ColumnBuilder>`+`field_index` + `row_dirty` bitmask in `engine/table_builder.rs:16`, `InputBuffer` `mmap` auto for >50 MB (`crxml-core` `auto_mmap`), and `wants`-driven skip-bytes. On a Ryzen 5800X it holds **714 MB/s single / 2.6-3.0 GB/s parallel** (1 GB, 926k rows) and **4183 MB/s** with `drop_all` pushdown, with streaming now **508 MB/s** (2× over `quick-xml`'s 251). See `benchmarks/bench_extended.py` (104 benchmarks/file) for the full matrix (native, source×sink, pushdowns, chunk/bounded/batch/pipeline).
 
 ## Future work
 

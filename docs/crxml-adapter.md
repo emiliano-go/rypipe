@@ -22,7 +22,7 @@ CrystalXmlSplitter  : finds row-tag boundaries          (ADAPTER BOUND)  rypipe_
 CrystalXmlDecoder   : extracts fields from each row     (ADAPTER BOUND)  rypipe_core::RecordParser impl (crxml-core/src/xml/decoder.rs)
     |  Value events (Str, Int64, ...)  (CORE) enum
     v
-rypipe-core engine  : typed builders, filters, projection, Arrow export  (CORE)  rypipe-core/src/engine.rs plus columnar.rs plus plan.rs
+rypipe-core engine  : typed builders, filters, projection, Arrow export  (CORE)  rypipe-core/src/engine/mod.rs plus columnar.rs plus plan.rs
     |  RecordBatch  (CORE) Arrow
     v
 pyarrow.Table / pandas.DataFrame  [PYTHON CORE] via rypipe-python C Data Interface plus (ADAPTER BOUND) registration (crxml/rypipe_adapter.py)

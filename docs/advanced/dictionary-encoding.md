@@ -84,7 +84,7 @@ If you need both dictionaries and maximum throughput, consider:
 `ParallelExecutor` has two internal paths:
 
 - **Fast path**: when `auto_dict` is false, each chunk is exported as its own `RecordBatch` in parallel. No serial merge.
-- **Merge path**: when `auto_dict` or a `Compare` filter is enabled, chunk builders are merged sequentially before export. Peak RSS is higher.
+- **Merge path**: when `auto_dict` is enabled or schemas are inconsistent, chunk builders are merged sequentially before export. Peak RSS is higher. Compare filters do not force the merge path.
 
 If you need both a `Compare` filter and maximum throughput, consider filtering after export in Python/Arrow instead.
 

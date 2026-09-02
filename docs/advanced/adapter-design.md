@@ -56,7 +56,8 @@ In crxml, the splitter skips comments and CDATA while scanning for `<Row` tags. 
 pub trait RecordParser: Send + Sync {
     fn validate(&self, bytes: &[u8]) -> Result<()>;
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()>;
-    fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut dyn GenericSink) -> Result<()>;
+    fn parse_chunk_generic<S: ColumnarSink>(&self, bytes: &[u8], sink: &mut S) -> Result<()>
+    where Self: Sized;
 }
 ```
 
