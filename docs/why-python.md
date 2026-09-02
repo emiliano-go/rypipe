@@ -129,7 +129,7 @@ Yes. See [Rust API](./rust-api.md) and [Writing a format adapter](./writing-adap
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.
 
 **“Will you maintain both APIs?”**
-Yes. `rypipe-core` is versioned independently (`0.1.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
+Yes. `rypipe-core` is versioned independently (`2.0.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
 
 ---
 

@@ -207,7 +207,7 @@ when the corresponding Cargo feature is enabled:
 
 ```toml
 [dependencies]
-rypipe-core = { version = "0.1", features = ["gzip"] } # or "zstd", "lz4", "compress-all"
+rypipe-core = { version = "2.0", features = ["gzip"] } # or "zstd", "lz4", "compress-all"
 ```
 
 Supported magics: gzip `1f 8b`, zstd `28 b5 2f fd`, lz4 frame `04 22 4d 18`.

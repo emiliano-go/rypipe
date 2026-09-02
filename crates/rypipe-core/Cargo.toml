@@ -1,6 +1,6 @@
 [package]
 name = "rypipe-core"
-version = "0.1.1"
+version = "2.0.0"
 edition = "2021"
 license = "MIT"
 description = "Format-agnostic ingestion framework with Arrow export"

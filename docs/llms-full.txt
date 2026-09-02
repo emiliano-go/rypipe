@@ -3640,7 +3640,7 @@ when the corresponding Cargo feature is enabled:
 
 ```toml
 [dependencies]
-rypipe-core = { version = "0.1", features = ["gzip"] } # or "zstd", "lz4", "compress-all"
+rypipe-core = { version = "2.0", features = ["gzip"] } # or "zstd", "lz4", "compress-all"
 ```
 
 Supported magics: gzip `1f 8b`, zstd `28 b5 2f fd`, lz4 frame `04 22 4d 18`.
@@ -3852,7 +3852,7 @@ Yes. See [Rust API](./rust-api.md) and [Writing a format adapter](./writing-adap
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.
 
 **“Will you maintain both APIs?”**
-Yes. `rypipe-core` is versioned independently (`0.1.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
+Yes. `rypipe-core` is versioned independently (`2.0.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
 
 ---
 
@@ -3973,7 +3973,7 @@ impl RecordParser for CsvDecoder {
     }
 
     // Fastest when extraction is expensive : one resolve instead of two:
-    // (requires rypipe-core >=0.1.1)
+    // (requires rypipe-core >=2.0.0)
     fn parse_chunk_fast(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
         let text = simdutf8::basic::from_utf8(bytes).map_err(rypipe_core::Error::Utf8)?;
         for line in text.lines() {
