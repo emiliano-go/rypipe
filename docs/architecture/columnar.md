@@ -1,6 +1,7 @@
 # Columnar storage
 
-This page documents `crates/rypipe-core/src/columnar.rs` in full. It is the storage layer that makes `TableBuilder` fast and Arrow export cheap.
+This page documents `columnar.rs` in depth. It is the storage layer that makes
+`TableBuilder` fast and Arrow export cheap.
 
 ## StrColumn
 
@@ -8,132 +9,200 @@ This page documents `crates/rypipe-core/src/columnar.rs` in full. It is the stor
 pub(crate) struct StrColumn {
     data: Vec<u8>,
     offsets: Vec<i32>,
-    validity: Vec<bool>,
+    validity: ValidityBitmap,
 }
 ```
 
-This is exactly the Arrow `StringArray` layout (offsets plus bytes plus null bitmap) without per cell `String` allocation.
+This is exactly the Arrow `StringArray` layout (offsets + bytes + null bitmap)
+without per-cell `String` allocation.
 
-* `data: Vec<u8>` is one contiguous arena. Every string's bytes are appended sequentially.
+### Fields
 
-* `offsets: Vec<i32>` has `len + 1` entries. `offsets[i] .. offsets[i+1]` is the byte range for value `i`. It is initialized with `[0]` so `push` can compute the next offset as `data.len()`.
+- **`data: Vec<u8>`** — One contiguous arena. Every string's bytes are
+  appended sequentially. No per-cell allocation.
 
-* `validity: Vec<bool>` marks null vs present. `true` means present; `false` means null (the buffer contains no bytes for that slot, but offsets still advance by 0).
+- **`offsets: Vec<i32>`** — `len + 1` entries. `offsets[i]..offsets[i+1]`
+  is the byte range for value `i`. Initialized with `[0]` so `push` can
+  compute the next offset as `data.len()`.
 
-Operations:
+- **`validity: ValidityBitmap`** — One bit per row. `true` means present;
+  `false` means null (no bytes for that slot, but offsets still advance by 0).
 
-* `with_capacity(cap)` preallocates `offsets` with `cap + 1` and `data` with `cap * 16` (heuristic 16 bytes per string). This matches `TableBuilder::estimated_rows`.
+### Operations
 
-* `push(v: Option<&str>)` extends `data` if `Some`, pushes `data.len()` to `offsets`, and pushes `is_some` to `validity`. No allocation per cell beyond the arena growth.
+- **`with_capacity(cap)`** — Preallocates `offsets` with `cap + 1` and
+  `data` with `cap * 16` (heuristic 16 bytes per string).
 
-* `pop` undoes the last push: pops `validity`, pops `offsets`, truncates `data` to the last offset.
+- **`push(Option<&str>)`** — Extends `data` if `Some`, pushes `data.len()`
+  to `offsets`, pushes `is_some` to `validity`. No per-cell allocation
+  beyond arena growth.
 
-* `len` is `validity.len()`.
+- **`pop`** — Undoes the last push: pops validity, pops offsets, truncates
+  data to the last offset.
 
-* `get(i: usize) -> Option<&str>` checks validity, slices `data[offsets[i] .. offsets[i+1]]`, and does `from_utf8` (the slice is known UTF-8 from `validate`, but the check is kept for safety).
+- **`get(i)`** — Checks validity, slices `data[offsets[i]..offsets[i+1]]`,
+  returns `Option<&str>`.
 
-* `append(&mut self, other: &StrColumn)` merges another column by base shifting offsets: `base = self.data.len() as i32`, then `self.offsets.extend(other.offsets[1..].iter().map(|o| o + base))`. This is O(n) in offsets, not in bytes.
+- **`append(&mut self, other)`** — Merges another column by base-shifting
+  offsets: `base = self.data.len() as i32`, then extends offsets. O(n) in
+  offsets, not in bytes.
 
-* `to_arrow(&mut self) -> Result<ArrayRef>` builds an Arrow `StringArray` by wrapping the three buffers with `OffsetBuffer`, `Buffer`, and `NullBuffer`. When all validity are true, `nulls` is `None`. This is a block copy of two buffers, not per cell.
+- **`to_arrow()`** — Builds Arrow `StringArray` by wrapping three buffers
+  with `OffsetBuffer`, `ScalarBuffer`, `Buffer`, and `NullBuffer`. Block
+  copy, not per-cell.
+
+### ValidityBitmap
+
+```rust
+struct ValidityBitmap {
+    bits: Vec<u8>,
+    len: usize,
+    null_count: usize,
+}
+```
+
+One bit per row packed into bytes. Supports `push` (allocates new byte every
+8 rows), `pop`, `split_off`, `append`. Converts to Arrow `NullBuffer` via
+`into_arrow()`.
 
 ## ColumnBuilder
 
 ```rust
 pub(crate) enum ColumnBuilder {
     String(StrColumn),
-    Int64(NullableColumn<i64>),
-    Float64(NullableColumn<f64>),
-    Boolean(NullableColumn<bool>),
-    Date32(NullableColumn<i32>),
-    Timestamp(TimeUnit, NullableColumn<i64>),
-    Dictionary { codes: NullableColumn<i32>, dict: Vec<String>, index: HashMap<String, i32> },
+    Int64(PrimColumn<i64>),
+    Float64(PrimColumn<f64>),
+    Boolean(PrimColumn<bool>),
+    Date32(PrimColumn<i32>),
+    Timestamp(TimeUnit, PrimColumn<i64>),
+    Dictionary {
+        codes: NullableColumn<i32>,
+        dict: Vec<String>,
+        index: HashMap<String, i32>,
+    },
 }
 ```
 
-Each variant stores a `NullableColumn<T>` (or `StrColumn` for strings). There is exactly one builder per column, created by `ExecutionPlan::column_type` at first use.
+Each variant stores a `PrimColumn<T>` (or `StrColumn` for strings). Created
+by `ExecutionPlan::column_type` at first use.
 
-* `String` is `StrColumn`.
-* `Int64`, `Float64`, `Boolean` are `NullableColumn<T>` with `lexical::parse` for string inputs.
-* `Date32(NullableColumn<i32>)` stores days since epoch. Parsing uses `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`.
-* `Timestamp(TimeUnit, NullableColumn<i64>)` stores raw integers in the column's `TimeUnit` (Second, Millisecond, Microsecond, Nanosecond). Parsing tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`, then bare `"%Y-%m-%d"` as midnight. Timezone handling is left to adapters that emit `Value::Timestamp` directly.
-* `Dictionary { codes, dict, index }` stores `codes: NullableColumn<i32>` plus `dict: Vec<String>` (id to string) and `index: HashMap<String,i32>` (string to id). This is the write path for `FieldType::Dictionary` and for auto dict upgrade.
-
-Variant keys for unification (10 strings):
-
-* `string`, `int64`, `float64`, `boolean`, `date32`, `timestamp[s]`, `timestamp[ms]`, `timestamp[us]`, `timestamp[ns]`, `dictionary`
-
-`variant_key(&self) -> &'static str` returns the key. Timestamp units are distinguished so merging `timestamp[s]` with `timestamp[ms]` is an error rather than silent promotion.
-
-## Push paths
-
-`push_value(&mut self, value: Value<'_>)` is called for every field of every row. It handles typed `Value` variants:
-
-* `Value::Null` becomes `None`.
-* `Value::Str(s)` calls `push_str(Some(s))`, which parses according to column type: `lexical::parse` for numbers, `parse::<bool>` for booleans, `parse_date32`/`parse_timestamp` for temporals. Unparseable becomes `None`.
-* `Value::Int64(i)` into `Int64` is native, into `Float64` widens `i as f64`, into `String` stringifies, into `Dictionary` encodes via `dict_code`.
-* Similarly for `Float64`, `Bool`, `Date32`, `Timestamp`. Cross type mismatches (for example `Bool` into `Int64`) become `None`.
-
-`push(&mut self, value: Option<String>)` and `push_str(&mut self, value: Option<&str>)` are the string entry points. `push_str` avoids allocation for typed columns (it parses and discards the string). Both handle `Dictionary` by calling `dict_code`.
-
-`dict_code(dict: &mut Vec<String>, index: &mut HashMap<String,i32>, v: &str) -> i32` does `if let Some(&code) = index.get(v) { return code }` else `dict.push(v.to_owned())` and insert. Average O(1).
-
-## Auto dictionary
-
-`try_upgrade_to_dict(&mut self, min_rows: usize, max_ratio: f64, max_size: usize)` upgrades a `String` builder to `Dictionary` when cardinality is low. Steps:
-
-1. Only `String` builders; others are no ops.
-2. If `len < min_rows` (512 in `TableBuilder::auto_dict_upgrade`), leave as `String`.
-3. Count distinct via `FxHashSet<&str>` over `iter().flatten()` (skipping nulls).
-4. Compute cap: `ratio_cap = ((len as f64 * max_ratio) as usize).max(16).min(max_size)`. Floor of 16 lets tiny columns upgrade; cap respects `dict_threshold` (default 0.05) and `dict_max_size` (default 256).
-5. If distinct > cap, leave as `String`.
-6. Otherwise build `dict`, `index`, `codes` from the old `StrColumn` via `dict_code`.
-
-Called after each chunk parse when `plan.auto_dict` is true, and after merge via `TableBuilder::auto_dict_upgrade` which respects `plan.dict_threshold` and `plan.dict_max_size`.
-
-## Merging and promotion
-
-`extend_owned(&mut self, other: ColumnBuilder) -> Result<()>` merges `other` into `self` by consuming `other`. Both must be the same variant (after promotion). Cases:
-
-* `String` via `StrColumn::append` (base shift)
-* `Int64`/`Float64`/`Boolean`/`Date32`/`Timestamp` via `Vec::append`
-* `Timestamp` checks `unit_a == unit_b` else `Error::Merge`
-* `Dictionary` remaps `b`'s dictionary into `a`'s via `dict_code` per value, then translates codes via `remap[idx]`
-
-`unify_variants(a: &str, b: &str) -> Option<&'static str>` reconciles two variant keys:
-
-* same → same
-* `int64` plus `float64` → `float64`
-* `string` plus `dictionary` → `dictionary`
-* otherwise `None` (irreconcilable)
-
-`promote_to_variant(&mut self, target: &'static str) -> Result<()>` mutates in place:
-
-* `Int64` to `Float64` via `std::mem::take` then `map(|o| o.map(|n| n as f64))`
-* `String` to `Dictionary` via taking the `StrColumn`, building `dict`/`index`/`codes`
-* Same key is a no op
-* Any other target returns `Error::Merge`
-
-Used in `merge::extend` and `merge::engines_to_record_batches` before `extend_owned`.
-
-## Arrow export
-
-`arrow_datatype(&self) -> DataType` maps each variant to Arrow type: `Utf8`, `Int64`, `Float64`, `Boolean`, `Date32`, `Timestamp(unit, None)`, `Dictionary(Int32, Utf8)`.
-
-`to_arrow_array(&self) -> Result<ArrayRef>` builds the native array:
-
-* `String` via `StrColumn::to_arrow`
-* `Int64`/`Float64`/`Boolean`/`Date32` via `iter().copied().collect::<Array>()`
-* `Timestamp(unit, v)` via `collect::<PrimitiveArray<TimestampXType>>` per unit
-* `Dictionary` via `Int32Array` keys plus `StringArray` values into `DictionaryArray::<Int32Type>::try_new`
-
-## Typed value view
-
-`TypedValue<'a>` is a borrowed view for filter evaluation:
+### PrimColumn<T>
 
 ```rust
-pub(crate) enum TypedValue<'a> { Str(&'a str), Int64(i64), Float64(f64), Bool(bool), Date32(i32), Timestamp(i64) }
+pub(crate) struct PrimColumn<T: Copy> {
+    data: Vec<T>,
+    validity: ValidityBitmap,
+}
 ```
 
-`get_typed_value(&self, index: usize) -> Option<TypedValue<'_>>` borrows directly from storage (dictionary decodes to `Str` via dict lookup). `get_filter_value` formats as `String` for `Equal`/`NotEqual` (dates via `format_date32`, timestamps via `format_timestamp`).
+Flat contiguous array. Zero-copy Arrow export via `to_arrow()` which moves
+`Vec<T>` into `ScalarBuffer`. Boolean specialization via `to_arrow_bool()`.
 
-This enum lets `FilterPredicate::Compare` run natively per row with numeric promotion, without allocation.
+### Push paths
+
+`push_value(Value<'_>)` is called for every field:
+- `Value::Str(s)` → `push_str(Some(s))` → parse according to column type
+- `Value::Int64(i)` into Int64 is native, into Float64 widens
+- Cross-type mismatches become `None`
+
+`dict_code(dict, index, v)` does hash lookup + insert. Average O(1).
+
+### Auto dictionary
+
+`try_upgrade_to_dict(min_rows, max_ratio, max_size)` upgrades String to
+Dictionary when cardinality is low:
+
+1. Only String builders; others are no-ops.
+2. If `len < min_rows` (512 default), stay as String.
+3. Count distinct via `FxHashSet<&str>` over `iter().flatten()` (skip nulls).
+4. Compute cap: `min(max(16, len * max_ratio), max_size)`. Floor of 16 lets
+   tiny columns upgrade; cap respects `dict_threshold` (default 0.05) and
+   `dict_max_size` (default 256).
+5. If distinct > cap, stay as String.
+6. Otherwise build dict/index/codes from the old StrColumn via `dict_code`.
+
+Called after each chunk parse when `plan.auto_dict` is true, and after merge
+via `TableBuilder::auto_dict_upgrade`.
+
+### Incremental dictionary unification
+
+When `auto_dict=True` in parallel mode, chunks may produce different
+dictionaries. The incremental path:
+
+1. Per-chunk `auto_dict_upgrade` in parallel
+2. Find first divergent dictionary across chunks
+3. Build `SeedDict` from first chunk
+4. `unify_dictionaries`: global dict + per-chunk remap tables (O(dict_size))
+5. `remap_codes`: in-place code remap via `get_unchecked` (parallel)
+6. `replace_dict`: swap local dict for unified dict
+
+This avoids the serial merge path while keeping the fast export path.
+
+### Merging and promotion
+
+`extend_owned(other)` merges by consuming other. Both must be same variant:
+- String via `StrColumn::append` (base shift)
+- Numeric via `Vec::append`
+- Timestamp checks `unit_a == unit_b` else `Error::Merge`
+- Dictionary remaps via `dict_code` per value
+
+`unify_variants(a, b)` reconciles: same→same, int64+float64→float64,
+string+dictionary→dictionary, else None.
+
+`promote_to_variant(target)` mutates in place: Int64→Float64, String→Dict.
+
+### TypedValue
+
+```rust
+pub(crate) enum TypedValue<'a> {
+    Str(&'a str), Int64(i64), Float64(f64),
+    Bool(bool), Date32(i32), Timestamp(i64),
+}
+```
+
+Borrowed view for filter evaluation. `get_typed_value` borrows directly from
+storage without allocation. `get_filter_value` formats as `String` for
+`Equal`/`NotEqual` predicates (dates via `format_date32`, timestamps via
+`format_timestamp`).
+
+## Performance characteristics
+
+### String push
+
+`push_str` for the String variant does:
+1. Compute offset: `data.len()`
+2. Extend data: `data.extend_from_slice(s.as_bytes())`
+3. Push offset: `offsets.push(data.len() as i32)`
+4. Push validity: `validity.push(true)`
+
+Cost: ~10 ns per string (arena append + 3 pushes). No per-cell allocation.
+
+### Numeric push
+
+`push_value` for Int64/Float64 does:
+1. Match on Value variant
+2. `lexical::parse` or direct cast
+3. Push to `PrimColumn::data` (Vec push)
+4. Push to `validity`
+
+Cost: ~5 ns per numeric value. No parsing overhead for typed values.
+
+### Dictionary push
+
+`dict_code` does:
+1. `index.get(v)` — HashMap lookup (~5 ns)
+2. If missing: `dict.push(v.to_owned())` + `index.insert` (~20 ns amortized)
+3. `codes.push(Some(code))` — NullableColumn push
+
+Cost: ~5 ns per value (amortized O(1) lookup).
+
+### Arrow export
+
+`to_arrow_array` uses `std::mem::take` to move internal buffers into Arrow
+arrays. This is zero-copy — no data copying, just pointer moves.
+
+For `StrColumn`: moves `data`, `offsets`, and `validity` into `StringArray`.
+For `PrimColumn<T>`: moves `data` and `validity` into `PrimitiveArray`.
+For Dictionary: moves `codes`, `dict` into `DictionaryArray`.
+
+Cost: ~100 ns per column (buffer moves + schema construction).

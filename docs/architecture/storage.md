@@ -1,79 +1,172 @@
 # Storage and export
 
-This page covers `crates/rypipe-core/src/columnar.rs:34` `StrColumn`, `ColumnBuilder`, dictionary, and `crates/rypipe-core/src/arrow_export.rs` plus the `finish` path in `engine.rs:289`.
+This page covers Arrow type mapping, null handling, the string arena,
+numeric/temporal parsing, dictionary encoding, unification, and the finish
+path. See [Columnar storage](./columnar.md) for the storage types themselves.
 
 ## Arrow types produced
 
-| `ColumnBuilder` variant | Arrow `DataType` | Array type |
-|-------------------------|-----------------|------------|
-| `String(StrColumn)` | `Utf8` | `StringArray` (OffsetBuffer plus Buffer plus NullBuffer) |
-| `Int64(NullableColumn<i64>)` | `Int64` | `Int64Array` |
-| `Float64(NullableColumn<f64>)` | `Float64` | `Float64Array` |
-| `Boolean(NullableColumn<bool>)` | `Boolean` | `BooleanArray` |
-| `Date32(NullableColumn<i32>)` | `Date32` | `Date32Array` |
-| `Timestamp(TimeUnit, NullableColumn<i64>)` | `Timestamp(unit, None)` | `PrimitiveArray<TimestampSecondType>` etc. |
-| `Dictionary { codes, dict, index }` | `Dictionary(Int32, Utf8)` | `DictionaryArray<Int32Type>` with `Int32Array` keys and `StringArray` values |
+| ColumnBuilder variant | Arrow DataType | Array type |
+|----------------------|---------------|------------|
+| String(StrColumn) | Utf8 | StringArray (OffsetBuffer + ScalarBuffer + NullBuffer) |
+| Int64(PrimColumn<i64>) | Int64 | Int64Array (ScalarBuffer + NullBuffer) |
+| Float64(PrimColumn<f64>) | Float64 | Float64Array |
+| Boolean(PrimColumn<bool>) | Boolean | BooleanArray (BooleanBuffer) |
+| Date32(PrimColumn<i32>) | Date32 | Date32Array |
+| Timestamp(unit, PrimColumn<i64>) | Timestamp(unit, None) | PrimitiveArray<TimestampXType> |
+| Dictionary { codes, dict, index } | Dictionary(Int32, Utf8) | DictionaryArray<Int32Type> |
 
-`arrow_datatype(&self) -> DataType` and `to_arrow_array(&self) -> Result<ArrayRef>` implement the mapping. `Timestamp` branches on `TimeUnit` to the correct `PrimitiveArray` type.
+`arrow_datatype()` maps each variant to its Arrow type. `to_arrow_array()`
+builds the native array via zero-copy `std::mem::take` on internal buffers.
 
 ## Null handling
 
-* `StrColumn` has `validity: Vec<bool>`. `to_arrow` builds `NullBuffer` only if some validity is false; otherwise `None` (all valid). Offsets still advance by 0 for null entries so `offsets[i]==offsets[i+1]`.
+### StrColumn
 
-* Numeric and boolean builders are `NullableColumn<T>`. `collect::<Int64Array>()` etc. preserves nulls.
+`ValidityBitmap` stores one bit per row. `to_arrow` builds `NullBuffer`
+only if some validity is false; otherwise `None` (all valid). Offsets
+advance by 0 for null entries so `offsets[i] == offsets[i+1]`. The null
+string occupies zero bytes in the data arena.
 
-* Missing columns in `engines_to_record_batches` become `null_array(&types[name], e.row_count)` (a `NullArray` of the unified type).
+### PrimColumn<T>
 
-* `Value::Null` and unparseable strings both become `None`.
+`ValidityBitmap` + `Vec<T>`. `to_arrow()` preserves nulls via `NullBuffer`.
+The boolean specialization `to_arrow_bool()` packs `Vec<bool>` into
+`BooleanBuffer` via `ScalarBuffer<u8>`.
+The boolean specialization `to_arrow_bool()` packs `Vec<bool>` into
+`BooleanBuffer` via `ScalarBuffer<u8>`.
+
+### Missing columns
+
+In `engines_to_record_batches`, columns present in some chunks but missing
+in others become `null_array(&types[name], e.row_count)` — a `NullArray`
+of the unified type. This is a block fill, not per-cell.
+
+### Value::Null and unparseable strings
+
+Both become `None` in the column builder. `push_str` returns `None` for
+unparseable strings (e.g., "abc" into Int64 column). `Value::Null` is
+explicitly null.
 
 ## String arena
 
-`StrColumn::push(Option<&str>)` appends bytes to `data` and `data.len()` to `offsets`. `pop` truncates `data` to `offsets.last()`. `append` merges another column with base shifted offsets. `get` slices `data[offsets[i]..offsets[i+1]]` and does `from_utf8` (safe because input was validated via `simdutf8`).
+`StrColumn` stores strings in a contiguous byte arena with offset indexing:
 
-Capacity: `with_capacity(cap)` reserves `cap+1` offsets and `cap*16` data bytes. `Pipeline` passes `cap = bytes.len() / 512` (min 64) or `estimated_rows`.
+```
+data:    [h][e][l][l][o][w][o][r][l][d]     ← two strings
+offsets: [0,     5,          10]             ← byte boundaries
+```
+
+### push
+
+`push(Some("hello"))` appends 5 bytes to `data`, pushes `data.len()` (=5)
+to `offsets`, pushes `true` to validity. `push(None)` pushes 0 to offsets
+and `false` to validity. No per-cell allocation beyond arena growth.
+
+### pop
+
+Pops validity, pops offsets, truncates `data` to `offsets.last()`. Used
+for last-write-wins (duplicate field in same row) and row rejection.
+
+### append
+
+Merges another column by base-shifting offsets: `base = self.data.len()`.
+Then extends `self.offsets` with `other.offsets[1..].map(|o| o + base)`.
+O(n) in offsets, not in bytes.
+
+### Capacity
+
+`with_capacity(cap)` reserves `cap+1` offsets and `cap*16` data bytes.
+`Pipeline` passes `cap = bytes.len() / 512` (min 64) or `estimated_rows`.
 
 ## Numeric and temporal parsing
 
-`push` and `push_str` for typed builders use:
+When a `Value::Str` is pushed to a typed column, the string is parsed:
 
-* `lexical::parse::<i64,_>` and `<f64,_>` for `Int64`/`Float64`
-* `s.parse::<bool>()` for `Boolean`
-* `parse_date32` (`chrono::NaiveDate::parse_from_str("%Y-%m-%d")` minus epoch) for `Date32`
-* `parse_timestamp` (tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`, then bare date as midnight, then converts via `and_utc` to seconds, millis, micros, or nanos depending on `TimeUnit`) for `Timestamp`
+- **Int64**: `lexical::parse::<i64, _>(s.as_bytes())` — fast, SIMD-optimized
+- **Float64**: `lexical::parse::<f64, _>(s.as_bytes())`
+- **Boolean**: `s.parse::<bool>()` — accepts "true"/"false"/"1"/"0"
+- **Date32**: `chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")` minus Unix epoch
+- **Timestamp**: tries `"%Y-%m-%dT%H:%M:%S%.f"`, then `" %H:%M:%S%.f"`,
+  then bare date as midnight. Converts via `and_utc()` to the target TimeUnit.
 
-`Value::Int64` into `Float64` widens, into `String` stringifies, into `Dictionary` encodes. Other cross type cases become `None`.
+Unparseable strings become `None`. Cross-type `Value::Int64` into `Float64`
+widens; into `String` stringifies; into `Dictionary` encodes. Other
+cross-type cases become `None`.
 
 ## Dictionary
 
-`Dictionary { codes: NullableColumn<i32>, dict: Vec<String>, index: HashMap<String,i32> }`
+```rust
+Dictionary {
+    codes: NullableColumn<i32>,
+    dict: Vec<String>,
+    index: HashMap<String, i32>,
+}
+```
 
-* `dict_code` does `if let Some(&code) = index.get(v) { return code }` else `dict.push`, `index.insert`.
-
-* `extend_owned` for `Dictionary` remaps the right dictionary into the left in one pass via `remap: Vec<i32> = b_dict.iter().map(|val| dict_code(a_dict, a_index, val)).collect()` then translates `a_codes.extend(b_codes.iter().map(|c| c.map(|idx| remap[idx as usize])))`.
-
-* `try_upgrade_to_dict` is described in [Columnar](./columnar.md) and [Engine](./engine.md).
+- **`dict_code`**: hash lookup, insert if missing. Average O(1).
+- **`extend_owned`**: remaps right dictionary into left via a remap vector.
+  For each value in right's dict, look up its code in left's index. If
+  missing, append to left's dict. Then translate right's codes.
+- **`try_upgrade_to_dict`**: see [Columnar](./columnar.md).
 
 ## Unification and promotion
 
-`unify_variants` and `promote_to_variant` are the only places that change storage type. `merge.rs:extend` and `engines_to_record_batches` call `unify_variants(skey, okey)` before `extend_owned`; if `None`, they return `Error::Merge("column '{name}' has conflicting types ({skey} vs {okey}); provide explicit field_types")`. Promotions are `Int64 -> Float64` via `take` plus `map as f64`, and `String -> Dictionary` via rebuilding `dict`/`index`/`codes`. Same key is a no op.
+When merging chunks with different storage types:
 
-## Finish
+- `unify_variants("int64", "float64")` → `Some("float64")`
+- `unify_variants("string", "dictionary")` → `Some("dictionary")`
+- `unify_variants("int64", "string")` → `None` (error)
 
-`TableBuilder::finish` (also `ColumnarSink::finish`) does:
+`promote_to_variant("float64")` on an Int64 column: takes the `Vec<i64>`,
+maps each element to `f64`, produces a new `PrimColumn<f64>`.
 
-1. `normalize` (truncate `len > row_count` and clear `row_dirty`)
-2. Early `new_empty` if `column_order` empty
-3. `auto_dict_upgrade` (if `plan.auto_dict`)
-4. `sort_columns` by `schema_order`
-5. Build `fields` plus `arrays` by iterating `column_order` and `get_column(name)` to call `arrow_datatype` and `to_arrow_array`
-6. `Schema::new(fields)` plus `RecordBatch::try_new`
+Used in `merge::extend` and `engines_to_record_batches`.
 
-No borrowed bytes outlive `finish`; `StrColumn` owns its data and numeric Vecs are owned.
+## Finish path
+
+`TableBuilder::finish()` does:
+
+1. **normalize** — truncate any column with `len > row_count` (partial row
+   from truncated chunk), clear `row_dirty`. Idempotent.
+2. Early return with `RecordBatch::new_empty` if `column_order` is empty.
+3. **auto_dict_upgrade** — if `plan.auto_dict`, iterate columns and upgrade
+   String builders with low cardinality to Dictionary. Threshold: 5% distinct
+   ratio, max 256 entries, min 512 rows.
+4. **sort_columns** — reorder `column_order` by `schema_order` rank. Does
+   not reorder `columns` or `field_index`; those stay insertion-ordered.
+5. **Build fields + arrays** — iterate `column_order`, look up each builder
+   via `field_index`, call `arrow_datatype` and `to_arrow_array`.
+6. **Schema::new(fields)** + **RecordBatch::try_new**.
+
+No borrowed bytes outlive `finish`. `StrColumn` owns its data and numeric
+Vecs are owned. The `to_arrow_array` methods use `std::mem::take` to move
+internal buffers into Arrow arrays (zero-copy export).
 
 ## Compare filter reapplication
 
-`arrow_export::apply_compare_filter` exists for callers filtering an already built `RecordBatch` (for example merging). It is *not* the per row filter. Per row `FilterPredicate::check` is authoritative; `apply_compare_filter` only reapplies pure `Compare` and `And` of `Compare` via Arrow compute (`compare_columns` casts both to `Float64` if numeric else `Utf8`, then `gt`, `lt`, `gt_eq`, `lt_eq`, `eq`, `neq`, and `and` for `And`, plus `filter_record_batch`). Trees containing `Or`, `Not`, `Equal`, or `NotEqual` are returned unchanged to avoid double null semantics. This matches the comment in `arrow_export.rs:24`.
+`apply_compare_filter` in `arrow_export.rs` re-applies pure `Compare` and
+`And` trees using Arrow compute kernels. Other trees (`Or`, `Not`, `Equal`,
+`NotEqual`) are returned unchanged because per-row evaluation is
+authoritative.
 
-## Error mapping
+This exists for callers that filter an already-built `RecordBatch` (e.g.,
+after merging chunks). It is not the per-row filter. Per-row
+`FilterPredicate::check` is authoritative; `apply_compare_filter` only
+reapplies pure Compare/And via `compare_columns` (casts to Float64 or Utf8,
+then `gt`/`lt`/`eq`/`neq`/`and`) and `filter_record_batch`.
 
-`StrColumn::to_arrow` can return `ArrowError` (offsets, null buffer). `to_arrow_array` for dictionary can return `ArrowError` for `DictionaryArray::try_new`. Both surface as `Error::Arrow` and, via `rypipe-python`, as `PyException` with `Arrow error: ...`. `Utf8` from `simdutf8` surfaces as `ParseError` in Python.
+## Memory layout
+
+For a 533 MB XML file with 480K rows and 10 columns:
+
+- **StrColumn (strings)**: ~480K offsets (1.9 MB) + ~200 MB data + ~60 KB validity
+- **PrimColumn<i64>**: ~3.8 MB data + ~60 KB validity
+- **PrimColumn<f64>**: ~3.8 MB data + ~60 KB validity
+- **Dictionary**: ~500 entries × ~20 bytes = ~10 KB dict + ~1.9 MB codes
+- **Total per chunk** (16 chunks): ~15 MB per chunk, ~240 MB total
+- **Arrow export**: moves buffers, no additional allocation
+
+The arena-based `StrColumn` is the dominant memory consumer. For files with
+many unique strings, the arena can grow to 2-3× the raw data size. For
+files with low cardinality, dictionary encoding reduces this significantly.
