@@ -40,7 +40,6 @@ pub(crate) struct RowBuffer {
 }
 
 impl RowBuffer {
-    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
             fields: SmallVec::new(),

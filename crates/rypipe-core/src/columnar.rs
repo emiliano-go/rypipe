@@ -151,17 +151,8 @@ impl<T: Default + Clone> NullableColumn<T> {
     pub(crate) fn get(&self, i: usize) -> Option<&T> {
         self.validity.is_valid(i).then(|| &self.values[i])
     }
-    #[allow(dead_code)]
-    fn bytes_used(&self) -> usize {
-        self.values.len() * std::mem::size_of::<T>() + self.validity.bytes_used()
-    }
     fn capacity_bytes(&self) -> usize {
         self.values.capacity() * std::mem::size_of::<T>() + self.validity.capacity_bytes()
-    }
-    #[allow(dead_code)]
-    fn append(&mut self, other: &mut Self) {
-        self.values.append(&mut other.values);
-        self.validity.append(&other.validity);
     }
     fn split_off(&mut self, n: usize) -> Self {
         let values = self.values[..n].to_vec();
@@ -175,15 +166,6 @@ impl<T: Default + Clone> NullableColumn<T> {
 }
 
 impl<T: Default + Clone> NullableColumn<T> {
-    #[allow(dead_code)]
-    fn from_options(values: impl IntoIterator<Item = Option<T>>) -> Self {
-        let mut result = Self::with_capacity(0);
-        for value in values {
-            result.push(value);
-        }
-        result
-    }
-
     fn into_options(self) -> impl Iterator<Item = Option<T>> {
         let validity = self.validity;
         self.values

@@ -21,9 +21,11 @@ use crate::Result;
 
 static DISCOVERY_NS: AtomicU64 = AtomicU64::new(0);
 
+/// Return the elapsed time (in nanoseconds) spent in schema discovery.
 pub fn discovery_profile() -> u64 {
     DISCOVERY_NS.load(Ordering::Relaxed)
 }
+/// Reset the discovery timer to zero.
 pub fn reset_discovery_profile() {
     DISCOVERY_NS.store(0, Ordering::Relaxed);
 }
