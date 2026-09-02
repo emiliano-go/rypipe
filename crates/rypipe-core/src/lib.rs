@@ -1,4 +1,4 @@
-//! `rypipe-core`: format-agnostic columnar engine.
+//! `rypipe-core`: format-agnostic ingestion framework.
 //!
 //! The crate parses byte streams into typed Arrow record batches through a
 //! small decoder API (`Splitter` + `RecordParser` + `ColumnarSink`).  It has
