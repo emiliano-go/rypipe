@@ -72,12 +72,13 @@ pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) ->
     let scan = &bytes[scan_start..at];
     for opener in openers {
         let closer = finder.closer_for(opener);
+        // Use memchr::memmem::find directly (no Finder::new preprocessing).
         let mut search = 0;
-        while let Some(rel) = memchr::memmem::Finder::new(opener).find(&scan[search..]) {
+        while let Some(rel) = memchr::memmem::find(&scan[search..], opener) {
             let open_pos = scan_start + search + rel;
             // Check if there's a closer between the opener and `at`.
             let between = &bytes[open_pos + opener.len()..at];
-            if memchr::memmem::Finder::new(closer).find(between).is_none() {
+            if memchr::memmem::find(between, closer).is_none() {
                 // Unclosed opener — `at` is inside this skip region.
                 return true;
             }
