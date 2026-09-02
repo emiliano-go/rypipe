@@ -1,140 +1,215 @@
 # Data flow
 
-This page shows how bytes move through the system in each execution mode. All modes share the same `Splitter` plus `RecordParser` plus `ExecutionPlan`; only the driver differs.
+This page shows how bytes move through the system in each execution mode.
+All modes share the same `Splitter` + `RecordParser` + `ExecutionPlan`;
+only the driver differs.
 
-Legend for every diagram on this page: `(ADAPTER BOUND)` is code you write in the adapter crate (format specific). `(CORE)` is code in `rypipe` crates (format agnostic, reused).
+See [Execution](./execution.md) for implementation details of each mode.
 
 ## Single thread
 
 ```
-(CORE) Pipeline::read_bytes(bytes)  or  Pipeline::read_path(path) -> InputBuffer::open -> as_slice
-    |
-    v
-(CORE) TableBuilder::with_plan(cap, plan)     cap = bytes.len() / 512  (min 64)
-    |
-    v
-(ADAPTER BOUND) parser.validate(bytes)?                 (CORE) simdutf8 check, called once per chunk; adapter decides what to validate
-(ADAPTER BOUND) parser.parse_chunk(bytes, &mut sink)    (CORE) sink is TableBuilder (ColumnarSink)
-         loop lines -> (CORE) begin_row (no op) -> (ADAPTER) put_field(s) -> (CORE) push_field_resolved plus dirty -> (CORE) end_row -> (CORE) finish_row per row
-    |
-    v
-(CORE) TableBuilder::finish() -> RecordBatch   normalize, auto_dict_upgrade, sort_columns, to_arrow_array per column
+Pipeline::read_bytes(bytes)
+  → InputBuffer::open → as_slice
+  → TableBuilder::with_plan(cap, plan)
+  → parser.validate(bytes)
+  → parser.parse_chunk(bytes, &mut sink)
+    loop: begin_row → put_field × N → end_row
+  → TableBuilder::finish()
+    normalize → auto_dict_upgrade → sort_columns → to_arrow_array
+  → RecordBatch
 ```
 
-One `RecordBatch` is returned. `InputBuffer::Owned` holds the bytes for the duration of the parse; there is no chunking. `ExecutionPlan` is applied per row in `finish_row` (`filter.check`).
+One `RecordBatch` returned. `InputBuffer::Owned` holds bytes for the
+duration. `ExecutionPlan` applied per row in `finish_row` (`filter.check`).
 
 ## Parallel
 
 ```
-(CORE) Pipeline::read_bytes_par(bytes, num_chunks)  or  read_path_par(path, num_chunks)
-    |
-    v
-(ADAPTER BOUND) splitter.find_split_points(bytes, num_chunks) -> Vec<usize>  sorted, 0 and len included  (CORE) helper split_points_to_ranges
-split_points_to_ranges(&points, len) -> Vec<Range>  (CORE)
-    |
-    v
-(CORE) rayon::into_par_iter over Ranges  (thread pool, work stealing)
-    each range -> (CORE) TableBuilder::with_plan(est, plan.clone())
-                (ADAPTER BOUND) parser.validate(&bytes[range])?
-                (ADAPTER BOUND) parser.parse_chunk(&bytes[range], &mut sink)?  (CORE) sink is TableBuilder
-                Ok(sink)
-    (CORE) catch_unwind per chunk -> Error::Merge("worker panicked ...") on panic
-    collect::<Result<Vec<TableBuilder>>>()
-    |
-    v
-(CORE) if !plan.auto_dict && schemas_consistent(&engines) {
-    engines_to_record_batches(engines, &plan)   // fast path (CORE) (parallel Arrow build, unified schema, null_array for missing)
-} else {
-    merged = TableBuilder::with_plan(engines.len().max(64)*512, plan)  (CORE)
-    for e in engines { merged.extend(e)? }      // merge path (CORE) (sequential extend with promotion)
-    batch = merged.finish()  (CORE)
-    if filter.is_some() { apply_compare_filter(batch, filter) }  (CORE) (pure Compare and And only)
-    vec![batch]
-}
+Pipeline::read_bytes_par(bytes, num_chunks)
+  → splitter.find_split_points(bytes, num_chunks)
+  → split_points_to_ranges → Vec<Range>
+  → rayon::into_par_iter
+    each range:
+      TableBuilder::with_plan(est, plan.clone())
+      parser.validate(&bytes[range])
+      parser.parse_chunk(&bytes[range], &mut sink)
+      Ok(sink)
+  → collect::<Result<Vec<TableBuilder>>>()
+  → if !auto_dict && schemas_consistent:
+      engines_to_record_batches (fast path)
+    else:
+      merged.extend(each engine) → merged.finish() (merge path)
+  → Vec<RecordBatch>
 ```
 
-Fast path (`engines_to_record_batches`) keeps one batch per chunk (chunked columns, no copy). It unifies schema via `unify_variants` and `promote_to_variant` so all batches share one `Schema`; missing columns are `null_array`. `rayon::par_iter` builds arrays in parallel. Merge path (`extend` loop) returns a single merged batch and handles `auto_dict` visibility (full cardinality) and irreconcilable type errors with `Error::Merge` naming the column.
+Fast path: one batch per chunk, unified schema, parallel array build.
+Merge path: single merged batch, sequential extend with promotion.
 
-Schemas consistent check (`parallel.rs:101`) builds `base: HashMap<&str,&str>` from `first.field_index` and `variant_key`, then verifies every other engine's `field_index` has the same key. Fast path is chosen only when `!auto_dict` and consistent.
-
-## Bounded
-
-```
-(CORE) Pipeline::read_bytes_stream(bytes, budget)  or  read_path_stream(path, budget, prefault)
-    |
-    v
-(CORE) BoundedExecutor::plan_chunks(bytes, splitter)   // splitter is (ADAPTER BOUND), the rest is (CORE)
-    (ADAPTER BOUND) bytes_per_row = estimate_bytes_per_row(bytes).max(1)  (CORE) arithmetic
-    total_rows_est = bytes.len() / bytes_per_row  (CORE)
-    rows_per_batch = (budget.bytes() / bytes_per_row).max(1).min(total_rows_est.max(1))  (CORE)
-    num_batches = (total_rows_est / rows_per_batch).max(1)  (CORE)
-    (ADAPTER BOUND) split_points = splitter.find_split_points(bytes, num_batches.min(256))  (CORE) caps at 256
-    chunks = split_points_to_ranges  (CORE)
-    |
-    v
-(CORE) batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), plan)
-rows_in_batch = 0
-for chunk in &chunks {
-    chunk_bytes = &bytes[chunk.start..chunk.end]          // run_bytes path (CORE) slicing
-    // or for run(path) with Mmap: (CORE) seek plus read_exact into Vec<u8> (file IO)
-    (CORE) chunk_engine = TableBuilder::with_plan(chunk.len()/512, plan.clone())
-    (ADAPTER BOUND) parser.validate(chunk_bytes)?; (ADAPTER BOUND) parse_chunk(chunk_bytes, &mut chunk_engine)?  (CORE) sink is TableBuilder
-    (CORE) batch_engine.extend(chunk_engine)?          // single hash for new columns, Vec append otherwise
-    rows_in_batch += chunk_rows
-    if rows_in_batch >= rows_per_batch {
-        batches.push(batch_engine.finish()?); batch_engine.reset(); rows_in_batch = 0  (CORE)
-    }
-}
-if batch_engine.num_rows() > 0 { batches.push(batch_engine.finish()?) }  (CORE)
-apply_plan_filter(&mut batches, &plan)  // pure Compare/And reapplication only (CORE)
-```
-
-`run_bytes` slices directly from `bytes` (used for decompressed buffers and for `Pipeline::read_bytes_stream`). `run` opens `InputBuffer`; if `Mmap` it drops the mapping after `plan_chunks` and reopens the file for `seek` plus `read_exact` per chunk (bounded RSS); if `Owned` it delegates to `run_bytes`. `MAX_SPLIT_CHUNKS = 100_000` caps split points.
-
-## Input buffering  (CORE)
+## Bounded memory
 
 ```
-(CORE) InputBuffer::open(path, use_mmap, prefault)  (rypipe-core/src/input.rs)
-    |
-    +-- (CORE) detect_compression(path) reads 4 bytes
-    |       1f 8b -> gzip (if feature gzip) (CORE) flate2, 28 b5 2f fd -> zstd (CORE) zstd crate, 04 22 4d 18 -> lz4 frame (CORE) lz4_flex
-    |       if Some -> Owned(decompress(path, codec)?)  // read_to_end (CORE)
-    |
-    +-- else if cfg(mmap) && use_mmap -> (CORE) Mmap(MmapHandle::new(file, prefault)?) with WillNeed or Sequential
-    +-- else -> (CORE) Owned(fs::read(path)?)
-    |
-    v
-(CORE) input.as_slice() -> &[u8]  // passed to Pipeline::read_bytes variants or to BoundedExecutor
+Pipeline::read_bytes_stream(bytes, budget)
+  → BoundedExecutor::plan_chunks(bytes, splitter)
+    bytes_per_row = estimate_bytes_per_row(bytes)
+    rows_per_batch = budget.bytes() / bytes_per_row
+    num_batches = total_rows / rows_per_batch
+    chunks = splitter.find_split_points(bytes, num_batches)
+  → batch_engine = TableBuilder::with_plan(...)
+  → for chunk in chunks:
+      chunk_engine = TableBuilder::with_plan(...)
+      parser.validate(chunk_bytes)
+      parser.parse_chunk(chunk_bytes, &mut chunk_engine)
+      batch_engine.extend(chunk_engine)
+      if rows_in_batch >= rows_per_batch:
+        batches.push(batch_engine.finish())
+        batch_engine.reset()
+  → flush remainder
+  → apply_plan_filter (Compare/And reapplication only)
+  → Vec<RecordBatch>
 ```
 
-Note: adapter never touches `InputBuffer` directly; `Pipeline` does. Decompression is transparent (`Owned` served from memory) across all modes. `Mmap` is only for uncompressed files when the `mmap` feature is enabled and `use_mmap` is true.
+Constant RSS regardless of file size. Mmap path: drop mapping after
+plan_chunks, reopen for seek+read per chunk.
 
-Decompressed bytes are served from memory for all modes. `Pipeline::read_path` and `read_path_par` simply do `input.as_slice()` and call the bytes variants, so compression is transparent.
-
-## Column lifecycle inside a row  (CORE) with (ADAPTER BOUND) events
+## Column lifecycle inside a row
 
 ```
-(CORE) begin_row (no op)  // row boundaries tracked by row_count plus row_dirty
-  (ADAPTER BOUND) put_field(k, v) -> (CORE) resolve(k) (ExecutionPlan::resolve_field, one hash) -> (CORE) ensure_column_idx (single hash for field_index plus Vec push if new) -> (CORE) set dirty bit row_dirty[idx/64]|=1<<(idx%64) -> (CORE) last_write_wins check (if len > row_count { pop }) -> (CORE) push_value (lexical parse or typed)
-  (ADAPTER BOUND) put_field(k, v) duplicate in same row -> (CORE) pop previous value for this row (len > row_count) then push new, dirty stays true
-  ... (ADAPTER BOUND) may call put_field_resolved(r, v) after resolve(r) to avoid second hash (see Decoder)
-end_row -> (CORE) finish_row
-    // bitmask: row_dirty is Vec<u64> with (columns.len()+63)/64 words
-    for (i,b) in columns.iter_mut().enumerate() {  (CORE)
-        let word = i/64; let bit = i%64;
-        if (row_dirty[word]>>bit)&1==0 { b.push(None) }  // null fill only missing (CORE)
-        else { row_dirty[word] &= !(1u64<<bit) }          // clear for next row (CORE)
-    }
-    if (CORE) filter.check(...) false { for b in columns { b.pop() } return }  // per row And/Or/Not with short circuit (CORE)
-    row_count += 1  (CORE)
+begin_row (no op — row tracked by row_count + row_dirty)
+  put_field(k, v):
+    resolve(k) → ExecutionPlan::resolve_field (one hash)
+    ensure_column_idx (single hash for field_index + Vec push if new)
+    set dirty bit: row_dirty[idx/64] |= 1u64 << (idx%64)
+    last-write-wins: if columns[idx].len() > row_count { pop }
+    push_value(v)
+  put_field(k, v) duplicate:
+    pop previous value, push new, dirty stays true
+  put_field_resolved(r, v):
+    ensure_column_idx(r) → set dirty → push_value
+    (skips resolve hash)
+  put_field_at(slot, v):
+    set dirty → push_value
+    (skips resolve hash + ensure_column_idx)
+end_row → finish_row:
+  for each column:
+    if bit not set → push(None)  // null fill only missing
+    else → clear bit
+  filter.check → if false, pop all, return
+  row_count += 1
 ```
 
-`row_dirty` is `Vec<u64>` bitmask with `(columns.len() + 63) / 64` words (kept in sync in `ensure_column_idx` plus `take_column` plus `extend`). See [Engine](./engine.md) and [Optimizations](./optimizations.md) for why this saves 80 percent of `push(None)` calls.
+## Memory management across modes
 
-Adapter code never touches `row_dirty`; it only emits `put_field` events. The engine owns the dirty tracking.
+### Single thread
 
-`row_dirty` avoids a `while b.len() < target` check for touched columns and avoids pushing `None` for them. See [Engine](./engine.md) and [Optimizations](./optimizations.md).
+- InputBuffer holds the entire file (Owned or Mmap)
+- One TableBuilder accumulates all rows
+- Peak memory: O(file_size + rows × cols)
+- No inter-thread communication
 
-## Error handling
+### Parallel
 
-All drivers propagate `Result` via `?`. Panics in parallel workers are caught with `catch_unwind` and turned into `Error::Merge`. Type mismatches in `extend` and `engines_to_record_batches` become `Error::Merge` with column name and hint to provide `field_types`. UTF-8 failures become `Error::Utf8`, I/O into `Error::Io`, Arrow construction into `Error::Arrow`, plan problems into `Error::Plan`. Python maps these to `ParseError`, `PlanError`, `MergeError`.
+- InputBuffer holds the entire file (shared read-only)
+- N TableBuilders (one per chunk) accumulate in parallel
+- After parse: fast path exports N batches (no merge), merge path creates one
+- Peak memory: O(file_size + N × chunk_rows × cols)
+- Thread pool: rayon with work-stealing
+
+### Bounded memory
+
+- InputBuffer holds the entire file (or mmap)
+- One TableBuilder accumulates, flushed periodically
+- After each flush: batch is exported and dropped
+- Peak memory: O(budget + per_chunk_overhead)
+- RSS stays constant regardless of file size
+
+### Key difference: parallel vs bounded
+
+Parallel maximizes throughput by parsing all chunks simultaneously.
+Bounded maximizes memory efficiency by processing one batch at a time.
+The choice depends on file size vs available RAM:
+- File < RAM: use parallel (fastest)
+- File > RAM: use bounded (constant RSS)
+- File ≈ RAM: use parallel with smaller budget
+
+## Adapter interaction points
+
+The adapter interacts with the engine at these specific points:
+
+1. **`Splitter.find_split_points`** — called once per parse, returns chunk
+   boundaries. The engine uses these to create independent byte ranges.
+2. **`RecordParser.validate`** — called once per chunk, before parsing.
+   Use for upfront checks like UTF-8 validation.
+3. **`RecordParser.parse_chunk`** — called once per chunk, feeds
+   `ColumnarSink` with `begin_row`/`put_field`/`end_row` events.
+4. **`ColumnarSink.begin_row/put_field/end_row`** — called per row per
+   field. The engine resolves names, stores values, and tracks dirty bits.
+5. **`ColumnarSink.finish`** — called once after all chunks, returns
+   Arrow `RecordBatch`. Triggers normalize, auto_dict, sort, export.
+
+All other work (parallelism, memory management, Arrow export, filtering)
+is handled by the engine. The adapter never touches `TableBuilder`
+internals, `InputBuffer`, or `ExecutionPlan`.
+
+## Performance characteristics
+
+### Single thread
+
+- Parse time: O(bytes / row_size) × cost_per_field
+- Memory: O(bytes) for InputBuffer + O(rows × cols) for TableBuilder
+- No threading overhead, no synchronization
+- Best for: small files (< 100 MB), streaming with backpressure
+
+### Parallel
+
+- Parse time: O(bytes / (row_size × threads)) × cost_per_field
+- Memory: O(bytes / chunks × cols) per thread + O(rows × cols) for merge
+- Threading overhead: rayon work-stealing + channel communication
+- Best for: large files (>= 100 MB), full-RAM mode
+- Scaling: typically 3-5× on 8 cores (limited by parse cost, not I/O)
+
+### Bounded memory
+
+- Parse time: O(bytes / row_size) × cost_per_field (same as single)
+- Memory: bounded by `budget.bytes()` regardless of file size
+- RSS: O(budget + per-chunk overhead)
+- Best for: files larger than available RAM, streaming pipelines
+- Trade-off: sequential processing, no parallelism within a batch
+
+## Row-level event timeline
+
+For a row with fields A, B, C (A missing):
+
+```
+begin_row
+  put_field("B", 42)     → resolve("B") → ensure_column_idx → set dirty → push_value
+  put_field("C", "hello") → resolve("C") → ensure_column_idx → set dirty → push_value
+end_row → finish_row:
+  column A: dirty bit 0 → push(None)     // null fill
+  column B: dirty bit 1 → clear bit      // already has value
+  column C: dirty bit 1 → clear bit      // already has value
+  filter.check → pass
+  row_count += 1
+```
+
+## Cross-chunk merge timeline
+
+For parallel parse with 4 chunks:
+
+```
+Chunk 0: parse → TableBuilder { cols: [A,B,C], rows: 120K }
+Chunk 1: parse → TableBuilder { cols: [A,B,D], rows: 120K }  // D is new
+Chunk 2: parse → TableBuilder { cols: [A,B,C], rows: 120K }
+Chunk 3: parse → TableBuilder { cols: [A,B,C], rows: 122K }
+```
+
+Fast path (schemas consistent): export each as separate RecordBatch with
+unified schema (D null-filled in chunks 0,2,3).
+
+Merge path: extend sequentially:
+- merged starts empty
+- extend(chunk0): columns [A,B,C], rows 120K
+- extend(chunk1): D is new → backfill 120K nulls, then append 120K values
+- extend(chunk2): all columns exist, just append
+- extend(chunk3): all columns exist, just append
+- finish: normalize, auto_dict, sort, export

@@ -1,8 +1,10 @@
-# Execution plan
+# Execution Plan
 
-`crates/rypipe-core/src/plan.rs` is the pushdown target. Everything an adapter can fuse is expressed here.
+`plan.rs` defines the compiled execution plan that controls all pipeline
+operations. An `ExecutionPlan` is created once per parse and shared (via
+`Arc`) across all chunks.
 
-## ExecutionPlan
+## Structure
 
 ```rust
 pub struct ExecutionPlan {
@@ -18,32 +20,87 @@ pub struct ExecutionPlan {
 }
 ```
 
-Default is a no op. Builder methods (`rename`, `drop`, `drop_many`, `type_as`, `dictionary`, `filter_eq`, `filter_ne`, `filter_compare`, `schema_order`, `with_auto_dict`, `with_dict_threshold`, `with_dict_max_size`) each insert or set the field and return `Self` for chaining. Fields are public for direct mutation when needed.
+### Fields
 
-Resolution order (also documented in `docs/architecture/index.md`):
+- **`field_map`** — Rename mapping: raw name → output name.
+- **`drop_fields`** — Fields to drop entirely (not stored).
+- **`field_types`** — Type overrides (Int64, Float64, Bool, Dictionary, etc.).
+- **`dictionary_columns`** — Explicit dictionary columns.
+- **`filter`** — Composable predicate tree.
+- **`schema_order`** — Desired output column order.
+- **`auto_dict`** — Enable automatic dictionary upgrade.
+- **`dict_threshold`** — Max distinct ratio (default 0.05).
+- **`dict_max_size`** — Max dictionary entries (default 256).
 
-1. `field_map` renames raw field (`raw -> output`)
-2. `drop_fields` checks the resolved name (`None` means drop)
-3. `field_types` or `dictionary_columns` chooses storage (`column_type`)
-4. `filter` rejects rows in `finish_row`
-5. `schema_order` reorders `column_order` in `finish`
-
-## FieldType
+## Builder API
 
 ```rust
-pub enum FieldType { String, Int64, Float64, Boolean, Dictionary, Date32, Timestamp(TimeUnit) }
+ExecutionPlan::new()
+    .rename("raw_name", "output_name")
+    .drop("internal_id")
+    .type_as("amount", FieldType::Float64)
+    .dictionary("status")
+    .filter_eq("status", "active")
+    .schema_order(["quantity", "amount", "status"])
 ```
 
-`from_str` parses: `string`, `int64`, `float64`, `bool` or `boolean`, `dictionary`, `date32`, `timestamp` (defaults to Microsecond), `timestamp[s]`, `timestamp[ms]`, `timestamp[us]` or `timestamp[µs]`, `timestamp[ns]`.
+## resolve_field
 
-`column_type(&self, name: &str) -> FieldType` checks `field_types` first, then `dictionary_columns`, else `String`. This is called once per distinct column at first use (in `ensure_column_idx`), not per row.
+The hot path for name resolution:
+
+```rust
+pub fn resolve_field(&self, name: &str) -> Option<&str> {
+    // 1. Check drop set
+    if self.drop_fields.contains(name) {
+        return None;
+    }
+    // 2. Check rename map
+    if let Some(resolved) = self.field_map.get(name) {
+        return Some(resolved);
+    }
+    // 3. Keep as-is
+    Some(name)
+}
+```
+
+Returns `None` for dropped fields. The adapter checks this before extraction.
+
+## column_type
+
+Determines storage variant for a field:
+
+```rust
+pub fn column_type(&self, name: &str) -> FieldType {
+    if let Some(ft) = self.field_types.get(name) {
+        return *ft;
+    }
+    if self.dictionary_columns.contains(name) {
+        return FieldType::Dictionary;
+    }
+    FieldType::String
+}
+```
+
+## FieldType enum
+
+```rust
+pub enum FieldType {
+    String,
+    Int64,
+    Float64,
+    Boolean,
+    Dictionary,
+    Date32,
+    Timestamp(TimeUnit),
+}
+```
 
 ## FilterPredicate
 
 ```rust
 pub enum FilterPredicate {
-    NotEqual { field: String, value: String },
     Equal { field: String, value: String },
+    NotEqual { field: String, value: String },
     Compare { field_a: String, op: CompareOp, field_b: String },
     And(Box<FilterPredicate>, Box<FilterPredicate>),
     Or(Box<FilterPredicate>, Box<FilterPredicate>),
@@ -51,50 +108,92 @@ pub enum FilterPredicate {
 }
 ```
 
-`Compare` is column to column with numeric promotion; `Equal`/`NotEqual` are constant string comparisons. `And`/`Or`/`Not` compose trees arbitrarily. Helpers `FilterPredicate::all`, `any`, `not` build boxed trees.
+### Check method
 
-`CompareOp` (`Gt`, `Lt`, `Ge`, `Le`, `Eq`, `Ne`) parses from `>`, `gt`, `<`, `lt`, `>=`, `ge`, `<=`, `le`, `==`, `eq`, `!=`, `ne`.
+`check(&columns, &field_index, row_index, &plan)` evaluates the predicate
+against column values for a given row. Short-circuits on `And` (first false)
+and `Or` (first true). For `Compare`, it uses native-typed comparison with
+numeric promotion via `TypedValue`.
+and `Or` (first true).
 
-## Resolve
+### CompareOp
 
 ```rust
-pub fn resolve_field<'a>(&'a self, raw: &'a str) -> Option<&'a str> {
-    let resolved = self.field_map.get(raw).map_or(raw, |s| s.as_str());
-    if self.drop_fields.contains(resolved) { return None; }
-    Some(resolved)
+pub enum CompareOp { Gt, Lt, Ge, Le, Eq, Ne }
+```
+
+Compare uses native-typed comparison with numeric promotion (Int64↔Float64).
+
+## Plan from Python kwargs
+
+`rypipe-python` converts Python kwargs to `ExecutionPlan` via
+`execution_plan_from_kwargs` in `plan_kwargs.rs`:
+- `field_mapping` → `field_map`
+- `drop_fields` → `drop_fields`
+- `field_types` → `field_types`
+- `filter` → `filter` (nested And/Or/Not trees)
+- `schema` → `schema_order`
+- `dictionary_columns` → `dictionary_columns`
+- `auto_dict` → `auto_dict`
+
+The conversion is done by `execution_plan_from_kwargs` in `plan_kwargs.rs`.
+It handles nested filter specs (`and`, `or`, `not`) and validates that
+compare filters have both fields typed or both untyped.
+
+## How plans flow through the system
+
+1. **Adapter creation**: `Pipeline::new(splitter, parser).with_plan(plan)`
+2. **Plan sharing**: `Arc::clone(&self.plan)` for each chunk's `TableBuilder`
+3. **Name resolution**: `plan.resolve_field(name)` called per field per row
+4. **Type selection**: `plan.column_type(name)` called once per new column
+5. **Filter evaluation**: `plan.filter.check(...)` called per row in `finish_row`
+6. **Schema ordering**: `plan.schema_order` used in `sort_columns` and
+   `schema_insert_index`
+
+## Filter predicate evaluation
+
+`FilterPredicate::check` evaluates the tree against column values:
+
+```rust
+pub fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usize>,
+             row_index: usize, plan: &ExecutionPlan) -> bool {
+    match self {
+        Equal { field, value } => {
+            let resolved = plan.resolve_field(field)?;
+            let idx = field_index.get(resolved)?;
+            columns[*idx].get_filter_value(row_index) == *value
+        }
+        Compare { field_a, op, field_b } => {
+            let va = get_typed_value(columns, field_index, plan, field_a, row_index);
+            let vb = get_typed_value(columns, field_index, plan, field_b, row_index);
+            compare_typed(va, *op, vb)
+        }
+        And(a, b) => a.check(...) && b.check(...),
+        Or(a, b) => a.check(...) || b.check(...),
+        Not(a) => !a.check(...),
+    }
 }
 ```
 
-Rename first, then drop on the resolved name. Fast path in `TableBuilder::push_field` skips this entirely when both maps are empty (`field_map.is_empty() && drop_fields.is_empty()`), so the hot keep-all case pays zero hash.
+Short-circuiting: `And` stops on first `false`, `Or` stops on first `true`.
 
-When maps are not empty, each field still pays one or two hashes. The optimization in `decoder::ColumnarSink` (`resolve` plus `put_field_resolved`) lets adapters pay it once instead of twice (`wants` plus `put_field`). See [Decoder](./decoder.md) and [Optimizations](./optimizations.md).
+## C2 reorder optimization
 
-## Check
+For `Compare` predicates, operands are reordered by document position so
+the predicate column is checked first. This enables earlier short-circuit
+in the `And` tree.
 
-```rust
-pub(crate) fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usize>, row_index: usize, plan: &ExecutionPlan) -> bool
+## Plan construction from Python
+
+```python
+from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+
+src | RenameFields({"old": "new"}) | DropFields(["id"]) | \
+    FilterRows(field="status", op="==", value="active") | \
+    CastTypes({"amount": float})
 ```
 
-This is the per row filter used in `TableBuilder::finish_row`. It takes the `Vec<ColumnBuilder>` plus `field_index` (single hash per field) instead of a `HashMap` view (which would double hash). Steps:
+Each stage has `_plan_kwargs()` that returns a dict. `plan_split` merges
+all kwargs into a single `ExecutionPlan`. Non-fusable stages (custom
+callables) run over the returned table.
 
-* `Equal`/`NotEqual` call `get_value` which does `get_column(columns, field_index, resolve(field, plan)).and_then(|b| b.get_filter_value(row_index))` and compares `Option<String>` to the constant.
-
-* `Compare` fetches `get_column` for each side, then `get_typed_value(row_index)` to get `TypedValue`, then `compare_typed(&a, op, &b)`. `compare_typed` promotes `Int64` vs `Float64` to `f64` via `partial_cmp`; other same type pairs use `Ord`; mixed non numeric or different temporal units return false. Null operands fail the row (caller checks `Some`).
-
-* `And` short circuits on first failure, `Or` on first success, `Not` negates. A missing field fails the inner leaf, which `Not` can flip to keep. There is a `#[cfg(test)]` shim `check_map` that preserves old HashMap semantics for tests that still hold a map view.
-
-`check` is called with `row_index == self.row_count` (the uncommitted row) before `row_count` is advanced. If it returns false, `finish_row` pops every column (undo) and returns without counting the row.
-
-## Python surface
-
-`crates/rypipe-python/src/plan_kwargs.rs` converts Python kwargs to `ExecutionPlan`. It accepts `filter` as a dict that may be a leaf (`field`, `op`, `value` or `field_a`, `op`, `field_b`) or a tree (`and: [spec, ...]`, `or: [spec, ...]`, `not: spec`) and recurses via `parse_filter_spec`, `combine_list`, `parse_leaf_spec`. Valid ops and types are validated there and surface as `PlanError`.
-
-On the Python side, `FilterRows` plus `FilterRowsAny`, `FilterRowsAll`, `FilterRowsNot` build those dicts via `_plan_kwargs`, and `fusion::plan_split` merges multiple `filter` specs into `{"and": [...]}` so chaining `FilterRows` stages does not drop the earlier filter.
-
-## Schema order
-
-`schema_order: Vec<String>` is the desired output column order. Columns not listed keep first appearance order after the listed ones. `TableBuilder::sort_columns` and `schema_insert_index` implement this. The order does not affect `field_index` or `columns` Vec order, only `column_order`.
-
-## Auto dict
-
-`auto_dict: bool` plus `dict_threshold` (default 0.05) and `dict_max_size` (default 256) feed `ColumnBuilder::try_upgrade_to_dict`. See [Columnar](./columnar.md) for the heuristic and [Execution](./execution.md) for fast vs merge path interaction.

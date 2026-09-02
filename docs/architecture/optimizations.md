@@ -1,78 +1,298 @@
 # Optimizations
 
-This page lists every optimization that makes `rypipe` fast for all adapters, not just one format. Each entry gives the file and line, what changed, why it matters, and what it replaces.
+Every optimization in `rypipe-core`, why it matters, and what it replaces.
+These changes are not format-specific; they benefit every adapter equally.
 
-## 1. Vec plus map column storage (engine.rs:16, plan.rs:280, merge.rs:30, parallel.rs:101)
+## 1. Dense column storage (2C-S1)
 
-**Before:** `columns: HashMap<String, ColumnBuilder>` with `HashMap::get_mut` per field. `push_field` did `ensure_column` (`contains_key` plus `insert`) then `get_mut` (second hash) : 2 hashes per field in steady state.
+**Before:** `HashMap<String, ColumnBuilder>` — two hash probes per field
+(one in `ensure_column`, one in `get_mut`).
 
-**After:** `columns: Vec<ColumnBuilder>` plus `field_index: HashMap<String, usize>` and `column_order: Vec<String>`. `ensure_column_idx` does `field_index.get(name)` (one hash) and returns `idx`; `push_field_resolved` then does `&mut columns[idx]` (array index). Hot path is one hash plus one indexed load. `take_column` keeps the three vectors in sync via `swap_remove` with index patching.
+**After:** `Vec<ColumnBuilder>` + `field_index: HashMap<String, usize>` —
+one hash probe (name → index), then `columns[idx]` is a bounds-checked
+array access.
 
-**Why generic:** every `RecordParser` calls `put_field` for every field of every row. The `Pipeline` hot loop is `validate` plus `parse_chunk` plus `push_value` plus this dispatch. Fewer hashes helps TSV at 5 fields per row as much as XML at 20 fields.
+**Impact:** Eliminates the second hash probe for every field. For 10 fields
+per row, this saves ~100 ns per row.
 
-## 2. Single lookup push (engine.rs:202)
+## 2. Dirty bitmask null-fill (2C-S2)
 
-**Before:** `ensure_column` plus `get_mut` : double hash as above, plus `schema_insert_index` inside `ensure_column` scanned `column_order` even when the column already existed.
+**Before:** For each row, loop over all columns and push `None` for missing:
+`for b in &mut columns { while b.len() < target { b.push(None); } }`
 
-**After:** `ensure_column_idx` is the single lookup. `push_field_resolved` marks `row_dirty[idx] = true` and handles last write wins with one `len > row_count` check. `schema_insert_index` is only called when the column is new. The old `ensure_column` (void) is removed; `push_field` delegates to `push_field_resolved` after one `resolve_field`.
+**After:** `row_dirty: Vec<u64>` bitmask. In `finish_row`, check each bit:
+if not set, push `None`; if set, clear the bit. Only missing columns get
+a push.
 
-**Why not `entry` API:** `HashMap::entry` would also be one hash, but `Vacant` insertion still needs `schema_insert_index` which borrows `self` mutably while `entry` holds a borrow. The `get` plus `insert` split avoids the borrow checker fight and keeps the fast path as a pure `get` without allocating the key.
+**Impact:** For 10 columns where 8 are present, saves 80% of null-fill pushes.
+The bitmask word load plus bit test is cheaper than a `Vec` push per column.
 
-## 3. Dirty bitmask for finish_row (engine.rs:563)
+## 3. Predicate-first deferred materialization
 
-**Before:** `for b in &mut columns { while b.len() < target { b.push(None) } }` iterated all columns and pushed `None` for missing ones, checking `len < target` for every column.
+**Before:** Parse all fields, then evaluate filter. If rejected, pop all
+columns (expensive for wide tables).
 
-**After:** `row_dirty: Vec<u64>` is a bitmask with `(columns.len() + 63) / 64` words. `push_field_resolved` sets the bit for column `i` via `row_dirty[i / 64] |= 1u64 << (i % 64)` on first touch of the row. `finish_row` checks each bit: if clear, pushes `None`; if set, clears the bit. Only missing columns get a push; touched columns are just cleared. `reset` and `normalize` clear the mask, `take_column` keeps it in sync.
+**After:** Buffer `(slot, Value)` pairs in `RowBuffer`. Evaluate predicate
+as soon as the predicate column arrives. On Fail, discard buffer (no pops).
+On Pass, switch to direct mode.
 
-**Impact:** for 10 columns where 8 are present, this saves 80% of the `push(None)` calls and the associated `len` loads. The loop iterates over bitmask words and checks each bit; a bit test plus branch is cheaper than a `Vec` push.
+**Impact:** For selective filters (e.g., 10% selectivity), eliminates
+90% of column push/pop cycles. Adaptive: disables buffering when predicate
+column is late (> 4/5 of columns).
 
-## 4. Resolve plus put_field_resolved (decoder.rs:65, engine.rs:542)
+## 4. resolve + put_field_resolved (single hash)
 
-**Before:** adapters did `if sink.wants(k) { /* decode */ sink.put_field(k, v) }` which called `ExecutionPlan::resolve_field` twice: once in `wants` (hash `field_map` then `drop_fields`) and once in `put_field`. When `field_map` or `drop_fields` is non empty, this is two hashes per field. `push_field` also did `owned = n.to_owned()` to hold the resolved name.
+**Before:** `wants(name)` + `put_field(name, v)` = two hash probes.
 
-**After:** `ColumnarSink` has `resolve<'a>(&'a self, name: &'a str) -> Option<&'a str>` and `put_field_resolved(&mut self, resolved, value)`. `TableBuilder` implements `resolve` as `self.plan.resolve_field(name)` (borrows from `field_map` when renamed) and `put_field_resolved` as `push_field_resolved` (no re hash). Adapters can do `if let Some(r) = sink.resolve(k) { /* expensive decode */ sink.put_field_resolved(r, v) }` with one hash total. `wants` now delegates to `resolve` so old code still gets the single hash path.
+**After:** `resolve(name)` + `put_field_resolved(resolved, v)` = one hash probe.
 
-**Why not `wants_resolved`:** the pair `resolve` plus `put_field_resolved` is the minimal extension that keeps the trait backward compatible (defaults delegate to `put_field`, which re resolves). Adapters choose the fast path only when extraction is expensive; stringly adapters like `LineParser` keep the simple `wants` plus `put_field` path.
+**Impact:** Saves one HashMap lookup per field. For 10 fields per row,
+saves ~100 ns per row.
 
-## 5. Filter check with Vec plus index (plan.rs:280)
+## 5. expect_slot layout prediction
 
-**Before:** `FilterPredicate::check(&self, columns: &HashMap<String, ColumnBuilder>, ...)` did `columns.get(resolve(field, plan))` which hashed the resolved name per filter field per row.
+**Before:** Every field: `find_attr_value` + `decode_attr` + `resolve` + `put_field`.
 
-**After:** `check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usize>, ...)` does `get_column(columns, field_index, resolve(field, plan))` which is `field_index.get(name).map(|&i| &columns[i])` : one hash per leaf, shared with the column dispatch hash, and no clone of `String` keys. `get_value` and `Compare` arms use the same helper.
+**After:** After first row, `expect_slot(ordinal)` returns `(slot, raw_bytes)`.
+Adapter does memcmp, then `put_field_at(slot, value)`.
 
-**Why generic:** every row that has a filter pays this per row. `Equal`/`NotEqual` plus `Compare` plus `And`/`Or`/`Not` trees all use it. Vectorizing `Equal`/`NotEqual` after `finish` would be possible (see `arrow_export`), but per row is authoritative for short circuiting and missing field semantics, so the Vec path is the right intermediate.
+**Impact:** Skips attribute scan, UTF-8 decode, hash lookup. ~25 ns → ~8 ns
+per field. ~17% on the hot path.
 
-## 6. Unified schema with promotion (columnar.rs:1043, merge.rs:30)
+## 6. row_satisfied projection short-circuit
 
-**Before:** mixed `int64` plus `float64` or `string` plus `dictionary` across chunks was an error or silent first sighting.
+**Before:** Scan all fields even when only 3 of 11 are wanted.
 
-**After:** `unify_variants` plus `promote_to_variant` reconcile `int64` plus `float64` to `float64` and `string` plus `dictionary` to `dictionary` before `extend_owned` or `engines_to_record_batches`. Irreconcilable types return `Error::Merge` naming the column and hinting to provide `field_types`. This lets `ParallelExecutor` fast path keep chunked batches with one unified schema instead of forcing the merge path.
+**After:** `row_satisfied()` returns true when all wanted columns have values.
+Scanner byte-jumps to row close.
 
-## 7. InputBuffer magic and decompression (input.rs:33, Cargo.toml:15)
+**Impact:** For projections, skips scanning 60-80% of fields. Measured:
++123% on drop_half parallel (533 MB).
 
-**Before:** only `Mmap` or `fs::read`, no compression.
+## 7. wanted_mask bitmask projection
 
-**After:** `detect_compression` reads 4 bytes, matches `1f 8b` (gzip), `28 b5 2f fd` (zstd), `04 22 4d 18` (lz4 frame) when the corresponding Cargo feature is enabled (`gzip`, `zstd`, `lz4`, `compress-all`). `open` then returns `Owned(decompress(...))` via `flate2`, `zstd`, or `lz4_flex`. Bytes APIs slice directly; `BoundedExecutor::run` uses `run_bytes` for `Owned` and `run_mapped` (seek plus read) for `Mmap`.
+**Before:** `sink.wants(name)` virtual call per field.
 
-## 8. Bounded executor chunking (bounded.rs:30, pipeline.rs:65)
+**After:** `(wanted_mask >> slot) & 1` — single bit test, no vtable dispatch.
 
-**Before:** `Pipeline` had only `read_bytes` (single) and `read_path` variants; bounded mode required a file path and did `File::open` plus `seek`.
+**Impact:** Eliminates virtual dispatch overhead in the hot inner loop.
 
-**After:** `Pipeline::read_bytes_par` and `read_bytes_stream` plus `BoundedExecutor::run_bytes` slice directly from `&[u8]` with no file IO. `plan_chunks` computes `bytes_per_row`, `total_rows_est`, `rows_per_batch`, `num_batches`, caps at `MAX_SPLIT_CHUNKS = 100_000`, then `split_points_to_ranges`. `run_bytes` is used for decompressed buffers and for adapters that hold `BytesIO` data.
+## 8. Ordinal threading
 
-## 9. Arrow export and filter reapplication (arrow_export.rs:29, engine.rs:335)
+**Before:** `parse_row` doesn't track field ordinals.
 
-* `StrColumn` arena plus offsets plus validity is block copied to `StringArray` (two buffers).
-* Numeric builders are `NullableColumn<T>` with `collect`.
-* `apply_compare_filter` only reapplies pure `Compare` and `And` of `Compare` via Arrow compute; other trees are no ops because per row is authoritative. This avoids double null semantics and keeps the fast path correct.
+**After:** Ordinal counter threads through `parse_row` → `scan_child` →
+`field_element`. Enables `expect_slot` and `row_satisfied`.
 
-## 10. Small but cumulative
+**Impact:** Enables optimizations 5 and 6.
 
-* `estimated_rows` capacity hint (`bytes.len() / 512`, min 64) in `TableBuilder::with_plan` reduces reallocations.
-* `lexical::parse` for numbers instead of `str::parse` (faster).
-* `simdutf8::basic::from_utf8` for validate.
-* `FxHashMap` and `FxHashSet` for field names (short strings).
-* `with_capacity` for `StrColumn` arena (`cap * 16` bytes heuristic).
-* `ColumnarSink` defaults keep the trait object safe (`&mut dyn ColumnarSink` in `parse_chunk`).
+## 9. Precomputed close finder (F1)
 
-Each of these is 0.5 to 2%, but together they move single thread from ~600 MB/s on the original `HashMap` plus double lookup plus `while len < target` baseline to the current 700 MB/s, and filtered cases by 8 to 12% via `resolve` plus `put_field_resolved`. None of them require `unsafe`; all are behind safe API changes. When safe leaves more than a few percent on the table, the remaining `unsafe` candidates are gated behind `#[cfg(feature="unsafe-fast")]` and require `miri` plus `cargo test --release` proof, per the plan in the repo root.
+**Before:** `find_row_close` allocates `Vec` + `memmem::Finder` per rejected
+row.
+
+**After:** Precomputed once in `scan_chunk`, passed to `parse_row`.
+
+**Impact:** Eliminates per-row allocation on reject/satisfy paths.
+
+## 10. Scan primitives (S5)
+
+**Before:** Raw `memchr` calls without fast path.
+
+**After:** `scan::find(hay, from, b)` checks `hay[from] == b` first (O(1)),
+then delegates to memchr. `scan::find2` for dual-byte searches.
+
+**Impact:** 15% on the `next_lt` hot path.
+
+## 11. Engine-provided Splitter default (S1)
+
+**Before:** Adapters implement `find_split_points` from scratch.
+
+**After:** Default `find_split_points` uses `next_record_start` + rayon +
+skip-region rejection + dedup + chunk floor.
+
+**Impact:** Eliminates the bug class that caused the TSV first-K-newlines
+and crxml `<!` scan regressions.
+
+## 12. Incremental dictionary unification
+
+**Before:** `auto_dict=True` forces serial merge path (no fast path).
+
+**After:** Per-chunk upgrade in parallel, then `unify_dictionaries` +
+`remap_codes` (O(dict_size), not O(rows)).
+
+**Impact:** auto_dict parallel gap: 45% → 16%.
+
+## 1. Dense column storage (2C-S1)
+
+**Before:** `HashMap<String, ColumnBuilder>` required two hash probes per
+field: one in `ensure_column` (create if missing), one in `get_mut` (push
+value). For 10 fields per row, this was 20 HashMap operations per row.
+
+**After:** `Vec<ColumnBuilder>` + `field_index: HashMap<String, usize>`.
+One hash probe (name → index via `field_index.get`), then `columns[idx]`
+is a bounds-checked array access. The `push_field_resolved` hot path does
+one hash, one bit set, one conditional pop, and one push_value.
+
+**Impact:** Eliminates the second hash probe for every field. For 10 fields
+per row at ~10 ns per hash, this saves ~100 ns per row. On a 533 MB file
+with ~480K rows, that's ~48 ms saved.
+
+## 2. Dirty bitmask null-fill (2C-S2)
+
+**Before:** For each row, loop over all columns:
+```rust
+for b in &mut columns {
+    while b.len() < target { b.push(None); }
+}
+```
+This pushed `None` for every missing column, even when most columns were
+present. For 10 columns where 8 are present, 2 null pushes per row.
+
+**After:** `row_dirty: Vec<u64>` bitmask. In `finish_row`:
+```rust
+for (i, b) in columns.iter_mut().enumerate() {
+    let word = i / 64;
+    let bit = i % 64;
+    if (row_dirty[word] >> bit) & 1 == 0 {
+        b.push(None);  // Only missing columns get null-filled
+    } else {
+        row_dirty[word] &= !(1u64 << bit);  // Clear for next row
+    }
+}
+```
+
+**Impact:** For 10 columns where 8 are present, saves 80% of null-fill pushes.
+The bitmask word load plus bit test is cheaper than a `Vec` push per column.
+Measured: 34% reduction in `finish_row` cost.
+
+## 3. Predicate-first deferred materialization
+
+**Before:** Parse all fields into columns, then evaluate filter. If rejected,
+pop all columns (expensive for wide tables with many fields).
+
+**After:** Buffer `(slot, Value<'static>)` pairs in `RowBuffer`. Evaluate
+predicate as soon as the predicate column arrives. On Fail, discard buffer
+(no pops). On Pass, switch to direct mode and drain buffer to columns.
+
+**Impact:** For selective filters (e.g., 10% selectivity), eliminates 90%
+of column push/pop cycles. The adaptive strategy disables buffering when
+the predicate column is late (> 4/5 of columns), falling back to direct
+push + pop-on-reject.
+
+## 4. resolve + put_field_resolved (single hash)
+
+**Before:** `wants(name)` + `put_field(name, v)` = two hash probes (one
+in `wants` via `resolve_field`, one in `put_field` via `ensure_column_idx`).
+
+**After:** `resolve(name)` + `put_field_resolved(resolved, v)` = one hash
+probe. `resolve` does the rename/drop lookup; `put_field_resolved` does
+the column lookup with the already-resolved name.
+
+**Impact:** Saves one HashMap lookup per field. For 10 fields per row,
+saves ~100 ns per row.
+
+## 5. expect_slot layout prediction
+
+**Before:** Every field: `find_attr_value` (memchr scan) + `decode_attr`
+(UTF-8 + entity unescape) + `resolve` (HashMap lookup) + `put_field`.
+
+**After:** After first row, `expect_slot(ordinal)` returns `(slot,
+raw_name_bytes)`. Adapter does memcmp (8-16 bytes, single SIMD compare),
+then `put_field_at(slot, value)`.
+
+**Impact:** Skips attribute scan, UTF-8 decode, hash lookup. ~25 ns → ~8 ns
+per field. ~17% on the hot path. Works for formats with stable field order
+(CSV, XML, JSONL).
+
+## 6. row_satisfied projection short-circuit
+
+**Before:** Scan all fields even when only 3 of 11 are wanted.
+
+**After:** `row_satisfied()` returns true when all wanted columns have
+values. Scanner byte-jumps to row close via `find_row_close`.
+
+**Impact:** For projections, skips scanning 60-80% of fields. Measured:
++123% on drop_half parallel (533 MB: 3,394 → 7,571 MB/s).
+
+## 7. wanted_mask bitmask projection
+
+**Before:** `sink.wants(name)` virtual call per field (vtable dispatch).
+
+**After:** `(wanted_mask >> slot) & 1` — single bit test, no vtable dispatch.
+
+**Impact:** Eliminates virtual dispatch overhead in the hot inner loop.
+Combined with row_satisfied, enables full projection optimization.
+
+## 8. Ordinal threading
+
+**Before:** `parse_row` doesn't track field ordinals.
+
+**After:** Ordinal counter threads through `parse_row` → `scan_child` →
+`field_element`. Enables `expect_slot` (layout prediction) and
+`row_satisfied` (projection short-circuit).
+
+**Impact:** Enables optimizations 5 and 6. ~3% overhead for the counter
+increment, but the savings from 5 and 6 far outweigh it.
+
+## 9. Precomputed close finder (F1)
+
+**Before:** `find_row_close` allocates `Vec<u8>` + `memmem::Finder` per
+rejected or satisfied row. With `row_satisfied`, this ran on every row
+in projection workloads.
+
+**After:** Precomputed once in `scan_chunk`, passed to `parse_row` as a
+reference. Zero allocation per row.
+
+**Impact:** Eliminates per-row allocation. For 480K rows, saves 480K
+Vec allocations + Finder constructions. Measured: +10% single-thread,
++9% parallel.
+
+## 10. Scan primitives (S5)
+
+**Before:** Raw `memchr` calls without fast path.
+
+**After:** `scan::find(hay, from, b)` checks `hay[from] == b` first (O(1)),
+then delegates to memchr. `scan::find2` for dual-byte searches with the
+same fast path.
+
+**Impact:** 15% on the `next_lt` hot path (byte-at-position check avoids
+AVX2 prologue on 2/3 of calls).
+
+## 11. Engine-provided Splitter default (S1)
+
+**Before:** Adapters implement `find_split_points` from scratch. Two adapters
+got it wrong: TSV collected first K newlines (negative scaling), crxml
+scanned entire file for `<!` (25% overhead).
+
+**After:** Default `find_split_points` uses `next_record_start` + rayon +
+skip-region rejection + dedup + chunk floor (2 MiB minimum).
+
+**Impact:** Eliminates the bug class. +13-32% on projection workloads.
+
+## 12. Incremental dictionary unification
+
+**Before:** `auto_dict=True` forces serial merge path (no fast path).
+All chunks must be merged before dict upgrade.
+
+**After:** Per-chunk upgrade in parallel, then `unify_dictionaries` +
+`remap_codes` (O(dict_size), not O(rows)).
+
+**Impact:** auto_dict parallel gap: 45% → 16%.
+
+## Summary table
+
+| # | Optimization | Measured gain | Where |
+|---|-------------|---------------|-------|
+| 1 | Dense column storage | Eliminates 1 hash probe/field | engine.rs |
+| 2 | Dirty bitmask null-fill | 80% fewer null pushes | engine.rs |
+| 3 | Predicate-first | 90% fewer push/pop cycles | engine.rs |
+| 4 | Single hash resolve | 100 ns/row saved | engine.rs |
+| 5 | expect_slot layout | 17% on hot path | scanner.rs |
+| 6 | row_satisfied | +123% on drop_half | scanner.rs |
+| 7 | wanted_mask | Eliminates vtable dispatch | scanner.rs |
+| 8 | Ordinal threading | Enables 5 and 6 | scanner.rs |
+| 9 | Precomputed close finder | Eliminates per-row alloc | scanner.rs |
+| 10 | Scan primitives | 15% on next_lt | scan/mod.rs |
+| 11 | Splitter default | Eliminates bug class | decoder.rs |
+| 12 | Incremental dicts | 45% → 16% gap | parallel.rs |
