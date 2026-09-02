@@ -49,21 +49,21 @@ ExecutionPlan::new()
 The hot path for name resolution:
 
 ```rust
-pub fn resolve_field(&self, name: &str) -> Option<&str> {
-    // 1. Check drop set
-    if self.drop_fields.contains(name) {
+pub fn resolve_field<'a>(&'a self, raw: &'a str) -> Option<&'a str> {
+    // 1. Apply rename first (field_map)
+    let resolved = self.field_map.get(raw).map_or(raw, |s| s.as_str());
+    // 2. Then check drop set on the resolved name
+    if self.drop_fields.contains(resolved) {
         return None;
     }
-    // 2. Check rename map
-    if let Some(resolved) = self.field_map.get(name) {
-        return Some(resolved);
-    }
-    // 3. Keep as-is
-    Some(name)
+    // 3. Return resolved (or original if no rename)
+    Some(resolved)
 }
 ```
 
-Returns `None` for dropped fields. The adapter checks this before extraction.
+Application order: rename first, then drop, matching left-to-right pipeline
+semantics. Returns `None` for dropped fields. The adapter checks this before
+extraction.
 
 ## column_type
 
@@ -72,7 +72,7 @@ Determines storage variant for a field:
 ```rust
 pub fn column_type(&self, name: &str) -> FieldType {
     if let Some(ft) = self.field_types.get(name) {
-        return *ft;
+        return ft.clone();
     }
     if self.dictionary_columns.contains(name) {
         return FieldType::Dictionary;
@@ -114,7 +114,6 @@ pub enum FilterPredicate {
 against column values for a given row. Short-circuits on `And` (first false)
 and `Or` (first true). For `Compare`, it uses native-typed comparison with
 numeric promotion via `TypedValue`.
-and `Or` (first true).
 
 ### CompareOp
 

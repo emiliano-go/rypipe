@@ -3,7 +3,7 @@
 The `RecordParser` trait turns a byte chunk into field/value events fed to a
 `ColumnarSink`. This is where format-specific parsing lives.
 
-See [Architecture: Parsing](../architecture/#parsing) for how the engine calls
+See [Architecture](../architecture/index.md) for how the engine calls
 the parser and how the sink accumulates values.
 
 ## Trait definition

@@ -169,6 +169,13 @@ pub trait ColumnarSink {
 
 - **`put_row(fields)`** — Push a complete row in one call.
 
+### Raw-byte methods (2)
+
+- **`resolve_raw(raw_name)`** — Resolve a field name still in raw byte form.
+  Default converts via `from_utf8` then delegates to `resolve`.
+- **`resolve_and_put_raw(raw_name, value)`** — Combined raw-name resolve +
+  push. Default converts via `from_utf8` then delegates to `resolve_and_put`.
+
 ### Fast path hierarchy
 
 | Method | Cost | When to use |
@@ -238,7 +245,7 @@ pub fn plan_chunk_count(bytes: usize, threads: usize, mode: SplitMode) -> usize
 ```
 
 Determines chunk count with 2 MiB floor, thread caps, and 1024 maximum.
-See [Chunk planning](./chunk-planning.md).
+See [Chunk planning](../writing-adapters/chunk-planning.md).
 
 ### in_skip_region
 
@@ -247,4 +254,4 @@ pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) ->
 ```
 
 Bounded backward scan to check if a position is inside a skip region.
-See [Skip regions](./skip-regions.md).
+See [Skip regions](../writing-adapters/skip-regions.md).

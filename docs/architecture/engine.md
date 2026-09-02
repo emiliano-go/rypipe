@@ -101,9 +101,31 @@ fn push_field(&mut self, name: &str, value: Value<'_>) {
         self.push_field_resolved(name, value);
         return;
     }
-    // Resolve via plan: rename then drop
-    if let Some(resolved) = self.plan.resolve_field(name) {
-        self.push_field_resolved(resolved, value);
+    // Try zero-allocation fast path: column already exists
+    if let Some(idx) = Self::resolve_and_slot(&self.plan, &self.field_index, name) {
+        // Track ordinal for expect_slot on first row
+        if self.row_count == 0 {
+            let ord = self.current_ordinal as usize;
+            if ord >= self.ordinal_expect.len() {
+                self.ordinal_expect.resize_with(ord + 1, || None);
+            }
+            let resolved = self.plan.resolve_field(name).unwrap_or(name);
+            self.ordinal_expect[ord] = Some((idx as u32, resolved.as_bytes().to_vec()));
+        }
+        self.current_ordinal += 1;
+        // Set dirty bit, handle last-write-wins, push
+        let word = idx / 64;
+        let bit = idx % 64;
+        self.row_dirty[word] |= 1u64 << bit;
+        let b = &mut self.columns[idx];
+        if b.len() > self.row_count { b.pop(); }
+        b.push_value(value);
+    } else {
+        // Column doesn't exist yet or field was dropped
+        if let Some(resolved) = self.plan.resolve_field(name) {
+            let owned = resolved.to_owned();
+            self.push_field_resolved(&owned, value);
+        }
     }
 }
 ```
@@ -158,25 +180,34 @@ fn ensure_column_idx(&mut self, name: &str) -> usize {
 ### finish_row (the dirty optimization)
 
 Instead of looping over all columns and pushing `None` for missing ones, the
-engine uses the `row_dirty` bitmask:
+engine uses the `row_dirty` bitmask with a fast path for dense rows:
 
 ```rust
 fn finish_row(&mut self) {
-    for (i, b) in self.columns.iter_mut().enumerate() {
-        let word = i / 64;
-        let bit = i % 64;
-        if (self.row_dirty[word] >> bit) & 1 == 0 {
-            b.push(None);  // Column missing: null fill
-        } else {
-            self.row_dirty[word] &= !(1u64 << bit);  // Clear for next row
+    let ncols = self.columns.len();
+    let full_words = ncols / 64;
+    let rem_bits = ncols % 64;
+    // Fast path: all bits set (dense row)
+    let is_full = (0..full_words).all(|w| self.row_dirty[w] == u64::MAX)
+        && (rem_bits == 0
+            || self.row_dirty.get(full_words).copied().unwrap_or(0)
+               == (1u64 << rem_bits) - 1);
+    if is_full {
+        self.row_dirty.fill(0);
+    } else {
+        for (i, b) in self.columns.iter_mut().enumerate() {
+            let word = i / 64;
+            let bit = i % 64;
+            if (self.row_dirty[word] >> bit) & 1 == 0 {
+                b.push(None);  // Column missing: null fill
+            }
         }
+        self.row_dirty.fill(0);
     }
     // Evaluate filter if present
     if let Some(ref filter) = self.plan.filter {
         if !filter.check(&self.columns, &self.field_index, self.row_count, &self.plan) {
-            for b in &mut self.columns {
-                b.pop();
-            }
+            for b in &mut self.columns { b.pop(); }
             return;
         }
     }
@@ -185,8 +216,7 @@ fn finish_row(&mut self) {
 ```
 
 For 10 columns where 8 are present each row, this saves 80% of null-fill
-pushes. The bitmask word load plus bit test is cheaper than a `Vec` push
-per column.
+pushes. The fast path skips the loop entirely for dense rows.
 
 ### finish (Arrow export)
 
