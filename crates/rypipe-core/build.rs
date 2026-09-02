@@ -22,9 +22,7 @@ fn main() {
     let dirty = Command::new("git")
         .args(["status", "--porcelain"])
         .output()
-        .ok()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
+        .is_ok_and(|o| !o.stdout.is_empty());
 
     let build_sha = if dirty { format!("{sha}-dirty") } else { sha };
 
