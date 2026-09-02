@@ -247,33 +247,34 @@ pub fn ladder<S: Splitter, P: RecordParser>(
     let mb = bytes.len() as f64 / 1_000_000.0;
 
     // Tier 1: Noop
-    let (t_noop, _n) = bench_tier::<S, P, NoopSink>(splitter, parser, bytes, &mut NoopSink, rounds);
+    let (t_noop, cov_noop, _n) = bench_tier::<S, P, NoopSink>(splitter, parser, bytes, &mut NoopSink, rounds);
 
     // Tier 2: Traverse
-    let (t_trav, _n) =
+    let (t_trav, cov_trav, _n) =
         bench_tier::<S, P, TraverseSink>(splitter, parser, bytes, &mut TraverseSink, rounds);
 
     // Tier 3: Locate
     let mut loc = crate::engine::LocateOnly::new(ExecutionPlan::new());
-    let (t_loc, _n) = bench_tier(splitter, parser, bytes, &mut loc, rounds);
+    let (t_loc, cov_loc, _n) = bench_tier(splitter, parser, bytes, &mut loc, rounds);
 
     // Tier 4: Extract
-    let (t_ext, _n) =
+    let (t_ext, cov_ext, _n) =
         bench_tier::<S, P, ExtractOnly>(splitter, parser, bytes, &mut ExtractOnly, rounds);
 
     // Tier 5: Push
     let mut push = PushOnly::new(Arc::clone(&plan));
-    let (t_push, _n) = bench_tier(splitter, parser, bytes, &mut push, rounds);
+    let (t_push, cov_push, _n) = bench_tier(splitter, parser, bytes, &mut push, rounds);
 
     // Tier 6: Build
     let mut build = BuildOnly::new(Arc::clone(&plan));
-    let (t_build, _n) = bench_tier(splitter, parser, bytes, &mut build, rounds);
+    let (t_build, cov_build, _n) = bench_tier(splitter, parser, bytes, &mut build, rounds);
 
     // Tier 7: Full (TableBuilder + finish)
     let mut tb = TableBuilder::with_plan(0, Arc::clone(&plan));
-    let (t_full, n) = bench_tier(splitter, parser, bytes, &mut tb, rounds);
+    let (t_full, cov_full, n) = bench_tier(splitter, parser, bytes, &mut tb, rounds);
 
     let times = [t_noop, t_trav, t_loc, t_ext, t_push, t_build, t_full];
+    let covs = [cov_noop, cov_trav, cov_loc, cov_ext, cov_push, cov_build, cov_full];
     let names = [
         "scan_only",
         "traverse",
@@ -296,8 +297,9 @@ pub fn ladder<S: Splitter, P: RecordParser>(
     let tiers: Vec<TierResult> = times
         .iter()
         .zip(deltas.iter())
+        .zip(covs.iter())
         .zip(names.iter())
-        .map(|((&time, &delta), &name)| {
+        .map(|(((&time, &delta), &cov), &name)| {
             let cum_ms = time / mb * 1000.0;
             let delta_ms = delta / mb * 1000.0;
             let share = if total > 0.0 {
@@ -312,7 +314,7 @@ pub fn ladder<S: Splitter, P: RecordParser>(
                 cum_ms_per_mb: cum_ms,
                 delta_ms_per_mb: delta_ms,
                 share_pct: share,
-                cov_pct: 0.0, // TODO: compute from individual runs
+                cov_pct: cov * 100.0,
                 n,
             }
         })
@@ -361,7 +363,14 @@ fn bench_tier<S: Splitter, P: RecordParser, Sink: ColumnarSink>(
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = times.len();
     let med = times[n / 2];
-    (med, n)
+    let mean = times.iter().sum::<f64>() / n as f64;
+    let cov = if mean > 0.0 {
+        let stdev = (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+        stdev / mean
+    } else {
+        0.0
+    };
+    (med, cov, n)
 }
 
 // ---------------------------------------------------------------------------
