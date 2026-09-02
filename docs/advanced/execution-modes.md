@@ -52,8 +52,8 @@ Parallel mode uses `ParallelExecutor`:
 1. Calls `Splitter::find_split_points`.
 2. Converts points to non-empty `Range<usize>` chunks.
 3. Uses `rayon::par_iter` to parse each chunk independently into a `TableBuilder`.
-4. Fast path: if `auto_dict` is false and there is no `Compare` filter, each builder is exported as its own `RecordBatch` in parallel. No serial merge happens.
-5. Merge path: if `auto_dict` or a `Compare` filter is present, chunk builders are merged sequentially before export.
+4. Fast path: if `auto_dict` is false and schemas are consistent, each builder is exported as its own `RecordBatch` in parallel. No serial merge happens. Compare filters are applied per-row during parse AND re-applied post-export, so they do not force the merge path.
+5. Merge path: if `auto_dict` is enabled or schemas are inconsistent, chunk builders are merged sequentially before export.
 
 Use parallel mode when:
 
