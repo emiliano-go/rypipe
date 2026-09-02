@@ -124,7 +124,7 @@ pub trait Splitter: Send + Sync {
         if max_chunks <= 1 || bytes.is_empty() {
             return vec![0, bytes.len()];
         }
-        let n = plan_chunk_count(bytes.len(), 1, SplitMode::Parallel).min(max_chunks);
+        let n = plan_chunk_count(bytes.len(), max_chunks, SplitMode::Parallel);
         let nominals: Vec<usize> = (1..n).map(|i| bytes.len() * i / n).collect();
 
         use rayon::prelude::*;
