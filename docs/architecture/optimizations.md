@@ -36,10 +36,9 @@ for (i, b) in columns.iter_mut().enumerate() {
     let bit = i % 64;
     if (row_dirty[word] >> bit) & 1 == 0 {
         b.push(None);  // Only missing columns get null-filled
-    } else {
-        row_dirty[word] &= !(1u64 << bit);  // Clear for next row
     }
 }
+self.row_dirty.fill(0);  // Clear all bits for next row
 ```
 
 **Impact:** For 10 columns where 8 are present, saves 80% of null-fill pushes.

@@ -58,7 +58,7 @@ fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
 }
 ```
 
-See [Skip regions](./skip-regions.md) for the full interface.
+See [Skip regions](../writing-adapters/skip-regions.md) for the full interface.
 
 ### find_split_points (default, do not override)
 
