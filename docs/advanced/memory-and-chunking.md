@@ -82,7 +82,7 @@ If the file is small but the parser is slow (for example, complex XML), parallel
 - `InputBuffer::Mmap` maps the file and applies `MADV_WILLNEED` (prefault) or `MADV_SEQUENTIAL` (RSS-sensitive) advice on Unix. The mapping is dropped before Arrow export, so no borrowed bytes outlive it.
 - `InputBuffer::Owned` simply reads the file into a `Vec<u8>`.
 - `StrColumn` owns its bytes; Arrow arrays are built from owned buffers.
-- Numeric columns use dense `Vec<Option<T>>`.
+- Numeric columns use `PrimColumn<T>` (flat Vec + ValidityBitmap).
 
 ## Summary
 

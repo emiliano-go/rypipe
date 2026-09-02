@@ -8,10 +8,14 @@ The splitter finds safe chunk boundaries for parallel parsing.
 
 ```rust
 pub trait Splitter: Send + Sync {
-    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize>;
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize>;
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize;
+    fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> { None }
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize>;
 }
 ```
+
+`find_split_points` has a default implementation that uses `next_record_start` to find split points.
 
 Rules:
 
@@ -52,6 +56,7 @@ In crxml, the splitter skips comments and CDATA while scanning for `<Row` tags. 
 pub trait RecordParser: Send + Sync {
     fn validate(&self, bytes: &[u8]) -> Result<()>;
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()>;
+    fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut dyn GenericSink) -> Result<()>;
 }
 ```
 
