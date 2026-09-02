@@ -112,15 +112,10 @@ use rypipe_core::{Splitter, RecordParser, ColumnarSink, Value, Result};
 pub struct LogSplitter; // (ADAPTER BOUND)
 
 impl Splitter for LogSplitter { // (ADAPTER BOUND)
-    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
-        if max_chunks <= 1 || bytes.is_empty() { return vec![0, bytes.len()]; }
-        let mut points = vec![0];
-        for (i, &b) in bytes.iter().enumerate().skip(1) {
-            if b == b'\n' && points.len() < max_chunks { points.push(i + 1); }
-        }
-        if *points.last().unwrap() != bytes.len() { points.push(bytes.len()); }
-        points
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        memchr::memchr(b'\n', &bytes[from..]).map(|r| from + r + 1)
     }
+
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
         (sample.len() / sample.iter().filter(|&&b| b == b'\n').count().max(1)).max(1)
     }

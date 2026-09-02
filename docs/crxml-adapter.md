@@ -6,7 +6,7 @@
 
 Crystal Reports exports tabular data inside XML elements like `<Field Name="X"><Value>123</Value></Field>` and `<Text Name="Y"><TextValue>abc</TextValue></Text>`. `crxml` reads these exports and turns them into Arrow tables or DataFrames.
 
-On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6-3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, now also scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB (was 251/234 `quick-xml`), within 30% of columnar (was 174% gap). The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O: `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine.rs:16`, `row_dirty` `engine.rs:26`) keeps up without being the bottleneck.
+On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6-3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, now also scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB (was 251/234 `quick-xml`), within 30% of columnar (was 174% gap). The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O: `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine/table_builder.rs:44`, `row_dirty` `engine/table_builder.rs:54`) keeps up without being the bottleneck.
 
 ## How it fits into rypipe
 
@@ -50,13 +50,8 @@ use memchr;
 pub struct CrystalXmlSplitter { row_tag: Vec<u8> }
 
 impl Splitter for CrystalXmlSplitter {
-    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
-        let ranges = compute_splits(bytes, &self.row_tag, max_chunks);
-        let mut points = vec![0];
-        for r in ranges { points.push(r.end); }
-        points.dedup();
-        if points.last() != Some(&bytes.len()) { points.push(bytes.len()); }
-        points
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        memchr::memmem::find(&bytes[from..], &self.row_tag).map(|r| from + r + self.row_tag.len())
     }
 
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
@@ -69,6 +64,8 @@ impl Splitter for CrystalXmlSplitter {
     }
 }
 ```
+
+The default `find_split_points` implementation uses `next_record_start` to find split points.
 
 ### Record parser
 
@@ -143,7 +140,7 @@ The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from
 | Hand-rolled `memchr`/`memmem` scanner `scanner.rs:29` (`memchr`, `memchr3`, `Finder` `scanner.rs:569`) | No `quick-xml` event loop (was 42% wall `lib.rs:598`); SIMD `scan_open_tag` `scanner.rs:414`, `field_element` `scanner.rs:202`, `Find-er` byte-jump for dropped `Field` (`wants` `scanner.rs:210` → `find_close_after`) |
 | `memchr::memmem` row-tag scan + skip-region | SIMD `next_row_start` `splitter.rs:107`, `find_special_regions` `splitter.rs:61` (`<!--`, `<![CDATA[`) with `is_empty` fast path `scanner.rs:418` |
 | SIMD UTF-8 validation | `simdutf8` `decoder.rs:32` validates chunk bulk; `utf8_unchecked` `scanner.rs:39` + conditional `unescape` only if `b'&'` `scanner.rs:662` |
-| `rypipe-core` `Vec<ColumnBuilder>`+`field_index` `engine.rs:16` single `get` + `row_dirty` `engine.rs:26` bitmask | `push_field` was double `HashMap` probe → single `field_index.get` → `columns[idx]`; `finish_row` now only null-fills clear bits, not all `C` columns |
+| `rypipe-core` `Vec<ColumnBuilder>`+`field_index` `engine/table_builder.rs:44` single `get` + `row_dirty` `engine/table_builder.rs:54` bitmask | `push_field` was double `HashMap` probe → single `field_index.get` → `columns[idx]`; `finish_row` now only null-fills clear bits, not all `C` columns |
 | `InputBuffer` `mmap` `lib.rs:25` `auto_mmap` >50 MB + `cap` via `estimate_bytes_per_row` `splitter.rs:41` | Avoids `fs::read` `rep_movs` 3% + over-reserve `Vec` 2× |
 | Parallel fast path `parallel.rs:82` + streaming `RowSink` `lib.rs:564` | `auto_dict`/`Compare` off → per-chunk `RecordBatch` export in parallel; streaming reuses same scanner row-by-row via `scan_one_row` `scanner.rs:81` without `TableBuilder` |
 

@@ -6,7 +6,7 @@ Arrow dictionaries store string values as integer indices into a separate value 
 
 `rypipe-core` stores string columns in a `StrColumn`: a contiguous byte arena plus `i32` offsets and a validity bitmap. When a column is dictionary-encoded, the engine instead builds:
 
-- a `codes: Vec<Option<i32>>` array of indices;
+- a `codes: NullableColumn<i32>` array of indices;
 - a `dict: Vec<String>` ordered list of distinct values;
 - an `index: HashMap<String, i32>` lookup from value to index.
 
@@ -83,7 +83,7 @@ If you need both dictionaries and maximum throughput, consider:
 
 `ParallelExecutor` has two internal paths:
 
-- **Fast path**: when `auto_dict` is false and there is no `Compare` filter, each chunk is exported as its own `RecordBatch` in parallel. No serial merge.
+- **Fast path**: when `auto_dict` is false, each chunk is exported as its own `RecordBatch` in parallel. No serial merge.
 - **Merge path**: when `auto_dict` or a `Compare` filter is enabled, chunk builders are merged sequentially before export. Peak RSS is higher.
 
 If you need both a `Compare` filter and maximum throughput, consider filtering after export in Python/Arrow instead.

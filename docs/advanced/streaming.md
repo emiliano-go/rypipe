@@ -9,7 +9,7 @@
 | `bounded` (collecting) | `BoundedExecutor::run` / `Pipeline::read_path_stream` → `Vec<RecordBatch>` | `budget + sum(batches)`: still grows with file size if you collect | `source.to_arrow()` with `memory="256MB"` for a single table |
 | `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | `budget + one batch`: constant | `for batch in rypipe.iter_record_batches(..., memory="64KB"):` + `ParquetWriter` |
 
-The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs:19`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs:30`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine.rs:75`) to keep RSS at `budget + batch`.
+The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs:19`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs:30`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine/table_builder.rs:316`) to keep RSS at `budget + batch`.
 
 ## Memory guarantee
 
@@ -72,11 +72,11 @@ for batch in pipe.iter_record_batches(memory="256MB"):
     writer.write_batch(batch)
 ```
 
-`batch_size` overrides the budget-derived `rows_per_batch = budget / estimate_bytes_per_row` (`crates/rypipe-core/src/splitter.rs:41`). Default derives from `memory`; pass `batch_size=1` for minimal per-batch memory.
+`batch_size` overrides the budget-derived `rows_per_batch = budget / estimate_bytes_per_row` (`crates/rypipe-core/src/decoder.rs`). Default derives from `memory`; pass `batch_size=1` for minimal per-batch memory.
 
 ## When streaming falls back
 
-`Pipeline.iter_record_batches` checks `plan_split` `rypipe/fusion.py:130`; if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented: it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` constant).
+`Pipeline.iter_record_batches` checks `plan_split` `rypipe/fusion.py:14`; if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented: it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` constant).
 
 ## Testing
 
@@ -87,4 +87,3 @@ Parse 1 GB `test_1gb.xml` `memory="64KB"` `batch_size=58` vs columnar (`bench_ex
 * `crates/rypipe-core/src/consumer.rs` `BatchConsumer`
 * `crates/rypipe-core/src/streaming.rs` `StreamingBatchIterator` (`sync_channel(1)` backpressure, `allow_threads` in `rypipe-python`)
 * `crates/rypipe-core/src/bounded.rs:96` buffer reuse
-* `docs/architecture/streaming.md`
