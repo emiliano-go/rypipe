@@ -1,9 +1,10 @@
 # rypipe documentation
 
-`rypipe` is a format-agnostic data ingestion framework that turns byte streams into
-Apache Arrow record batches. It separates **format-specific** parsing from
-**format-agnostic** execution, so the same engine can parse XML, JSON, CSV,
-HTML, or any other row-oriented format once you provide a small adapter.
+`rypipe` is a format- and source-agnostic ingestion framework that provides a common
+execution runtime for turning arbitrary record-oriented data sources into typed
+columnar data. It separates **format-specific** parsing from **format-agnostic**
+execution, so the same engine can parse XML, JSON, CSV, HTML, or any other
+row-oriented format once you provide a small adapter.
 
 `rypipe` itself does **not** ship parsers for any format. Adapters live in
 separate packages. Install the engine plus the adapters you need.
@@ -21,12 +22,28 @@ separate packages. Install the engine plus the adapters you need.
 - GIL-free parsing: all heavy work runs outside Python's GIL.
 - Memory-bounded and parallel by design.
 
+## Why rypipe
+
+- **One runtime, many formats.** XML, JSON, CSV, HTML, TSV, and any future
+  format share the same parallel scheduler, memory-bounded executor, Arrow
+  export, and pushdown infrastructure. An adapter is two small traits, not a
+  full engine.
+- **Performance without compromise.** Single-thread ~1 GB/s, parallel ~4.9 GB/s
+  unprojected, ~6.8-7.0 GB/s with projection. Zero-copy Arrow export. Predicate
+  first evaluation. Layout prediction via memcmp.
+- **Correctness by construction.** Differential testing, fuzz targets, property
+  tests, and a tier-ladder profiler that decomposes every nanosecond of the hot
+  path.
+
 ## What rypipe is not
 
-- Not a full query engine. It handles projection, renaming, dropping, casting,
-  filtering, and dictionary encoding, not joins, aggregations, or SQL.
-- Not a one-size-fits-all parser. Each format needs a `RecordParser` + `Splitter`
-  adapter from a separate package.
+- **Not a query engine.** It handles projection, renaming, dropping, casting,
+  filtering, and dictionary encoding. It does not do joins, aggregations, window
+  functions, or SQL.
+- **Not a one-size-fits-all parser.** Each format needs a `RecordParser` +
+  `Splitter` adapter from a separate package.
+- **Not a data warehouse.** It ingests data into Arrow; it does not store it,
+  index it, or serve queries over it.
 
 ## Quick start
 

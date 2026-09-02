@@ -7,6 +7,12 @@
 </p>
 
 <p align="center">
+  rypipe is a format- and source-agnostic ingestion framework that provides a common
+  execution runtime for turning arbitrary record-oriented data sources into typed
+  columnar data.
+</p>
+
+<p align="center">
   Parse row-oriented byte streams into Apache Arrow record batches with parallel
   scheduling, memory-bounded execution, query pushdown, and a chainable
   pipeline API. Format adapters live in separate packages.
@@ -48,6 +54,38 @@ other format. Those live in separate adapter packages. Install the engine plus
 the adapters you need.
 
 > **Note:** `crxml` was the original idea: a fast Crystal Reports XML parser that needed parallel, bounded-memory, and Arrow-native execution. The engine that made `crxml` fast (`Splitter` + `RecordParser` + `TableBuilder` + `ExecutionPlan`) was then separated and abstracted into `rypipe` so any format could reuse it. `crxml` now lives as a thin adapter (`crxml-core` + `CrystalXMLSource`) on top of `rypipe-core`. See `rypipe` `docs/crxml-adapter.md` for the `3 GB/s` evolution.
+
+## Why rypipe
+
+- **One runtime, many formats.** XML, JSON, CSV, HTML, TSV, and any future
+  format share the same parallel scheduler, memory-bounded executor, Arrow
+  export, and pushdown infrastructure. An adapter is two small traits, not a
+  full engine.
+
+- **Performance without compromise.** Single-thread ~1 GB/s, parallel ~4.9 GB/s
+  unprojected, ~6.8-7.0 GB/s with projection. Zero-copy Arrow export. Predicate
+  first evaluation. Layout prediction via memcmp.
+
+- **Correctness by construction.** Differential testing against an independent
+  oracle, fuzz targets, property tests, and a tier-ladder profiler that
+  decomposes every nanosecond of the hot path.
+
+- **Python-native ergonomics.** Chainable pipeline API with automatic fusion of
+  rename/drop/cast/filter into the Rust parse loop. Streaming with bounded
+  memory. Schema discovery. DataFrame and Parquet sinks.
+
+## What rypipe is not
+
+- **Not a query engine.** It handles projection, renaming, dropping, casting,
+  filtering, and dictionary encoding. It does not do joins, aggregations, window
+  functions, or SQL.
+
+- **Not a one-size-fits-all parser.** Each format needs a `RecordParser` +
+  `Splitter` adapter from a separate package. The engine provides the runtime;
+  you provide the format knowledge.
+
+- **Not a data warehouse.** It ingests data into Arrow; it does not store it,
+  index it, or serve queries over it.
 
 ## Features
 
