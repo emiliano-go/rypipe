@@ -4,7 +4,7 @@ The `Splitter` trait decides where it is safe to divide an input byte stream
 into independent chunks. The engine calls `find_split_points` to get byte
 offsets, then parses each chunk concurrently via rayon.
 
-See [Architecture: Splitting](../architecture/#splitting) for how the engine
+See [Architecture](../architecture/index.md) for how the engine
 uses split points internally.
 
 ## Trait definition

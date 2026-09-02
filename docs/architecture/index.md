@@ -104,6 +104,10 @@ typing, and Arrow logic in one place.
 | `schema` | FrozenSchema, DiscoveryOpts, layout_signature caching |
 | `dict` | SeedDict, unify_dictionaries, apply_remap |
 | `block_masks` | SIMD 64-byte block delimiter scanning |
+| `parallel_stream` | ParallelStreamingExecutor, discovery, ordered/unordered delivery |
+| `streaming` | StreamingBatchIterator: channel-based pull iterator |
+| `consumer` | BatchConsumer, CollectingConsumer, DiscardingConsumer |
+| `error` | Error enum (Utf8, Io, Plan, Merge, Arrow), Result type alias |
 
 ### rypipe-python (PyO3 bindings)
 

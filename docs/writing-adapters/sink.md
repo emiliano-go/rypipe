@@ -4,7 +4,7 @@
 calls `begin_row`/`put_field`/`end_row` for each record; the sink accumulates
 values into typed Arrow columns.
 
-See [Architecture: ColumnarSink](../architecture/#columnarsink) for how the
+See [Decoder API](../architecture/decoder.md) for how the
 engine implements this trait internally.
 
 ## Method reference (21 methods)
