@@ -18,11 +18,11 @@ print(table.num_rows, table.num_columns)
 ### Chain a pipeline
 
 ```python
-import rypipe
+from crxml import CrystalXMLSource
 from rypipe import RenameFields, DropFields, FilterRows, CastTypes
 
 df = (
-    rypipe.read("data.xml", format="crxml", row_tag="Row")
+    CrystalXMLSource("data.xml", row_tag="Row")
     | RenameFields({"old_name": "new_name"})
     | DropFields(["internal_id"])
     | FilterRows(field="status", op="==", value="active")
@@ -89,11 +89,11 @@ table = rypipe.read_par("large.xml", format="crxml", chunks=16)
 ### Sink to Parquet
 
 ```python
-import rypipe
-from rypipe import to_parquet
+from crxml import CrystalXMLSource
+from rypipe import FilterRows, to_parquet
 
 pipeline = (
-    rypipe.read("data.xml", format="crxml", row_tag="Row")
+    CrystalXMLSource("data.xml", row_tag="Row")
     | FilterRows(field="status", op="==", value="active")
 )
 to_parquet(pipeline, "active.parquet")
