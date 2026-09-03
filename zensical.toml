@@ -62,7 +62,7 @@ name = "rypipe on PyPI"
 "Rust Core" = "rust-api.md"
 
 [[project.nav]]
-"Writing Adapters" = "writing-adapters.md"
+"Writing Adapters" = "writing-adapters/index.md"
 
 [[project.nav]]
 "Examples" = "examples.md"
