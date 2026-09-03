@@ -76,7 +76,7 @@ The decoder also has a `parse_tail` fallback that rescans orphan close-tags at c
 1. Specialize the parser. Generic line splitting is fine for engine benchmarks, but real throughput comes from a format-aware parser.
 2. Find split points cheaply. A single `memmem` scan beats scanning byte-by-byte.
 3. Handle boundary cases. Chunks can start or end inside a row; have a fallback path that rescans from the nearest safe row start.
-4. Borrow strings into the engine. Pass `Value::Str(&str)` slices whenever the input is valid UTF-8.
+4. Borrow strings into the engine. Pass `Value::Str(Cow::Borrowed(&str))` slices whenever the input is valid UTF-8.
 5. Register with `rypipe`. A thin adapter class lets users call `rypipe.read()` while you keep the fast Rust core.
 
 ## Source
