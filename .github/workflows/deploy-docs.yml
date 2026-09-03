@@ -34,7 +34,7 @@ jobs:
       - run: cp docs/llms.txt site/llms.txt
       - run: cp docs/llms-full.txt site/llms-full.txt
       - run: cp docs/_headers site/_headers
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
