@@ -48,7 +48,8 @@ A pure-Rust `rypipe` would need users to learn `cargo`, `tokio`, lifetimes, and 
 Arrow’s design assumes language boundaries are crossed at the `RecordBatch` level:
 
 ```
-Rust parser (rypipe-core) ──C Data Interface──► pyarrow.Table ──► pandas / Polars / DuckDB / Spark
+Rust parser (rypipe-core) ──► Data Interface ──► pyarrow.Table
+    ──► pandas / Polars / DuckDB / Spark
 ```
 
 * **`pyarrow`** is the de-facto Arrow implementation in Python (25 M downloads/month). `rypipe` hands batches via the C Data Interface, no serialization, no copy, no GIL.
@@ -60,7 +61,7 @@ A pure-Rust engine would still need to export Arrow, and then every downstream s
 
 ## 4. Performance: Rust hot loop, Python orchestration
 
-`rypipe`’s single-thread XML throughput on a 702 MB file is ~700 MB/s (95% in `parse`, 3% in `split`, 2% in `finish`). Parallel ×8 is ~2.5 GB/s. The profile for a real Crystal Reports export shows:
+`rypipe`'s single-thread XML throughput on a 533 MB file is ~1,100 MB/s (95% in `parse`, 3% in `split`, 2% in `finish`). Parallel x16 is ~6,000 MB/s. The profile for a real Crystal Reports export shows:
 
 * `field_element` / `scan_open_tag` ~17%, XML scanning (Rust)
 * `push_field_resolved` 2.76% + `field_index.get` 1.64%, column dispatch (Rust, Vec+map after 0.1.2)
