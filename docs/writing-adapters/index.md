@@ -88,13 +88,19 @@ impl RecordParser for LogParser {
 
 ```python
 import rypipe
+import _rypipe_log
 
-class LogAdapter(rypipe.Adapter):
+class LogAdapter:
     def read(self, path, **kwargs):
         return _rypipe_log.read_log(path, **kwargs)
 
-rypipe.register_adapter("log", LogAdapter, extensions=[".log"])
+rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
 ```
+
+Note: the adapter class does **not** inherit from `rypipe.Adapter` or
+`rypipe.Source`. It only needs a `read(path, **kwargs)` method that returns
+a `pyarrow.Table`. The `Adapter`/`Source` base classes are for adapters
+that want the pipeline `|` operator and fusion support.
 
 ### Usage
 
@@ -102,12 +108,10 @@ rypipe.register_adapter("log", LogAdapter, extensions=[".log"])
 import rypipe
 import my_adapter  # registers the "log" adapter
 
+# One-shot read (returns pyarrow.Table directly)
 table = rypipe.read("app.log")
-df = (
-    rypipe.read("app.log")
-    | rypipe.RenameFields({"host": "server"})
-    | rypipe.FilterRows(field="level", op="==", value="ERROR")
-).to_dataframe()
+
+# For pipeline syntax, create a Source subclass instead (see below)
 ```
 
 ## Implementing `plan_overrides` for fusion
@@ -146,11 +150,11 @@ rypipe-csv/
 
 ```toml
 [dependencies]
-rypipe-core = "2.0"
-
-# Only if you build Python bindings:
-rypipe-python = "2.0"
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+rypipe-core = "2.1"
+arrow = { version = "=55.2.0", default-features = false, features = ["pyarrow"] }
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
+memchr = "2"
+simdutf8 = "0.1"
 ```
 
 ## The three traits
