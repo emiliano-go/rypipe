@@ -147,7 +147,7 @@ Decoders emit `Value<'a>`:
 use rypipe_core::Value;
 
 sink.put_field("amount", Value::Float64(123.45));
-sink.put_field("name", Value::Str("Alice"));
+sink.put_field("name", Value::Str(std::borrow::Cow::Borrowed("Alice")));
 sink.put_field("flag", Value::Bool(true));
 sink.put_field("missing", Value::Null);
 ```

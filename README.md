@@ -212,7 +212,7 @@ coverage cannot silently disappear from a green run.
 
 ## Benchmark: parallel streaming with frozen schema (parallel Discovery)
 
-`crxml` (reference adapter) on Ryzen 5800X, 533 MB real / 1 GB synthetic, warm, median-of-7, frozen schema (`FrozenSchema` `crates/rypipe-core/src/schema.rs:14`, `discovery_ns` in `get_par_profile()`):
+`crxml` (reference adapter) on Ryzen 5800X, 533 MB real / 1 GB synthetic, warm, median-of-7, frozen schema (`FrozenSchema` `crates/rypipe-core/src/schema.rs:21`, `discovery_ns` in `get_par_profile()`):
 
 | Mode | 533 MB Table | 1 GB Table | RssAnon 533 MB | Schema |
 |---|---|---|---|---|
