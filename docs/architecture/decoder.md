@@ -63,6 +63,7 @@ See [Skip regions](../writing-adapters/skip-regions.md) for the full interface.
 ### find_split_points (default, do not override)
 
 The default implementation handles everything:
+
 1. `plan_chunk_count` determines chunk count (2 MiB floor, thread caps)
 2. Nominal offsets at `bytes.len() * i / n`
 3. `par_iter` over nominals calling `next_record_start`

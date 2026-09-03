@@ -170,6 +170,7 @@ storage without allocation. `get_filter_value` formats as `String` for
 ### String push
 
 `push_str` for the String variant does:
+
 1. Compute offset: `data.len()`
 2. Extend data: `data.extend_from_slice(s.as_bytes())`
 3. Push offset: `offsets.push(data.len() as i32)`
@@ -180,6 +181,7 @@ Cost: ~10 ns per string (arena append + 3 pushes). No per-cell allocation.
 ### Numeric push
 
 `push_value` for Int64/Float64 does:
+
 1. Match on Value variant
 2. `lexical::parse` or direct cast
 3. Push to `PrimColumn::data` (Vec push)
@@ -190,6 +192,7 @@ Cost: ~5 ns per numeric value. No parsing overhead for typed values.
 ### Dictionary push
 
 `dict_code` does:
+
 1. `index.get(v)`: HashMap lookup (~5 ns)
 2. If missing: `dict.push(v.to_owned())` + `index.insert` (~20 ns amortized)
 3. `codes.push(Some(code))`: NullableColumn push
