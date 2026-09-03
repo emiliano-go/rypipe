@@ -30,7 +30,10 @@ The takeaway is not that Rust is bad, it is excellent for the engine, but that t
 Real ETL is rarely “parse one file as fast as possible.” It is:
 
 ```
-S3 / API / FTP → decompress → parse → rename/drop/cast/filter → validate → join/aggregate in DuckDB/Spark → write Parquet → publish to warehouse
+S3 / API / FTP
+  → decompress → parse → rename/drop/cast/filter
+  → validate → join/aggregate in DuckDB/Spark
+  → write Parquet → publish to warehouse
 ```
 
 * **Orchestration** is Python (`Airflow`, `Dagster`, `Prefect`, `Mage`, plain `cron`). A DAG that can `import rypipe` keeps the whole pipeline in one language.
