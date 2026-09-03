@@ -102,7 +102,7 @@ let batch = Pipeline::new(MySplitter, MyDecoder::new())
     .read_path("data.myfmt", false, false)?;
 ```
 
-`rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python : you can publish a Rust-only adapter and depend on `rypipe-core = "0.1"` alone.
+`rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python : you can publish a Rust-only adapter and depend on `rypipe-core = "2.0"` alone.
 
 ## 7. Design principle: data-driven development
 

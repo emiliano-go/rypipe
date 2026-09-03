@@ -26,7 +26,7 @@ df = (
     | RenameFields({"old_name": "new_name"})
     | DropFields(["internal_id"])
     | FilterRows(field="status", op="==", value="active")
-    | CastTypes({"amount": "float64"})
+    | CastTypes({"amount": float, "qty": int})
 ).to_dataframe()
 ```
 

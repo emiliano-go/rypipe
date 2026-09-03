@@ -60,7 +60,7 @@ import my_adapter
 # Format is inferred from the extension; mode defaults to parallel.
 table = rypipe.read(
     "data.myfmt",
-    fields={"amount": "float64"},
+    field_types={"amount": "float64"},
     filter={"field": "status", "op": "==", "value": "active"},
 )
 print(table.num_rows, table.num_columns)
@@ -108,7 +108,7 @@ let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
 - [Why Python?](./why-python.md): why rypipe is Rust core plus Python surface, not pure Rust : the data driven case for the hybrid.
 - [Python API](./python-api.md): the `rypipe` package and `_rypipe` helpers.
 - [Rust API](./rust-api.md): using `rypipe-core` and writing custom adapters.
-- [Writing a format adapter](./writing-adapters.md): adding CSV, JSON, etc.
+- [Writing a format adapter](./writing-adapters/): adding CSV, JSON, etc.
 - [Performance](./performance.md): benchmarks and tuning knobs.
 
 ## Repository layout

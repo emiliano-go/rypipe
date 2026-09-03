@@ -147,8 +147,8 @@ table = rypipe.read("data.myfmt")
 table = rypipe.read(
     "data.myfmt",
     format="myfmt",          # inferred from extension when omitted
-    fields={"amount": "float64", "qty": "int64"},
-    dictionary=["status"],
+    field_types={"amount": "float64", "qty": "int64"},
+    dictionary_columns=["status"],
     filter={"field": "status", "op": "==", "value": "active"},
     schema=["id", "status", "amount"],
     auto_dict=False,
@@ -170,7 +170,7 @@ table = rypipe.read("data.myfmt", adapter=my_adapter, row_tag="Row")
 Convenience wrapper that passes `chunks` to the adapter.
 
 ```python
-table = rypipe.read_par("data.myfmt", chunks=8, fields={"amount": "float64"})
+table = rypipe.read_par("data.myfmt", chunks=8, field_types={"amount": "float64"})
 ```
 
 ### `rypipe.read_stream`
@@ -236,8 +236,8 @@ kwargs, which are passed through to the adapter.
 |-------|------|--------|
 | `rename` / `field_mapping` | `dict[str, str]` | Rename raw fields. |
 | `drop` / `drop_fields` | `list[str]` | Drop fields by resolved name. |
-| `fields` / `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, `"string"`, `"date32"`, or `"timestamp"` (also `"timestamp[s]"`, `"timestamp[ms]"`, `"timestamp[us]"`, `"timestamp[ns]"`). |
-| `dictionary` / `dictionary_columns` | `list[str]` | Explicit dictionary encoding. |
+| `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, `"string"`, `"date32"`, or `"timestamp"` (also `"timestamp[s]"`, `"timestamp[ms]"`, `"timestamp[us]"`, `"timestamp[ns]"`). |
+| `dictionary_columns` | `list[str]` | Explicit dictionary encoding. |
 | `filter` | `dict` | Per-row filter (see below). |
 | `schema` | `list[str]` | Output column order. |
 | `auto_dict` | `bool` | Upgrade low-cardinality string columns to dictionary. |
