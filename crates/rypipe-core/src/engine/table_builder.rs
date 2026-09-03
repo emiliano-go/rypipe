@@ -1585,18 +1585,12 @@ impl ColumnarSink for TableBuilder {
                 }
             }
             mask
-        } else if self.plan.drop_fields.is_empty() && self.plan.field_map.is_empty() {
-            // No projection: all columns wanted. Return 0 to disable short-circuit.
-            0
         } else {
-            // drop_fields active: wanted = all columns minus dropped.
-            let mut mask = 0u64;
-            for (name, &idx) in &self.field_index {
-                if idx < 64 && !self.plan.drop_fields.contains(name) {
-                    mask |= 1u64 << idx;
-                }
-            }
-            mask
+            // No explicit schema_order: all columns are wanted (even if
+            // field_map or drop_fields is active). Return 0 to disable
+            // projection short-circuit. Only short-circuit when the user
+            // has explicitly declared which columns they want via schema_order.
+            0
         }
     }
 
