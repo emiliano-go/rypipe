@@ -98,7 +98,7 @@ values. Scanner byte-jumps to row close via `find_row_close`.
 
 **Before:** `sink.wants(name)` virtual call per field (vtable dispatch).
 
-**After:** `(wanted_mask >> slot) & 1` — single bit test, no vtable dispatch.
+**After:** `(wanted_mask >> slot) & 1`: single bit test, no vtable dispatch.
 
 **Impact:** Eliminates virtual dispatch overhead in the hot inner loop.
 Combined with row_satisfied, enables full projection optimization.

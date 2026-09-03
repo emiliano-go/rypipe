@@ -44,6 +44,9 @@ separate packages. Install the engine plus the adapters you need.
   `Splitter` adapter from a separate package.
 - **Not a data warehouse.** It ingests data into Arrow; it does not store it,
   index it, or serve queries over it.
+- **Not pure Python.** Adapters are written in Rust for performance. Python
+  users consume data through `rypipe.read()` and the pipeline API; they do not
+  need to write Rust unless creating a new adapter.
 
 ## Quick start
 

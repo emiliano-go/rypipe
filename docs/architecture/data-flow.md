@@ -75,7 +75,7 @@ plan_chunks, reopen for seek+read per chunk.
 ## Column lifecycle inside a row
 
 ```
-begin_row (no op — row tracked by row_count + row_dirty)
+begin_row (no op, row tracked by row_count + row_dirty)
   put_field(k, v):
     resolve(k) → ExecutionPlan::resolve_field (one hash)
     ensure_column_idx (single hash for field_index + Vec push if new)
@@ -136,15 +136,15 @@ The choice depends on file size vs available RAM:
 
 The adapter interacts with the engine at these specific points:
 
-1. **`Splitter.find_split_points`** — called once per parse, returns chunk
+1. **`Splitter.find_split_points`**: called once per parse, returns chunk
    boundaries. The engine uses these to create independent byte ranges.
-2. **`RecordParser.validate`** — called once per chunk, before parsing.
+2. **`RecordParser.validate`**: called once per chunk, before parsing.
    Use for upfront checks like UTF-8 validation.
-3. **`RecordParser.parse_chunk`** — called once per chunk, feeds
+3. **`RecordParser.parse_chunk`**: called once per chunk, feeds
    `ColumnarSink` with `begin_row`/`put_field`/`end_row` events.
-4. **`ColumnarSink.begin_row/put_field/end_row`** — called per row per
+4. **`ColumnarSink.begin_row/put_field/end_row`**: called per row per
    field. The engine resolves names, stores values, and tracks dirty bits.
-5. **`ColumnarSink.finish`** — called once after all chunks, returns
+5. **`ColumnarSink.finish`**: called once after all chunks, returns
    Arrow `RecordBatch`. Triggers normalize, auto_dict, sort, export.
 
 All other work (parallelism, memory management, Arrow export, filtering)

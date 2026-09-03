@@ -31,6 +31,42 @@ When the pipeline reaches `to_arrow()`, the stage list is collapsed into one pla
 
 Rows that fail the filter are never materialized; dropped columns are never allocated; and casts happen once inside Rust instead of twice in Python and Rust.
 
+## Fusion pipeline flow
+
+```
+Python pipeline                         Rust engine
+─────────────                          ───────────
+
+source | RenameFields | DropFields      ExecutionPlan
+       | FilterRows   | CastTypes       ├── field_map:  {old_name → new_name}
+       | .to_arrow()                    ├── drop_fields: {internal_id}
+                                        ├── field_types: {amount → Float64}
+         │                              ├── filter:      Equal(status, "active")
+         ▼                              └── schema_order: []
+   plan_split()                              │
+         │                                    ▼
+   plan_overrides = {                  TableBuilder::push_field()
+     field_mapping,                         │
+     drop_fields,                    ┌──────┴──────┐
+     field_types,                    │  resolve name │
+     filter                          │  via field_map│
+   }                                └──────┬──────┘
+         │                                    │
+         ▼                              ┌────┴────────────┐
+   source._read_arrow(plan)             │ drop? → skip    │
+         │                              │ cast  → typed   │
+         ▼                              │ filter → reject  │
+   Rust parse + export                  │ push  → column  │
+         │                              └────┬────────────┘
+         ▼                                   │
+   pyarrow.Table                       finish_row()
+         │                              └── null-fill, filter check
+         ▼
+   to_arrow() result
+```
+
+Steps 1-4 happen once per row inside the Rust parse loop. No Python objects are created for fused stages.
+
 ## The `ExecutionPlan` fields
 
 ```rust

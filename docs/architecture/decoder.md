@@ -134,46 +134,46 @@ pub trait ColumnarSink {
 
 ### Required methods (4)
 
-- **`begin_row`** — Start a new row. Clears per-row state.
-- **`put_field`** — Push a field value. Engine resolves name and stores.
-- **`end_row`** — End the row. Null-fills missing, evaluates filter.
-- **`finish`** — Finalize into Arrow RecordBatch.
+- **`begin_row`**: Start a new row. Clears per-row state.
+- **`put_field`**: Push a field value. Engine resolves name and stores.
+- **`end_row`**: End the row. Null-fills missing, evaluates filter.
+- **`finish`**: Finalize into Arrow RecordBatch.
 
 ### Field resolution (4)
 
-- **`wants(name)`** — `false` to signal the engine will drop this field.
-- **`resolve(name)`** — Map raw name to output column, or `None` if dropped.
-- **`put_field_resolved(name, value)`** — Push with pre-resolved name.
-- **`resolve_and_put(name, value)`** — Combined resolve + push.
+- **`wants(name)`**: `false` to signal the engine will drop this field.
+- **`resolve(name)`**: Map raw name to output column, or `None` if dropped.
+- **`put_field_resolved(name, value)`**: Push with pre-resolved name.
+- **`resolve_and_put(name, value)`**: Combined resolve + push.
 
 ### Tier control (3)
 
-- **`needs_value()`** — `false` = locate-only (skip text extraction).
-- **`needs_resolve()`** — `false` = traverse-only (skip resolve).
-- **`row_rejected()`** — `true` = filter rejected; scanner byte-jumps.
+- **`needs_value()`**: `false` = locate-only (skip text extraction).
+- **`needs_resolve()`**: `false` = traverse-only (skip resolve).
+- **`row_rejected()`**: `true` = filter rejected; scanner byte-jumps.
 
 ### Projection (3)
 
-- **`row_satisfied()`** — `true` = all wanted columns present; byte-jump.
-- **`wanted_mask()`** — Bitmask of wanted columns for O(1) membership test.
-- **`reset_child_ordinal()`** — Reset ordinal after row-tag attributes.
+- **`row_satisfied()`**: `true` = all wanted columns present; byte-jump.
+- **`wanted_mask()`**: Bitmask of wanted columns for O(1) membership test.
+- **`reset_child_ordinal()`**: Reset ordinal after row-tag attributes.
 
 ### Layout prediction (4)
 
-- **`expect_slot(ordinal)`** — `(slot, raw_name)` for memcmp fast path.
-- **`put_field_at(slot, value)`** — Direct slot push, no name resolution.
-- **`record_slot(ordinal, slot, raw_name)`** — Cache slot for next row.
-- **`layout_broken(ordinal)`** — Invalidate cached layout.
+- **`expect_slot(ordinal)`**: `(slot, raw_name)` for memcmp fast path.
+- **`put_field_at(slot, value)`**: Direct slot push, no name resolution.
+- **`record_slot(ordinal, slot, raw_name)`**: Cache slot for next row.
+- **`layout_broken(ordinal)`**: Invalidate cached layout.
 
 ### Batch (1)
 
-- **`put_row(fields)`** — Push a complete row in one call.
+- **`put_row(fields)`**: Push a complete row in one call.
 
 ### Raw-byte methods (2)
 
-- **`resolve_raw(raw_name)`** — Resolve a field name still in raw byte form.
+- **`resolve_raw(raw_name)`**: Resolve a field name still in raw byte form.
   Default converts via `from_utf8` then delegates to `resolve`.
-- **`resolve_and_put_raw(raw_name, value)`** — Combined raw-name resolve +
+- **`resolve_and_put_raw(raw_name, value)`**: Combined raw-name resolve +
   push. Default converts via `from_utf8` then delegates to `resolve_and_put`.
 
 ### Fast path hierarchy

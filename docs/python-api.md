@@ -9,6 +9,12 @@ package and import it; the adapter registers itself with `rypipe` so the
 high-level `read` API works. Adapters can also expose a `Source` subclass and
 get the pipeline/stage/sink API for free.
 
+!!! note
+    **Adapters are written in Rust** for performance. Python users consume
+    data through `rypipe.read()` and the pipeline API without writing Rust.
+    Only adapter authors need to implement the Rust `Splitter` and
+    `RecordParser` traits (see [Writing a format adapter](./writing-adapters.md)).
+
 ## Building the Python module
 
 ```bash

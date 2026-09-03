@@ -37,7 +37,7 @@ The boolean specialization `to_arrow_bool()` packs `Vec<bool>` into
 ### Missing columns
 
 In `engines_to_record_batches`, columns present in some chunks but missing
-in others become `null_array(&types[name], e.row_count)` — a `NullArray`
+in others become `null_array(&types[name], e.row_count)`: a `NullArray`
 of the unified type. This is a block fill, not per-cell.
 
 ### Value::Null and unparseable strings
@@ -82,9 +82,9 @@ O(n) in offsets, not in bytes.
 
 When a `Value::Str` is pushed to a typed column, the string is parsed:
 
-- **Int64**: `lexical::parse::<i64, _>(s.as_bytes())` — fast, SIMD-optimized
+- **Int64**: `lexical::parse::<i64, _>(s.as_bytes())`: fast, SIMD-optimized
 - **Float64**: `lexical::parse::<f64, _>(s.as_bytes())`
-- **Boolean**: `s.parse::<bool>()` — accepts "true"/"false"/"1"/"0"
+- **Boolean**: `s.parse::<bool>()`: accepts "true"/"false"/"1"/"0"
 - **Date32**: `chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")` minus Unix epoch
 - **Timestamp**: tries `"%Y-%m-%dT%H:%M:%S%.f"`, then
   `"%Y-%m-%d %H:%M:%S%.f"`, then bare date as midnight. Converts via `and_utc()` to the target TimeUnit.
@@ -126,15 +126,15 @@ Used in `merge::extend` and `engines_to_record_batches`.
 
 `TableBuilder::finish()` does:
 
-1. **normalize** — truncate any column with `len > row_count` (partial row
+1. **normalize**: truncate any column with `len > row_count` (partial row
    from truncated chunk), clear `row_dirty`. Idempotent.
 2. Early return with `RecordBatch::new_empty` if `column_order` is empty.
-3. **auto_dict_upgrade** — if `plan.auto_dict`, iterate columns and upgrade
+3. **auto_dict_upgrade**: if `plan.auto_dict`, iterate columns and upgrade
    String builders with low cardinality to Dictionary. Threshold: 5% distinct
    ratio, max 256 entries, min 512 rows.
-4. **sort_columns** — reorder `column_order` by `schema_order` rank. Does
+4. **sort_columns**: reorder `column_order` by `schema_order` rank. Does
    not reorder `columns` or `field_index`; those stay insertion-ordered.
-5. **Build fields + arrays** — iterate `column_order`, look up each builder
+5. **Build fields + arrays**: iterate `column_order`, look up each builder
    via `field_index`, call `arrow_datatype` and `to_arrow_array`.
 6. **Schema::new(fields)** + **RecordBatch::try_new**.
 
