@@ -247,7 +247,8 @@ pub fn ladder<S: Splitter, P: RecordParser>(
     let mb = bytes.len() as f64 / 1_000_000.0;
 
     // Tier 1: Noop
-    let (t_noop, cov_noop, _n) = bench_tier::<S, P, NoopSink>(splitter, parser, bytes, &mut NoopSink, rounds);
+    let (t_noop, cov_noop, _n) =
+        bench_tier::<S, P, NoopSink>(splitter, parser, bytes, &mut NoopSink, rounds);
 
     // Tier 2: Traverse
     let (t_trav, cov_trav, _n) =
@@ -274,7 +275,9 @@ pub fn ladder<S: Splitter, P: RecordParser>(
     let (t_full, cov_full, n) = bench_tier(splitter, parser, bytes, &mut tb, rounds);
 
     let times = [t_noop, t_trav, t_loc, t_ext, t_push, t_build, t_full];
-    let covs = [cov_noop, cov_trav, cov_loc, cov_ext, cov_push, cov_build, cov_full];
+    let covs = [
+        cov_noop, cov_trav, cov_loc, cov_ext, cov_push, cov_build, cov_full,
+    ];
     let names = [
         "scan_only",
         "traverse",

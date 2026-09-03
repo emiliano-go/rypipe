@@ -37,7 +37,7 @@ pub mod value;
 pub use arrow_export::apply_compare_filter;
 pub use bounded::MemoryBudget;
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
-pub use decoder::{ColumnarSink, RecordParser, Splitter, split_points_to_ranges};
+pub use decoder::{split_points_to_ranges, ColumnarSink, RecordParser, Splitter};
 pub use engine::{LocateOnly, TableBuilder};
 #[cfg(feature = "profile")]
 pub use engine::{
