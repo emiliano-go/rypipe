@@ -42,10 +42,10 @@ rypipe-csv/
 
 ```toml
 [dependencies]
-rypipe-core = "0.1"
+rypipe-core = "2.0"
 
 # Only if you build Python bindings:
-rypipe-python = "0.1"
+rypipe-python = "2.0"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 ```
 
