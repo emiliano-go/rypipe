@@ -22,15 +22,15 @@ pub struct ExecutionPlan {
 
 ### Fields
 
-- **`field_map`** — Rename mapping: raw name → output name.
-- **`drop_fields`** — Fields to drop entirely (not stored).
-- **`field_types`** — Type overrides (Int64, Float64, Bool, Dictionary, etc.).
-- **`dictionary_columns`** — Explicit dictionary columns.
-- **`filter`** — Composable predicate tree.
-- **`schema_order`** — Desired output column order.
-- **`auto_dict`** — Enable automatic dictionary upgrade.
-- **`dict_threshold`** — Max distinct ratio (default 0.05).
-- **`dict_max_size`** — Max dictionary entries (default 256).
+- **`field_map`**: Rename mapping: raw name → output name.
+- **`drop_fields`**: Fields to drop entirely (not stored).
+- **`field_types`**: Type overrides (Int64, Float64, Bool, Dictionary, etc.).
+- **`dictionary_columns`**: Explicit dictionary columns.
+- **`filter`**: Composable predicate tree.
+- **`schema_order`**: Desired output column order.
+- **`auto_dict`**: Enable automatic dictionary upgrade.
+- **`dict_threshold`**: Max distinct ratio (default 0.05).
+- **`dict_max_size`**: Max dictionary entries (default 256).
 
 ## Builder API
 

@@ -21,14 +21,14 @@ reused across files and modes.
 
 ### Methods
 
-- `new(splitter, parser)` — Creates with default plan.
-- `with_plan(plan)` — Replaces the plan (builder pattern).
-- `read_bytes(bytes)` — Single-threaded: one `TableBuilder`, one `parse_chunk`.
-- `read_bytes_par(bytes, num_chunks)` — Parallel via `ParallelExecutor`.
-- `read_bytes_stream(bytes, budget)` — Bounded-memory via `BoundedExecutor`.
-- `read_path(path, use_mmap, prefault)` — Opens file, calls `read_bytes`.
-- `read_path_par(path, num_chunks, use_mmap, prefault)` — Opens file, calls parallel.
-- `read_path_stream(path, budget, prefault)` — Opens file, calls bounded.
+- `new(splitter, parser)`: Creates with default plan.
+- `with_plan(plan)`: Replaces the plan (builder pattern).
+- `read_bytes(bytes)`: Single-threaded: one `TableBuilder`, one `parse_chunk`.
+- `read_bytes_par(bytes, num_chunks)`: Parallel via `ParallelExecutor`.
+- `read_bytes_stream(bytes, budget)`: Bounded-memory via `BoundedExecutor`.
+- `read_path(path, use_mmap, prefault)`: Opens file, calls `read_bytes`.
+- `read_path_par(path, num_chunks, use_mmap, prefault)`: Opens file, calls parallel.
+- `read_path_stream(path, budget, prefault)`: Opens file, calls bounded.
 
 All six methods share the same splitter, parser, and plan. The adapter
 implements `Splitter` and `RecordParser` once; the engine handles the rest.

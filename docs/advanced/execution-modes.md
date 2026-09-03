@@ -71,6 +71,33 @@ Parallel streaming (`ParallelStreamingExecutor` `crates/rypipe-core/src/parallel
 3. Worker pool (`std::thread` or `rayon` `ThreadPool`) pulls `Range` + `seq` from a queue, parses into `TableBuilder`, sends `(seq, Result<RecordBatch>)` via `sync_channel(max_in_flight)` (backpressure).
 4. Coordinator orders by `seq` via `BTreeMap` pending and delivers to `BatchConsumer` in file order.
 
+### In-flight management
+
+The key to bounded memory is the **in-flight cap**: at most `threads × 2` chunks are being parsed concurrently. This works as follows:
+
+```
+Main thread                Worker pool              Coordinator
+──────────                ───────────              ───────────
+                           ┌─ thread 1 ──┐
+submit chunk 0 ──────────►│  parse chunk │──► channel ──┐
+submit chunk 1 ──────────►│  parse chunk │──► channel    │
+                           └──────────────┘              │
+                           ┌─ thread 2 ──┐              │
+submit chunk 2 ──────────►│  parse chunk │──► channel    ├──► BTreeMap
+submit chunk 3 ──────────►│  parse chunk │──► channel    │    pending
+                           └──────────────┘              │    (ordered
+                                                         │     by seq)
+                           ... (max 2 chunks/thread) ... │
+                                                         │
+                                          deliver in order ◄── file_order
+                                          to BatchConsumer
+```
+
+- **Backpressure**: the `sync_channel(max_in_flight)` blocks the main thread when the channel is full, preventing more than `threads × 2` chunks from being in flight at once.
+- **Ordering**: results arrive out of order (faster chunks finish first). The coordinator uses a `BTreeMap<u64, Result<RecordBatch>>` keyed by sequence number to deliver batches in file order.
+- **Memory**: each chunk's `TableBuilder` is dropped after its `RecordBatch` is sent. Peak memory is `budget + threads × 2 × chunk_size`, which stays near the configured budget.
+- **Error handling**: if any chunk panics or returns an error, the entire stream is aborted. `catch_unwind` at the worker level prevents a single bad chunk from crashing the process.
+
 Use parallel streaming when:
 
 - the file is large and you want bounded memory, but have ≥256 MB budget and multiple cores;

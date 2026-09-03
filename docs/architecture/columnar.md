@@ -18,36 +18,36 @@ without per-cell `String` allocation.
 
 ### Fields
 
-- **`data: Vec<u8>`** — One contiguous arena. Every string's bytes are
+- **`data: Vec<u8>`**: One contiguous arena. Every string's bytes are
   appended sequentially. No per-cell allocation.
 
-- **`offsets: Vec<i32>`** — `len + 1` entries. `offsets[i]..offsets[i+1]`
+- **`offsets: Vec<i32>`**: `len + 1` entries. `offsets[i]..offsets[i+1]`
   is the byte range for value `i`. Initialized with `[0]` so `push` can
   compute the next offset as `data.len()`.
 
-- **`validity: ValidityBitmap`** — One bit per row. `true` means present;
+- **`validity: ValidityBitmap`**: One bit per row. `true` means present;
   `false` means null (no bytes for that slot, but offsets still advance by 0).
 
 ### Operations
 
-- **`with_capacity(cap)`** — Preallocates `offsets` with `cap + 1` and
+- **`with_capacity(cap)`**: Preallocates `offsets` with `cap + 1` and
   `data` with `cap * 16` (heuristic 16 bytes per string).
 
-- **`push(Option<&str>)`** — Extends `data` if `Some`, pushes `data.len()`
+- **`push(Option<&str>)`**: Extends `data` if `Some`, pushes `data.len()`
   to `offsets`, pushes `is_some` to `validity`. No per-cell allocation
   beyond arena growth.
 
-- **`pop`** — Undoes the last push: pops validity, pops offsets, truncates
+- **`pop`**: Undoes the last push: pops validity, pops offsets, truncates
   data to the last offset.
 
-- **`get(i)`** — Checks validity, slices `data[offsets[i]..offsets[i+1]]`,
+- **`get(i)`**: Checks validity, slices `data[offsets[i]..offsets[i+1]]`,
   returns `Option<&str>`.
 
-- **`append(&mut self, other)`** — Merges another column by base-shifting
+- **`append(&mut self, other)`**: Merges another column by base-shifting
   offsets: `base = self.data.len() as i32`, then extends offsets. O(n) in
   offsets, not in bytes.
 
-- **`to_arrow()`** — Builds Arrow `StringArray` by wrapping three buffers
+- **`to_arrow()`**: Builds Arrow `StringArray` by wrapping three buffers
   with `OffsetBuffer`, `ScalarBuffer`, `Buffer`, and `NullBuffer`. Block
   copy, not per-cell.
 
@@ -190,16 +190,16 @@ Cost: ~5 ns per numeric value. No parsing overhead for typed values.
 ### Dictionary push
 
 `dict_code` does:
-1. `index.get(v)` — HashMap lookup (~5 ns)
+1. `index.get(v)`: HashMap lookup (~5 ns)
 2. If missing: `dict.push(v.to_owned())` + `index.insert` (~20 ns amortized)
-3. `codes.push(Some(code))` — NullableColumn push
+3. `codes.push(Some(code))`: NullableColumn push
 
 Cost: ~5 ns per value (amortized O(1) lookup).
 
 ### Arrow export
 
 `to_arrow_array` uses `std::mem::take` to move internal buffers into Arrow
-arrays. This is zero-copy — no data copying, just pointer moves.
+arrays. This is zero-copy, no data copying, just pointer moves.
 
 For `StrColumn`: moves `data`, `offsets`, and `validity` into `StringArray`.
 For `PrimColumn<T>`: moves `data` and `validity` into `PrimitiveArray`.

@@ -28,6 +28,110 @@ The engine handles:
 
 See [Architecture](../architecture/) for how these pieces interact internally.
 
+## Hello World: complete runnable adapter
+
+Here is a minimal, complete adapter for a newline-delimited `key=value` log
+format. This is the smallest possible rypipe adapter:
+
+### Rust: `src/lib.rs`
+
+```rust
+use std::borrow::Cow;
+use rypipe_core::{Splitter, RecordParser, ColumnarSink, Value, Result};
+
+// --- Splitter: find newline boundaries ---
+#[derive(Clone, Default)]
+pub struct LogSplitter;
+
+impl Splitter for LogSplitter {
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        memchr::memchr(b'\n', &bytes[from..]).map(|r| from + r + 1)
+    }
+
+    fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+        let n = sample.iter().filter(|&&b| b == b'\n').count().max(1);
+        (sample.len() / n).max(1)
+    }
+}
+
+// --- RecordParser: extract fields from each line ---
+#[derive(Clone, Default)]
+pub struct LogParser;
+
+impl RecordParser for LogParser {
+    fn validate(&self, bytes: &[u8]) -> Result<()> {
+        simdutf8::basic::from_utf8(bytes).map_err(rypipe_core::Error::Utf8)?;
+        Ok(())
+    }
+
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        for line in text.lines() {
+            if line.is_empty() { continue; }
+            sink.begin_row();
+            for part in line.split(',') {
+                if let Some((k, v)) = part.split_once('=') {
+                    if sink.wants(k) {
+                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
+                    }
+                }
+            }
+            sink.end_row();
+        }
+        Ok(())
+    }
+}
+```
+
+### Python registration: `my_adapter/__init__.py`
+
+```python
+import rypipe
+
+class LogAdapter(rypipe.Adapter):
+    def read(self, path, **kwargs):
+        return _rypipe_log.read_log(path, **kwargs)
+
+rypipe.register_adapter("log", LogAdapter, extensions=[".log"])
+```
+
+### Usage
+
+```python
+import rypipe
+import my_adapter  # registers the "log" adapter
+
+table = rypipe.read("app.log")
+df = (
+    rypipe.read("app.log")
+    | rypipe.RenameFields({"host": "server"})
+    | rypipe.FilterRows(field="level", op="==", value="ERROR")
+).to_dataframe()
+```
+
+## Implementing `plan_overrides` for fusion
+
+Adapters that subclass `rypipe.Source` receive fused plan kwargs through
+`_read_arrow`. This is how fusion stays active through your adapter:
+
+```python
+from rypipe import Source
+
+class MySource(Source):
+    def _read_arrow(self, *, plan_overrides=None, **kwargs):
+        # plan_overrides contains the fused stage kwargs:
+        # {"field_mapping": {...}, "drop_fields": [...], "filter": {...}, ...}
+        plan = self._build_plan_kwargs()
+        if plan_overrides:
+            plan.update(plan_overrides)
+        # Pass the merged plan to your Rust reader:
+        return my_rust_read(str(self._path), **plan)
+```
+
+If you ignore `plan_overrides`, fused stages silently fall back to Python
+execution over a full table. Always forward them.
+
 ## Adapter crate layout
 
 ```
@@ -99,7 +203,7 @@ for comment/CDATA handling, and [Chunk planning](./chunk-planning.md) for the
 |------|-------|---------------|
 | [Splitter](./splitter.md) | ~200 | Finding chunk boundaries, `next_record_start`, default `find_split_points` |
 | [Parser](./parser.md) | ~200 | `RecordParser` trait, `parse_chunk`, `parse_chunk_generic`, performance tips |
-| [Sink](./sink.md) | ~350 | `ColumnarSink` — all 21 methods, fast paths, projection, layout prediction |
+| [Sink](./sink.md) | ~350 | `ColumnarSink`: all 21 methods, fast paths, projection, layout prediction |
 | [Scan primitives](./scan.md) | ~150 | `find`, `find2`, `starts_with`, `find_literal` |
 | [Skip regions](./skip-regions.md) | ~100 | `SkipRegionFinder` for comments, CDATA, quoted fields |
 | [Chunk planning](./chunk-planning.md) | ~100 | `plan_chunk_count`, `MIN_CHUNK_BYTES`, thread caps |

@@ -62,7 +62,7 @@ engine implements this trait internally.
 
 The engine provides four push methods, from fastest to slowest:
 
-### 1. `put_field_at(slot, value)` — fastest
+### 1. `put_field_at(slot, value)`: fastest
 
 Direct slot push. No name resolution, no hash lookup. Used by the
 `expect_slot` path after the layout is learned.
@@ -74,7 +74,7 @@ expect_slot(ordinal) → Some((slot, expected))
 
 **Cost:** ~5 ns per field (column write + dirty bit set).
 
-### 2. `put_field_resolved(name, value)` — fast
+### 2. `put_field_resolved(name, value)`: fast
 
 Skips the rename lookup. Used when you've already called `resolve()`.
 
@@ -85,7 +85,7 @@ resolve(name) → Some(resolved)
 
 **Cost:** ~10 ns per field (single HashMap lookup + column write).
 
-### 3. `resolve_and_put(name, value)` — medium
+### 3. `resolve_and_put(name, value)`: medium
 
 Single resolve + push. Default implementation.
 
@@ -96,7 +96,7 @@ resolve(name) → Some(resolved)
 
 **Cost:** ~15 ns per field (HashMap lookup + column write).
 
-### 4. `put_field(name, value)` — slowest
+### 4. `put_field(name, value)`: slowest
 
 Full resolve + push. The engine calls `resolve_field(name)` which checks
 rename map, then drop set, then returns the output name.

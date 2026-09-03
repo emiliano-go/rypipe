@@ -29,48 +29,48 @@ pub struct TableBuilder {
 
 ### Field explanations
 
-- **`columns: Vec<ColumnBuilder>`** — Dense column storage. Indexing
+- **`columns: Vec<ColumnBuilder>`**: Dense column storage. Indexing
   `columns[idx]` is a bounds-checked array access, not a hash probe. This
   replaces the earlier `HashMap<String, ColumnBuilder>` that required two
   hashes per field. See [Optimizations](./optimizations.md).
 
-- **`field_index: HashMap<String, usize>`** — Maps resolved column name to
+- **`field_index: HashMap<String, usize>`**: Maps resolved column name to
   `Vec` index. One hash per field in steady state. Uses `FxHashMap`
   (rustc_hash) for speed on short strings.
 
-- **`column_order: Vec<String>`** — Records first appearance order, then
+- **`column_order: Vec<String>`**: Records first appearance order, then
   reordered by `schema_order` in `sort_columns`. Independent of `Vec` order.
   `schema_insert_index` computes insertion position for new columns.
 
-- **`row_count: usize`** — Number of committed rows. A row is not counted
+- **`row_count: usize`**: Number of committed rows. A row is not counted
   until `finish_row` succeeds (including filter evaluation).
 
-- **`row_dirty: Vec<u64>`** — Bitmask word array. `(columns.len() + 63) / 64`
+- **`row_dirty: Vec<u64>`**: Bitmask word array. `(columns.len() + 63) / 64`
   words. A set bit at column `i` means the column received a value in the
   current uncommitted row. Enables null-fill of only missing columns and
   avoids per-column `while len < target` checks.
 
-- **`estimated_rows: usize`** and **`plan: Arc<ExecutionPlan>`** — Carried
+- **`estimated_rows: usize`** and **`plan: Arc<ExecutionPlan>`**: Carried
   from `Pipeline::with_plan` for capacity hints and per-row decisions.
 
-- **`frozen: Option<Arc<FrozenSchema>>`** — When set (parallel streaming),
+- **`frozen: Option<Arc<FrozenSchema>>`**: When set (parallel streaming),
   enforces that no unknown fields appear. Discovered via sampled windows.
 
-- **`row_buf: Option<Box<RowBuffer>>`** — Predicate-first buffer. Only
+- **`row_buf: Option<Box<RowBuffer>>`**: Predicate-first buffer. Only
   allocated when `plan.filter` is `Some`. Boxed to avoid 1 KB of inline
   SmallVec in every unfiltered `TableBuilder`.
 
-- **`ordinal_expect: Vec<Option<(u32, Vec<u8>)>>`** — Per-ordinal layout
+- **`ordinal_expect: Vec<Option<(u32, Vec<u8>)>>`**: Per-ordinal layout
   cache for the expect_slot fast path. Populated on first row.
 
-- **`current_ordinal: u32`** — Tracks which ordinal is being processed
+- **`current_ordinal: u32`**: Tracks which ordinal is being processed
   within the current row.
 
 ## Constructors
 
-- **`new()`** — Empty, default plan.
-- **`with_capacity(cap)`** — Pre-sizes column storage.
-- **`with_plan(cap, plan)`** — Pre-sizes with a specific plan. The filter
+- **`new()`**: Empty, default plan.
+- **`with_capacity(cap)`**: Pre-sizes column storage.
+- **`with_plan(cap, plan)`**: Pre-sizes with a specific plan. The filter
   plan determines whether `row_buf` is allocated.
 
 All constructors initialize the three vectors and the map as empty.

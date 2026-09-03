@@ -192,9 +192,9 @@ Arrow RecordBatch                  ← zero-copy export
 Return `Err` from `parse_chunk` to abort parsing. The engine will propagate
 the error to the caller. Common error types:
 
-- `rypipe_core::Error::Utf8` — invalid UTF-8 in input
-- `rypipe_core::Error::Plan` — invalid plan or configuration
-- `rypipe_core::Error::Io` — I/O error
+- `rypipe_core::Error::Utf8`: invalid UTF-8 in input
+- `rypipe_core::Error::Plan`: invalid plan or configuration
+- `rypipe_core::Error::Io`: I/O error
 
 Do not panic in `parse_chunk`. Panics are caught by `catch_unwind` in the
 parallel executor, but they abort the entire parse.
