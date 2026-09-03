@@ -180,7 +180,7 @@ finish: sort by schema_order, auto-dict, Arrow export
 ```
 
 Because drop happens before type selection, you cannot cast a dropped field.
-Because every filter : including column-to-column comparisons : runs before the
+Because every filter, including column-to-column comparisons, runs before the
 row is committed, rejected rows consume no Arrow storage.
 
 ## When fusion does not help

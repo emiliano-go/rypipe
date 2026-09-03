@@ -72,7 +72,7 @@ let plan = ExecutionPlan::new()
 Casting during parse is especially important for filters. When both sides of a
 column-to-column comparison (`Compare`) are stored as `Int64` or `Float64`, the
 engine compares them natively per-row during parsing with numeric promotion
-(Int64 vs Float64 widens to f64) : no Python-level comparisons and no
+(Int64 vs Float64 widens to f64), no Python-level comparisons and no
 post-assembly pass.
 
 If the columns are left as strings, the comparison falls back to string
