@@ -356,7 +356,7 @@ fn bench_tier<S: Splitter, P: RecordParser, Sink: ColumnarSink>(
     bytes: &[u8],
     sink: &mut Sink,
     rounds: usize,
-) -> (f64, usize) {
+) -> (f64, f64, usize) {
     let mut times: Vec<f64> = Vec::with_capacity(rounds);
     for _ in 0..rounds {
         let start = Instant::now();
