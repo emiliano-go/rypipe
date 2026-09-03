@@ -94,6 +94,7 @@ impl MemoryBudget {
 ### plan_chunks
 
 Estimates chunk sizes from budget:
+
 1. `bytes_per_row = splitter.estimate_bytes_per_row(bytes).max(1)`
 2. `total_rows_est = bytes.len() / bytes_per_row`
 3. `rows_per_batch = (budget.bytes() / bytes_per_row).max(1).min(total_rows_est)`
@@ -106,6 +107,7 @@ Estimates chunk sizes from budget:
 ### run_bytes
 
 For each chunk:
+
 1. Slice `&bytes[chunk.start..chunk.end]`
 2. Create per-chunk `TableBuilder`
 3. `validate` + `parse_chunk`
@@ -115,6 +117,7 @@ For each chunk:
 ### run (file-based)
 
 Opens `InputBuffer`. If `Mmap`:
+
 1. `plan_chunks` on the mapped slice
 2. Drop the mapping
 3. Reopen file, `seek` + `read_exact` per chunk
@@ -172,6 +175,7 @@ open(path, use_mmap, prefault):
 ### extend
 
 Merges another `TableBuilder` into self:
+
 1. Create missing columns with null backfill
 2. For each column in order: check variant equality, promote if needed
    (`int64` → `float64`, `string` → `dictionary`), then `extend_owned`
@@ -180,6 +184,7 @@ Merges another `TableBuilder` into self:
 ### engines_to_record_batches
 
 Exports per-chunk builders without serial merge:
+
 1. Normalize and retain non-empty builders
 2. Unify schema via `unify_variants` + `promote_to_variant`
 3. `par_iter` over engines to build arrays per unified order
@@ -192,6 +197,7 @@ Arrow compute kernels. Other filter trees are returned unchanged because
 per-row evaluation is authoritative.
 
 The filter works by:
+
 1. Checking `is_pure_compare_tree` (no Or/Not/Equal/NotEqual)
 2. Building a boolean mask via `compare_columns` (cast to Float64 or Utf8,
    then gt/lt/eq/neq/and)

@@ -178,8 +178,9 @@ parse_chunk → begin_row → [put_field × N] → end_row → [repeat]
 ```
 
 Each `put_field` call goes through:
+
 1. **Scan**: find the field's byte extent in the input (your parser does this)
-2. **Resolve**: map raw name → output column name (engine does this)
+2. **Resolve**: map raw name to output column name (engine does this)
 3. **Push**: write the value into the column builder (engine does this)
 4. **Filter**: check if the row passes the predicate (engine does this)
 
