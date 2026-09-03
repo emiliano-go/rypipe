@@ -201,3 +201,15 @@ See [Sink](./sink.md) for the full method reference and fast paths.
 See [Scan primitives](./scan.md) for byte-searching, [Skip regions](./skip-regions.md)
 for comment/CDATA handling, and [Chunk planning](./chunk-planning.md) for the
 2 MiB floor that prevents sub-MB chunk collapse.
+
+## Pages
+
+| Page | What it covers |
+|------|---------------|
+| [Splitter](./splitter.md) | Finding chunk boundaries, `next_record_start`, default `find_split_points` |
+| [Parser](./parser.md) | `RecordParser` trait, `parse_chunk`, `parse_chunk_generic`, performance tips |
+| [Sink](./sink.md) | `ColumnarSink`: all 21 methods, fast paths, projection, layout prediction |
+| [Scan primitives](./scan.md) | `find`, `find2`, `starts_with`, `find_literal` |
+| [Skip regions](./skip-regions.md) | `SkipRegionFinder` for comments, CDATA, quoted fields |
+| [Chunk planning](./chunk-planning.md) | `plan_chunk_count`, `MIN_CHUNK_BYTES`, thread caps |
+| [Examples](./examples.md) | Worked CSV, JSONL, and TSV adapters |
