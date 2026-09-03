@@ -34,7 +34,14 @@ static HAS_AVX2: OnceLock<bool> = OnceLock::new();
 /// Returns true if the current CPU supports AVX2.
 #[inline]
 pub fn avx2() -> bool {
-    *HAS_AVX2.get_or_init(|| is_x86_feature_detected!("avx2"))
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        *HAS_AVX2.get_or_init(|| is_x86_feature_detected!("avx2"))
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
