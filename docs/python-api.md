@@ -293,8 +293,9 @@ for batch in src.iter_arrow_batches(batch_size=10_000):
 ```
 
 `read_batches` and `iter_arrow_batches` yield Arrow record batches one at a
-time. Memory is bounded during parsing; batches are currently produced from a
-materialized table, so peak memory is not yet fully incremental.
+time. Parsing memory is bounded independently of input-file size; the current
+Python batch iterator may still materialize the bounded result set before
+yielding individual batches.
 
 ## See also
 

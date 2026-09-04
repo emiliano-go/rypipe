@@ -20,7 +20,8 @@ Input bytes
 
 The engine handles:
 - **Parallel execution** via rayon: split the file, parse chunks concurrently
-- **Bounded-memory streaming**: constant RSS regardless of file size
+- **Bounded-memory streaming**: parsing memory is independent of file size;
+  the Python batch iterator may still materialize the bounded result set
 - **Pushdown plans**: rename, drop, filter, type coercion, dictionary encoding
 - **Zero-copy Arrow export**: move column buffers directly into Arrow arrays
 - **Schema discovery**: find field names from a sample of the file
