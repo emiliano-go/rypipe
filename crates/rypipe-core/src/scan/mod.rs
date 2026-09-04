@@ -32,6 +32,7 @@ use std::sync::OnceLock;
 static HAS_AVX2: OnceLock<bool> = OnceLock::new();
 
 /// Returns true if the current CPU supports AVX2.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn avx2() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
