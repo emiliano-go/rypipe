@@ -74,7 +74,7 @@ The RecordParser extracts field values from each row:
 
 ```rust
 // The RecordParser turns raw bytes into field/value events.
-// parse_chunk is called once per chunk — this is the hot path.
+// parse_chunk is called once per chunk: this is the hot path.
 #[derive(Clone, Default)]
 pub struct LogParser;
 
@@ -123,7 +123,7 @@ impl RecordParser for LogParser {
 
 Always check `sink.wants(key)` before parsing a field's value. When the user
 drops a column, `wants()` returns `false` and you skip all work for that
-field — no scanning, no decoding.
+field: no scanning, no decoding.
 
 ///
 
@@ -243,7 +243,7 @@ class LogAdapter:
 def _register() -> None:
     try:
         import rypipe
-    except Exception:  # pragma: no cover — rypipe is optional
+    except Exception:  # pragma: no cover: rypipe is optional
         return
     rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
 
@@ -283,16 +283,18 @@ with open("test.log", "w") as f:
     f.write("name=Alice,age=30,active=true\n")
     f.write("name=Bob,age=25,active=false\n")
 
-# Pattern 1: one-liner via rypipe (extension auto-detected) { #pattern-1-one-liner-via-rypipe }
+# Pattern 1: one-liner via rypipe (extension auto-detected)
+# Users only need `import rypipe` + `import rypipe_log` for one-liner reads.
 table = rypipe.read("test.log")
 print(table)
-# pyarrow.Table<name: string, age: string, active: string> { #pyarrowtablename-string-age-string-active-string }
+# pyarrow.Table<name: string, age: string, active: string>
 # ----
 # name: ["Alice", "Bob"] { #name-alice-bob }
 # age: ["30", "25"] { #age-30-25 }
 # active: ["true", "false"] { #active-true-false }
 
-# Pattern 2: pipeline via LogSource + repacked stages { #pattern-2-pipeline-via-logsource-repacked-stages }
+# Pattern 2: pipeline via LogSource + repacked stages
+# Everything comes from the adapter: users never import stages from rypipe.
 from rypipe_log import LogSource, CastTypes, FilterRows
 
 src = LogSource("test.log")
@@ -319,19 +321,19 @@ print(result)
 
 ## Next steps { #next-steps }
 
-* [Python Wiring](./python-wiring.md) — Source, adapter, registration,
+* [Python Wiring](./python-wiring.md): Source, adapter, registration,
   stages, streaming
-* [Rust Creation](./rust-creation.md) — deep dive into Splitter, RecordParser,
+* [Rust Creation](./rust-creation.md): deep dive into Splitter, RecordParser,
   and ColumnarSink
-* [Schema](./schema.md) — declare columns for maximum performance
-* [Techniques](./techniques.md) — performance optimizations
-* [Examples](./examples.md) — worked CSV, JSONL, and TSV adapters
+* [Schema](./schema.md): declare columns for maximum performance
+* [Techniques](./techniques.md): performance optimizations
+* [Examples](./examples.md): worked CSV, JSONL, and TSV adapters
 
 /// warning
 
 The `LogSource._read_arrow` method **must** forward `plan_overrides` to the
 Rust reader. If you ignore them, fused pipeline stages silently fall back
-to Python execution — 10–50× slower than the Rust path.
+to Python execution: 10–50× slower than the Rust path.
 
 ///
 
@@ -340,7 +342,7 @@ to Python execution — 10–50× slower than the Rust path.
 * An adapter is a Rust crate (Splitter + RecordParser) and a Python package
   (Source + Adapter + stages).
 * The engine handles parallel execution, memory management, and Arrow export.
-* Users import everything from the adapter package — never from **rypipe**
+* Users import everything from the adapter package: never from **rypipe**
   directly.
 * `rypipe.read("file.log")` works via the registered adapter.
 * `LogSource("file.log") | CastTypes(...) | FilterRows(...)` works via the

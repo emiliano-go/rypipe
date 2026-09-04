@@ -253,7 +253,7 @@ instance via `begin_row`/`end_row` lifecycle. The engine creates one
 
 The `begin_row`/`end_row` lifecycle means you can safely use non-atomic
 mutable state in your sink (e.g., counters, buffers). The engine never
-shares a sink instance across threads — it clones or creates per-chunk.
+shares a sink instance across threads: it clones or creates per-chunk.
 
 ///
 
@@ -261,6 +261,6 @@ shares a sink instance across threads — it clones or creates per-chunk.
 
 If you implement a custom `ColumnarSink` and share it across threads via
 `&dyn ColumnarSink`, you will hit data races. Always let the engine manage
-sink instances — one per chunk, never shared.
+sink instances: one per chunk, never shared.
 
 ///

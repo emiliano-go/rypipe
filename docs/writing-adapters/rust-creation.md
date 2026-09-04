@@ -134,7 +134,7 @@ entities or normalize encoding).
 
 `Cow::Borrowed` is safe because the engine copies bytes into Arrow arrays
 before your parse function returns. The borrowed reference never outlives
-the chunk's byte slice — no lifetime issues.
+the chunk's byte slice: no lifetime issues.
 
 ///
 
@@ -152,7 +152,7 @@ Fields can be pushed in any order. The engine handles column reordering.
 // Simpler: two hash probes per field
 if sink.wants(name) { sink.put_field(name, value); }
 
-// Faster: single hash probe — resolve returns the resolved column name
+// Faster: single hash probe: resolve returns the resolved column name
 if let Some(resolved) = sink.resolve(name) {
     sink.put_field_resolved(resolved, value);
 }
@@ -346,7 +346,7 @@ def test_csv_adapter(tmp_path):
 
 Do not allocate `String` objects in the hot path. Every `Cow::Owned`
 allocation costs ~100 ns. For 10 million fields, that's 1 second of pure
-allocation overhead — easily avoidable with `Cow::Borrowed`.
+allocation overhead: easily avoidable with `Cow::Borrowed`.
 
 ///
 

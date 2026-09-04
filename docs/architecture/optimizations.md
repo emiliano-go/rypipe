@@ -16,7 +16,7 @@ one hash, one bit set, one conditional pop, and one push_value.
 
 **Impact:** Eliminates the second hash probe for every field. For 10 fields
 per row at ~10 ns per hash, this saves ~100 ns per row. On a 533 MB file
-with ~480K rows, that's ~48 ms saved.
+with ~480K rows, that is ~48 ms saved.
 
 ## 2. Dirty bitmask null-fill (2C-S2) { #2-dirty-bitmask-null-fill }
 
@@ -147,7 +147,7 @@ scanned entire file for `<!` (25% overhead).
 **After:** Default `find_split_points` uses `next_record_start` + rayon +
 skip-region rejection + dedup + chunk floor (2 MiB minimum).
 
-**Impact:** Eliminates the bug class. +13-32% on projection workloads.
+**Impact:** Eliminates the bug class: +13-32% on projection workloads.
 
 ## 12. Incremental dictionary unification { #12-incremental-dictionary-unification }
 
@@ -157,7 +157,7 @@ All chunks must be merged before dict upgrade.
 **After:** Per-chunk upgrade in parallel, then `unify_dictionaries` +
 `remap_codes` (O(dict_size), not O(rows)).
 
-**Impact:** auto_dict parallel gap: 45% → 16%.
+**Impact:** auto_dict parallel gap: 45% to 16%.
 
 ## Summary table { #summary-table }
 

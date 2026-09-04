@@ -6,9 +6,9 @@ This page is a reference for all **rypipe** options and kwargs.
 
 ```python
 rypipe.read(
-    path,                          # str or Path — file path (required)
+    path,                          # str or Path: file path (required)
     *,                             # keyword-only from here
-    format=None,                   # str — adapter name (e.g. "crxml")
+    format=None,                   # str: adapter name (e.g. "crxml")
     adapter=None,                  # adapter object with read() method
     **kwargs,                      # forwarded to the adapter
 )
@@ -21,7 +21,7 @@ rypipe.read(
 | `path` | `str \| PathLike` | *(required)* | Path to the input file. |
 | `format` | `str \| None` | `None` | Adapter name. When omitted, inferred from the file extension. |
 | `adapter` | `Any \| None` | `None` | Adapter object with a `read(path, **kwargs)` method. Overrides `format`. |
-| `**kwargs` | — | — | Forwarded to the adapter. Each adapter defines its own kwargs. |
+| `**kwargs` | : | : | Forwarded to the adapter. Each adapter defines its own kwargs. |
 
 ### Common adapter kwargs { #common-adapter-kwargs}
 
@@ -53,17 +53,17 @@ When using a Source class directly:
 from crxml import CrystalXMLSource
 
 src = CrystalXMLSource(
-    path,                          # str or Path — file path (required)
+    path,                          # str or Path: file path (required)
     *,
-    field_mapping=None,            # dict[str, str] — rename columns
-    drop_fields=None,              # list[str] — columns to skip
-    filter=None,                   # dict — pushdown filter spec
-    field_types=None,              # dict[str, str] — type hints
-    dictionary_columns=None,       # list[str] — dict-encode columns
-    schema=None,                   # list[str] — expected column order
-    auto_dict=False,               # bool — auto-dictionary encoding
-    use_mmap=True,                 # bool — use memory-mapped I/O
-    batch_size=1024,               # int — rows per iteration batch
+    field_mapping=None,            # dict[str, str]: rename columns
+    drop_fields=None,              # list[str]: columns to skip
+    filter=None,                   # dict: pushdown filter spec
+    field_types=None,              # dict[str, str]: type hints
+    dictionary_columns=None,       # list[str]: dict-encode columns
+    schema=None,                   # list[str]: expected column order
+    auto_dict=False,               # bool: auto-dictionary encoding
+    use_mmap=True,                 # bool: use memory-mapped I/O
+    batch_size=1024,               # int: rows per iteration batch
 )
 ```
 
@@ -126,8 +126,8 @@ The `filter` parameter accepts a dictionary with these forms:
 
 ```python
 src.iter_record_batches(
-    memory="64MiB",               # str or int — memory budget per chunk
-    batch_size=None,              # int or None — rows per batch
+    memory="64MiB",               # str or int: memory budget per chunk
+    batch_size=None,              # int or None: rows per batch
 )
 ```
 
@@ -144,9 +144,9 @@ Adapter packages call this at import time:
 import rypipe
 
 rypipe.register_adapter(
-    "myfmt",                       # str — adapter name
+    "myfmt",                       # str: adapter name
     MyAdapter(),                   # object with read() method
-    extensions=[".myfmt", ".fmt"], # list[str] — file extensions
+    extensions=[".myfmt", ".fmt"], # list[str]: file extensions
 )
 ```
 

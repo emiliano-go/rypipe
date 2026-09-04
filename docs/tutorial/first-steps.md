@@ -1,6 +1,6 @@
 # First Steps { #first-steps }
 
-This page covers `rypipe.read()` in depth — format inference, keyword
+This page covers `rypipe.read()` in depth: format inference, keyword
 arguments, and schema hints.
 
 ## The basics { #the-basics }
@@ -13,7 +13,7 @@ table = rypipe.read("report.xml", row_tag="Details")
 ```
 
 The `row_tag="Details"` argument is passed through to the **crxml** adapter.
-Each adapter accepts its own kwargs — check the adapter's documentation for
+Each adapter accepts its own kwargs; check the adapter's documentation for
 what it supports.
 
 ## Format inference { #format-inference }
@@ -45,7 +45,7 @@ If no adapter is registered for the extension, **rypipe** raises a
 ## Passing adapter kwargs { #passing-adapter-kwargs }
 
 Any keyword argument you pass to `rypipe.read()` is forwarded to the adapter.
-This means you do not need to learn a separate **rypipe** API — just learn
+This means you do not need to learn a separate **rypipe** API: just learn
 your adapter's options:
 
 ```python
@@ -67,7 +67,7 @@ table = rypipe.read(
 ## Schema hints { #schema-hints }
 
 You can speed up parsing and control column types by passing schema hints.
-These are **adapter-optional** — not all adapters use them, but when they do,
+These are **adapter-optional**: not all adapters use them, but when they do,
 the engine can skip schema discovery:
 
 ```python
@@ -98,7 +98,7 @@ table = rypipe.read(
 
 ## Filtering at read time { #filtering-at-read-time }
 
-Some adapters support pushdown filters — the adapter applies the filter
+Some adapters support pushdown filters: the adapter applies the filter
 during parsing, so rejected rows never reach Python:
 
 ```python
@@ -111,9 +111,9 @@ table = rypipe.read(
 
 The filter spec is a dictionary with:
 
-* `field` — column name
-* `op` — comparison operator (`"=="`, `"!="`, `">"`, `"<"`, `">="`, `"<="`)
-* `value` — the value to compare against
+* `field`: column name
+* `op`: comparison operator (`"=="`, `"!="`, `">"`, `"<"`, `">="`, `"<="`)
+* `value`: the value to compare against
 
 /// note
 
@@ -155,4 +155,4 @@ except rypipe.RypipeError as e:
 * Use `rypipe.ParseError`, `rypipe.PlanError`, `rypipe.MergeError`, or
   `rypipe.RypipeError` for error handling.
 
-**Next:** [Pipeline](pipeline.md#pipeline) — chain stages with the `|` operator.
+**Next:** [Pipeline](pipeline.md#pipeline): chain stages with the `|` operator.

@@ -89,8 +89,6 @@ standalone sink functions from **rypipe**:
 
 ```python
 import rypipe
-from rypipe import collect, to_arrow, to_pandas, to_polars, to_csv, to_parquet
-
 from crxml import CrystalXMLSource, FilterRows
 
 src = CrystalXMLSource("report.xml", row_tag="Details")
@@ -144,11 +142,11 @@ rypipe.to_csv(pipeline, "output.tsv", delimiter="\t", encoding="utf-8")
 
 **Parameters:**
 
-* `pipeline` — iterable of dicts.
-* `path` — output file path.
-* `encoding` — file encoding (default: `"utf-8"`).
-* `delimiter` — column delimiter (default: `","`).
-* `fieldnames` — optional list of column names. If omitted, uses the keys
+* `pipeline`: iterable of dicts.
+* `path`: output file path.
+* `encoding`: file encoding (default: `"utf-8"`).
+* `delimiter`: column delimiter (default: `","`).
+* `fieldnames`: optional list of column names. If omitted, uses the keys
   from the first row.
 
 ### to_parquet() (function) { #to-parquet-function}
@@ -188,5 +186,5 @@ avoid re-parsing.
 * Source methods reuse the cached table. Standalone functions re-parse if
   the pipeline hasn't been materialized yet.
 
-**Next:** [Streaming](streaming.md#streaming) — processing large files with bounded
+**Next:** [Streaming](streaming.md#streaming): processing large files with bounded
 memory.

@@ -10,7 +10,7 @@ Pushdown fusion is the process by which the Python `Pipeline` rewrites a chain o
 ## A fused pipeline { #a-fused-pipeline }
 
 ```python
-from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+from crxml import RenameFields, DropFields, FilterRows, CastTypes
 
 source = MyAdapter("data.log")
 result = (

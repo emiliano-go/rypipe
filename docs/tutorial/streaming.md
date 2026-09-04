@@ -124,7 +124,7 @@ writer = pq.ParquetWriter("output.parquet", schema=None)
 
 for batch in pipeline.iter_record_batches(memory="64MiB"):
     if writer.schema is None:
-        # First batch — initialize the writer with the schema
+        # First batch: initialize the writer with the schema
         writer = pq.ParquetWriter(
             "output.parquet",
             batch.schema,
@@ -176,7 +176,7 @@ smaller files, the default parallel mode is faster.
 * Use `.iter_record_batches(memory="64MiB")` for bounded-memory processing.
 * Peak memory is `memory` + one batch + export buffer.
 * Control batch size with `batch_size` for tuning memory vs overhead.
-* Streaming works with pipelines — fusable stages run in the parse loop.
+* Streaming works with pipelines: fusable stages run in the parse loop.
 * Use `rypipe.iter_record_batches()` for module-level streaming.
 
-**Next:** [Configuration](configuration.md#configuration) — all available options.
+**Next:** [Configuration](configuration.md#configuration): all available options.

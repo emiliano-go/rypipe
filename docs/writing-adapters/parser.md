@@ -95,7 +95,7 @@ borrows from the chunk's byte slice, which lives long enough.
 
 /// note
 
-The chunk's byte slice outlives `parse_chunk` — the engine holds the buffer
+The chunk's byte slice outlives `parse_chunk`: the engine holds the buffer
 while it merges results. Your `Cow::Borrowed` references are valid through
 the entire merge pass, not just during parsing.
 
@@ -152,7 +152,7 @@ discards partial trailing rows automatically during `normalize()`.
 /// warning
 
 If your parser calls `end_row()` on a partial trailing row, the engine will
-keep it — null-filling the missing fields. This produces wrong results
+keep it: null-filling the missing fields. This produces wrong results
 silently. Always let the engine handle incomplete records at chunk boundaries.
 
 ///

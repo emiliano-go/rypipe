@@ -1,6 +1,6 @@
 # Python Adapter Wiring { #python-wiring }
 
-This page explains how to wire your Rust adapter to Python — the Source
+This page explains how to wire your Rust adapter to Python: the Source
 subclass, adapter class, registration, and repacked stages.
 
 ## The crxml formula { #the-crxml-formula }
@@ -20,6 +20,7 @@ my_adapter/
 ├── __init__.py            # re-exports, lazy loading
 ├── rypipe_adapter.py      # MyAdapter + registration
 ├── source.py              # MySource(Source)
+├── sinks.py               # collect, to_dataframe, to_csv (repacked)
 └── stages/
     ├── __init__.py        # lazy re-exports
     ├── cast.py            # CastTypes
@@ -27,6 +28,16 @@ my_adapter/
     ├── rename.py          # RenameFields
     └── drop.py            # DropFields
 ```
+
+/// important
+
+**Users only import from your adapter.** They write
+`from my_adapter import CastTypes, FilterRows`: never
+`from rypipe import CastTypes`. This is the **crxml formula**:
+adapters repack the full pipeline API so end users never depend on
+**rypipe** directly.
+
+///
 
 ## Source subclass { #source-subclass }
 
@@ -74,7 +85,7 @@ collects stages into a plan. When `.to_arrow()` is called, the pipeline calls
 
 You must merge these with your construction kwargs and pass them to your
 Rust reader. If you ignore `plan_overrides`, fused stages silently fall back
-to Python execution — 10–50× slower.
+to Python execution: 10–50× slower.
 
 /// warning
 
@@ -117,7 +128,7 @@ class MyAdapter:
 /// note
 
 The adapter's `read()` method returns a `pyarrow.Table`, not a Source.
-This is by design — `rypipe.read()` calls `adapter.read()` and expects a
+This is by design: `rypipe.read()` calls `adapter.read()` and expects a
 table. Users who want pipelines use the Source directly.
 
 ///
@@ -133,7 +144,7 @@ your package:
 def _register() -> None:
     try:
         import rypipe
-    except Exception:  # pragma: no cover — rypipe is optional
+    except Exception:  # pragma: no cover: rypipe is optional
         return
     rypipe.register_adapter("myfmt", MyAdapter(), extensions=[".myfmt"])
 
@@ -190,15 +201,15 @@ After registration:
 ## Repacked stages { #repacked-stages }
 
 Adapters include their own copies of the pipeline stage classes. This
-makes the adapter self-contained — users never import from **rypipe**.
+makes the adapter self-contained: users never import from **rypipe**.
 
 The stage implementations are identical to **rypipe**'s. See the
 [Quick Start](./quickstart.md) for full code, or copy from
 `rypipe/rypipe/stages/`. Each stage has three methods:
 
-* `apply(record)` — transform a single dict (fused path).
-* `__call__(stream)` — transform an iterable of dicts (unfused path).
-* `_plan_kwargs()` — return pushdown kwargs for the Rust engine.
+* `apply(record)`: transform a single dict (fused path).
+* `__call__(stream)`: transform an iterable of dicts (unfused path).
+* `_plan_kwargs()`: return pushdown kwargs for the Rust engine.
 
 ### CastTypes { #casttypes }
 
@@ -224,7 +235,7 @@ class CastTypes:
             try:
                 record[field] = cast_fn(record[field])
             except KeyError:
-                pass  # field not in this row — skip silently
+                pass  # field not in this row: skip silently
             except (ValueError, TypeError) as e:
                 raise ValueError(
                     f"CastTypes: cannot cast field '{field}' "
@@ -242,7 +253,7 @@ class CastTypes:
             if rust_type is None:
                 if fn is str:
                     continue  # str cast is a no-op
-                return None  # unsupported type — can't fuse
+                return None  # unsupported type: can't fuse
             ft[field] = rust_type
         return {"field_types": ft} if ft else None
 ```
@@ -292,7 +303,7 @@ class FilterRows:
 /// tip
 
 If your format is text-only and has no numeric fields, the `str` cast is a
-no-op — `_plan_kwargs` returns `None` and the engine skips fusing it. No
+no-op: `_plan_kwargs` returns `None` and the engine skips fusing it. No
 harm done, but you can skip the `CastTypes` stage entirely.
 
 ///
@@ -339,7 +350,7 @@ class DropFields:
 /// warning
 
 `DropFields` expects a `list[str]`, not a bare string. Passing a string
-raises a `TypeError` with a helpful message — but this is a common mistake
+raises a `TypeError` with a helpful message: but this is a common mistake
 when migrating from other libraries.
 
 ///
@@ -375,9 +386,9 @@ for batch in src.iter_record_batches(memory="256MiB"):
 
 ## Recap { #recap }
 
-* **Source** — pipeline-capable, implements `_read_arrow()` with plan
+* **Source**: pipeline-capable, implements `_read_arrow()` with plan
   forwarding.
-* **Adapter** — thin wrapper, `read()` delegates to `Source(...).to_arrow()`.
-* **Stages** — repacked copies of `CastTypes`, `FilterRows`, etc.
-* **Registration** — adapter registered at import time via side-effect import.
+* **Adapter**: thin wrapper, `read()` delegates to `Source(...).to_arrow()`.
+* **Stages**: repacked copies of `CastTypes`, `FilterRows`, etc.
+* **Registration**: adapter registered at import time via side-effect import.
 * Users import everything from the adapter package, never from **rypipe**.

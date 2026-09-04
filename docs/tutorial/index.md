@@ -1,7 +1,7 @@
 # Tutorial - User Guide { #tutorial }
 
 This tutorial teaches you how to use **rypipe** to read files into Arrow tables
-and DataFrames. You do not need to write Rust or build anything — just install
+and DataFrames. You do not need to write Rust or build anything; just install
 **rypipe** and an adapter package, and start reading data.
 
 /// tip
@@ -40,7 +40,7 @@ adapter). For other formats, install the corresponding adapter.
 /// note
 
 **rypipe** requires Python 3.10 or later. The engine is written in Rust and
-ships as a compiled extension — no Rust toolchain needed for installation.
+ships as a compiled extension: no Rust toolchain needed for installation.
 
 ///
 
@@ -108,7 +108,7 @@ pipeline `|` operator, caching, and streaming:
 ```python
 from crxml import CrystalXMLSource
 
-# Create a source — this does not parse yet
+# Create a source: this does not parse yet
 src = CrystalXMLSource("report.xml", row_tag="Details")
 
 # Parse and get a table (cached on first call)
@@ -132,4 +132,4 @@ The Source parses the file once and caches the result. Subsequent calls to
   operator.
 * Convert to pandas with `.to_pandas()` or to Polars with `.to_polars()`.
 
-**Next:** [First Steps](first-steps.md#first-steps) — learn about `rypipe.read()` in depth.
+**Next:** [First Steps](first-steps.md#first-steps): learn about `rypipe.read()` in depth.

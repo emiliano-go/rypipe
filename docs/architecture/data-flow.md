@@ -119,9 +119,9 @@ end_row → finish_row:
 
 - InputBuffer holds the entire file (or mmap)
 - One TableBuilder accumulates, flushed periodically
-- After each flush: batch is exported and dropped
-- Peak memory: O(budget + per_chunk_overhead)
-- RSS stays constant regardless of file size
+- After each flush: batch is exported and dropped.
+- Peak memory: O(budget + per_chunk_overhead).
+- RSS stays constant regardless of file size.
 
 ### Key difference: parallel vs bounded { #key-difference-parallel-vs-bounded }
 
