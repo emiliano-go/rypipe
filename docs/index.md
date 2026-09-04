@@ -74,7 +74,7 @@ with automatic fusion of rename, drop, cast, and filter stages into the Rust
 parse loop. Subclasses only implement ``read(path, **kwargs)``::
 
 ```python
-from rypipe import RenameFields, DropFields, CastTypes, FilterRows
+from crxml import RenameFields, DropFields, CastTypes, FilterRows
 import my_adapter
 
 source = my_adapter.MySource("data.myfmt")

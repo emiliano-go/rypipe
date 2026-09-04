@@ -168,7 +168,7 @@ checks `amount > 100.0` per row with native f64 comparison. Without
 
 /// tip
 
-Partial schemas work too — declare the columns you know and the engine
+Partial schemas work too: declare the columns you know and the engine
 automatically appends unknown columns in parallel streaming. This is useful
 when the format has optional fields that appear only in some rows.
 
@@ -308,18 +308,18 @@ numeric filters to get native comparison.
 
 ## Troubleshooting { #troubleshooting }
 
-**"unknown field not in frozen schema"** -- a field appeared that was not in
+**"unknown field not in frozen schema"**: a field appeared that was not in
 `schema_order`. Add it, omit `schema_order` for full-scan discovery, or rely
 on partial schema (unknown columns are automatically appended in parallel
 streaming).
 
-**Column order does not match `schema_order`** -- check that you are calling
+**Column order does not match `schema_order`**: check that you are calling
 `sort_columns` or using the fast export path. The merge path preserves
 discovery order.
 
-**Filter not working on numeric columns** -- ensure `field_types` is set for
+**Filter not working on numeric columns**: ensure `field_types` is set for
 the filtered columns. Without it, values are strings and comparison is
 lexicographic.
 
-**Memory higher than expected** -- ensure `field_types` is set for all numeric
+**Memory higher than expected**: ensure `field_types` is set for all numeric
 columns. Without it, intermediate strings double memory for those columns.

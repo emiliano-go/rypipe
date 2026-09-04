@@ -9,9 +9,9 @@ Read a file into a `pyarrow.Table` using a registered adapter.
 
 ```python
 rypipe.read(
-    path,                     # str | PathLike — file path
+    path,                     # str | PathLike: file path
     *,
-    format=None,              # str | None — adapter name
+    format=None,              # str | None: adapter name
     adapter=None,             # object with read() method
     **kwargs,                 # forwarded to the adapter
 ) -> pyarrow.Table
@@ -24,7 +24,7 @@ rypipe.read(
 | `path` | `str \| PathLike` | *(required)* | Path to the input file. |
 | `format` | `str \| None` | `None` | Adapter name. Inferred from extension when omitted. |
 | `adapter` | `Any \| None` | `None` | Adapter object. Overrides `format`. |
-| `**kwargs` | — | — | Forwarded to the adapter's `read()` method. |
+| `**kwargs` | : | : | Forwarded to the adapter's `read()` method. |
 
 **Returns:** `pyarrow.Table`
 
@@ -53,7 +53,7 @@ Read a file in parallel using a registered adapter.
 rypipe.read_par(
     path,
     *,
-    chunks=4,                 # int — number of parallel chunks
+    chunks=4,                 # int: number of parallel chunks
     **kwargs,
 ) -> pyarrow.Table
 ```
@@ -66,7 +66,7 @@ Read a file with bounded memory using a registered adapter.
 rypipe.read_stream(
     path,
     *,
-    memory="64MiB",           # int | str — memory budget
+    memory="64MiB",           # int | str: memory budget
     **kwargs,
 ) -> pyarrow.Table
 ```
@@ -79,8 +79,8 @@ Read a file and yield `pyarrow.RecordBatch` objects incrementally.
 rypipe.read_batches(
     path,
     *,
-    memory="64MiB",           # int | str — memory budget
-    batch_size=None,          # int | None — rows per batch
+    memory="64MiB",           # int | str: memory budget
+    batch_size=None,          # int | None: rows per batch
     **kwargs,
 ) -> Iterator[pyarrow.RecordBatch]
 ```
@@ -93,10 +93,10 @@ Stream a file into Arrow `RecordBatch` objects with constant memory.
 rypipe.iter_record_batches(
     path,
     *,
-    format=None,              # str | None — adapter name
+    format=None,              # str | None: adapter name
     adapter=None,             # object with read() method
-    memory="64MiB",           # int | str — memory budget
-    batch_size=None,          # int | None — rows per batch
+    memory="64MiB",           # int | str: memory budget
+    batch_size=None,          # int | None: rows per batch
     **kwargs,
 ) -> Iterator[pyarrow.RecordBatch]
 ```
@@ -107,9 +107,9 @@ Register a format adapter with **rypipe**.
 
 ```python
 rypipe.register_adapter(
-    name,                     # str — adapter name
+    name,                     # str: adapter name
     adapter,                  # object with read() method
-    extensions=None,          # Iterable[str] | None — file extensions
+    extensions=None,          # Iterable[str] | None: file extensions
 ) -> None
 ```
 
@@ -223,13 +223,13 @@ Cast column values. Supported callables: `int`, `float`, `str`, `bool`.
 
 ```python
 FilterRows(
-    predicate=None,            # Callable — arbitrary filter
+    predicate=None,            # Callable: arbitrary filter
     *,
-    field=None,                # str — column name (constant filter)
-    op=None,                   # str — operator
-    value=None,                # str — value (constant filter)
-    field_a=None,              # str — left column (comparison)
-    field_b=None,              # str — right column (comparison)
+    field=None,                # str: column name (constant filter)
+    op=None,                   # str: operator
+    value=None,                # str: value (constant filter)
+    field_a=None,              # str: left column (comparison)
+    field_b=None,              # str: right column (comparison)
 )
 ```
 

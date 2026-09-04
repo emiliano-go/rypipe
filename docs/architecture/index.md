@@ -6,7 +6,7 @@ where a row ends and how to extract fields; the format-agnostic side answers how
 to store rows as typed columns, how to project them, and how to get them out as
 Arrow.
 
-This directory documents the architecture in depth. Read this page first; then
+This directory documents the architecture in depth: read this page first, then
 dive into the subpages for the component you care about.
 
 ## Pages { #pages }
@@ -77,7 +77,7 @@ input bytes
 ```
 
 Ownership rule: `Splitter` and `RecordParser` never see `ExecutionPlan` or
-`TableBuilder` internals. They emit plain names and `Value` events; the engine
+`TableBuilder` internals. They emit plain names and `Value` events. The engine
 resolves names via `ExecutionPlan::resolve_field` and chooses storage via
 `ExecutionPlan::column_type`. This keeps adapters tiny and keeps all pushdown,
 typing, and Arrow logic in one place.
@@ -135,10 +135,10 @@ so the same pipeline can be reused across files and execution modes.
 ## Testing strategy { #testing-strategy }
 
 Every optimization has a test that verifies correctness:
-- Splitter tests: monotonic points, coverage, comment/CDATA rejection
-- Engine tests: extend, last-write-wins, rename, drop, filter, typed columns
-- Columnar tests: push/pop, split_off, arrow export, dictionary upgrade
-- Integration tests: whole-file parse == N-chunk parse for N in {1, 2, 7, 64}
+- Splitter tests: monotonic points, coverage, comment/CDATA rejection.
+- Engine tests: extend, last-write-wins, rename, drop, filter, typed columns.
+- Columnar tests: push/pop, split_off, arrow export, dictionary upgrade.
+- Integration tests: whole-file parse == N-chunk parse for N in {1, 2, 7, 64}.
 
 ## Next steps { #next-steps }
 

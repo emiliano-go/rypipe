@@ -19,10 +19,10 @@ def my_stage(stream):
 
 **rypipe** stages have three methods:
 
-* `apply(record)` — transform a single dict (used for fused iteration).
-* `__call__(stream)` — transform an iterable of dicts (used for unfused
+* `apply(record)`: transform a single dict (used for fused iteration).
+* `__call__(stream)`: transform an iterable of dicts (used for unfused
   iteration).
-* `_plan_kwargs()` — return pushdown kwargs for the Rust engine, or `None`
+* `_plan_kwargs()`: return pushdown kwargs for the Rust engine, or `None`
   if the stage cannot be fused.
 
 You never call these methods directly. The pipeline calls them automatically.
@@ -53,7 +53,7 @@ stage = RenameFields({"Name": "name", "Amount": "amount"})
 ### Plan fusion { #renamefields-fusion }
 
 `_plan_kwargs()` returns `{"field_mapping": {"Name": "name"}}`. The Rust
-engine renames columns during parsing — no Python overhead.
+engine renames columns during parsing: no Python overhead.
 
 ## DropFields { #dropfields }
 
@@ -83,7 +83,7 @@ stage = DropFields(["InternalId"])
 ### Plan fusion { #dropfields-fusion }
 
 `_plan_kwargs()` returns `{"drop_fields": ["InternalId"]}`. The Rust engine
-skips the dropped column entirely — no scanning, no decoding, no memory
+skips the dropped column entirely: no scanning, no decoding, no memory
 allocation for that column.
 
 /// tip
@@ -130,7 +130,7 @@ CastTypes({"age": int})({"age": "abc"})
 ### Plan fusion { #casttypes-fusion }
 
 `_plan_kwargs()` returns `{"field_types": {"age": "int64"}}`. The Rust engine
-parses the column directly as the target type — no string-to-number
+parses the column directly as the target type: no string-to-number
 conversion in Python.
 
 Supported type mappings:
@@ -271,7 +271,7 @@ stage = FilterRowsNot(FilterRows(field="status", op="==", value="deleted"))
 
 ## Combining stages { #combining-stages }
 
-Stages compose freely. The order matters — stages are applied left to right:
+Stages compose freely. The order matters: stages are applied left to right:
 
 ```python
 from crxml import CrystalXMLSource
@@ -305,4 +305,4 @@ table = result.to_arrow()
 * **FilterRowsAny**, **FilterRowsAll**, **FilterRowsNot** combine filters.
 * Import stages from the adapter package, not from **rypipe**.
 
-**Next:** [Sinks](sinks.md#sinks) — materializing pipeline results.
+**Next:** [Sinks](sinks.md#sinks): materializing pipeline results.

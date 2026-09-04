@@ -25,7 +25,7 @@ This is the single largest performance lever. When the column set is known,
 declare it with `schema_order` and `field_types`:
 
 ```python
-# Python — tell the engine exactly which columns exist and their types. { #python-tell-the-engine-exactly-which-columns-exist-and-their-types }
+# Python: tell the engine exactly which columns exist and their types. { #python-tell-the-engine-exactly-which-columns-exist-and-their-types }
 # This skips column discovery, stabilizes column order, and enables { #this-skips-column-discovery-stabilizes-column-order-and-enables }
 # typed Arrow arrays (no intermediate strings). { #typed-arrow-arrays }
 src = MySource("data.log", schema=["id", "name", "amount"],
@@ -33,7 +33,7 @@ src = MySource("data.log", schema=["id", "name", "amount"],
 ```
 
 ```rust
-// Rust — same declaration on the execution plan.
+// Rust: same declaration on the execution plan.
 let plan = ExecutionPlan::new()
     .schema_order(["id", "name", "amount"])
     .type_as("id", FieldType::Int64)
@@ -59,14 +59,14 @@ See [Schema](./schema.md) for the full guide.
 Always check `sink.wants(name)` before doing expensive extraction:
 
 ```rust
-// Good: skip dropped fields entirely — no scanning, no decoding,
+// Good: skip dropped fields entirely: no scanning, no decoding,
 // no allocation for fields the engine doesn't need.
 if sink.wants(name) {
     let value = self.extract_value(bytes);  // expensive scan
     sink.put_field(name, Value::Str(Cow::Borrowed(value)));
 }
 
-// Bad: always scan, even for dropped fields — wasted work.
+// Bad: always scan, even for dropped fields: wasted work.
 let value = self.extract_value(bytes);  // runs even if user said drop this column
 sink.put_field(name, Value::Str(Cow::Borrowed(value)));
 ```
@@ -91,7 +91,7 @@ use rypipe_core::scan;
 // setup overhead. Falls back to memchr for multi-byte patterns.
 let pos = scan::find(bytes, 0, b'<');
 
-// Raw memchr: no fast path — pays SIMD setup cost even for single bytes.
+// Raw memchr: no fast path: pays SIMD setup cost even for single bytes.
 let pos = memchr::memchr(b'<', bytes);
 ```
 
@@ -107,7 +107,7 @@ See [Scan primitives](./scan.md) for details.
 Always borrow from the input when possible:
 
 ```rust
-// Good: zero allocation — borrows the &str directly from the input bytes.
+// Good: zero allocation: borrows the &str directly from the input bytes.
 // The engine copies into Arrow arrays later (zero-copy when possible).
 sink.put_field("name", Value::Str(Cow::Borrowed(name)));
 
@@ -129,11 +129,11 @@ When the format has numeric or boolean data, parse directly into the
 correct `Value` variant:
 
 ```rust
-// Good: engine builds Arrow Int64 array directly — no string parsing later.
+// Good: engine builds Arrow Int64 array directly: no string parsing later.
 let value: i64 = field.value.parse().unwrap_or(0);
 sink.put_field("id", Value::Int64(value));
 
-// Bad: engine must parse the string into a number later — double work.
+// Bad: engine must parse the string into a number later: double work.
 sink.put_field("id", Value::Str(Cow::Borrowed(field.value)));
 ```
 
@@ -149,13 +149,13 @@ declaration.
 For hot paths, use single-hash-probe resolution:
 
 ```rust
-// Good: single hash probe — resolve() returns the column name in one
+// Good: single hash probe: resolve() returns the column name in one
 // lookup, put_field_resolved() uses it directly (no second lookup).
 if let Some(resolved) = sink.resolve(name) {
     sink.put_field_resolved(resolved, value);
 }
 
-// Slower: two hash probes — wants() does one lookup, put_field() does
+// Slower: two hash probes: wants() does one lookup, put_field() does
 // another. Fine for rare fields, but adds up in inner loops.
 if sink.wants(name) {
     sink.put_field(name, value);
@@ -175,13 +175,13 @@ once per row (not per field).
 For maximum performance, implement the devirtualized `parse_chunk_generic`:
 
 ```rust
-// Standard parse_chunk takes a trait object — dynamic dispatch on every
+// Standard parse_chunk takes a trait object: dynamic dispatch on every
 // begin_row/put_field/end_row call.
 fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
     // ... logic here
 }
 
-// parse_chunk_generic takes a concrete type — the compiler can inline
+// parse_chunk_generic takes a concrete type: the compiler can inline
 // every sink method call. This eliminates vtable lookup overhead.
 fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut impl ColumnarSink) -> Result<()> {
     // Same logic as parse_chunk, but the compiler monomorphizes this
@@ -200,7 +200,7 @@ fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut impl ColumnarSink) -> Res
 
 `parse_chunk_generic` only helps when the engine knows the concrete sink
 type at call time. For adapter-internal sinks (custom `ColumnarSink`
-implementations), you must override it explicitly — the default falls back
+implementations), you must override it explicitly: the default falls back
 to the trait-object version.
 
 ///
@@ -254,15 +254,15 @@ For formats with complex delimiters, use SIMD-accelerated scanning:
 
 ```rust
 // Find a multi-byte pattern using SIMD-accelerated memmem search.
-// memchr crate uses AVX2 on x86_64, NEON on ARM — scans 16-32 bytes
+// memchr crate uses AVX2 on x86_64, NEON on ARM: scans 16-32 bytes
 // per cycle.
 fn find_field_end(&self, bytes: &[u8]) -> usize {
-    // Search for closing tag prefix "</" — covers </Field>, </Text>,
+    // Search for closing tag prefix "</": covers </Field>, </Text>,
     // </Section>, etc.
     let finder = memchr::memmem::Finder::new(b"</");
     match finder.find(bytes) {
-        Some(pos) => pos,  // found a closing tag — field ends here
-        None => bytes.len(), // no closing tag — field extends to chunk end
+        Some(pos) => pos,  // found a closing tag: field ends here
+        None => bytes.len(), // no closing tag: field extends to chunk end
     }
 }
 ```
@@ -318,7 +318,7 @@ cost profile.
 ///
 
 Profile with `perf` to find hotspots, then re-run the benchmark to verify
-improvement. Focus on the top 3-5 hotspots — those are where the real
+improvement. Focus on the top 3-5 hotspots: those are where the real
 gains come from.
 
 ## Memory considerations { #memory-considerations }

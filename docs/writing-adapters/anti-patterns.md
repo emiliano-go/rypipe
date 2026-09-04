@@ -15,7 +15,7 @@ for field in self.parse_fields(line) {
 }
 ```
 
-Dropped columns still get scanned, decoded, and emitted — wasted work.
+Dropped columns still get scanned, decoded, and emitted: wasted work.
 
 **The fix:** Check `sink.wants(field.name)` before extracting and emitting.
 
@@ -33,7 +33,7 @@ sink.put_field(&field.name.to_string(), Value::Str(Cow::Owned(field.value.to_str
 Heap allocation is ~100 ns each. For 10 million fields that's 1s of
 pure allocation overhead.
 
-**The fix:** Borrow from input — `Cow::Borrowed(field.value)`.
+**The fix:** Borrow from input: `Cow::Borrowed(field.value)`.
 
 **Impact:** 10-20% on allocation-heavy workloads.
 
@@ -90,7 +90,7 @@ let value: i64 = field.value.parse().map_err(|e| ...)?;
 sink.put_field("id", Value::Str(Cow::Borrowed(field.value)));
 ```
 
-**The fix:** Parse once, emit the typed value — `Value::Int64(value)`.
+**The fix:** Parse once, emit the typed value: `Value::Int64(value)`.
 
 **Impact:** 10-20% for numeric-heavy workloads.
 
@@ -157,7 +157,7 @@ fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
 
 Overlapping chunks or missing data at chunk boundaries.
 
-**The fix:** `.map(|r| from + r + 1)` — return position after delimiter.
+**The fix:** `.map(|r| from + r + 1)`: return position after delimiter.
 
 ## 10. Forgetting `end_row` { #end-row }
 
@@ -176,7 +176,7 @@ producing wrong results silently.
 
 /// warning
 
-Forgetting `end_row` produces wrong results silently — no error, no crash,
+Forgetting `end_row` produces wrong results silently: no error, no crash,
 just rows accumulating values from multiple logical records. This is the
 hardest bug to track down in an adapter.
 

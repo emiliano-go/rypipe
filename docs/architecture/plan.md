@@ -185,7 +185,7 @@ in the `And` tree.
 ## Plan construction from Python { #plan-construction-from-python }
 
 ```python
-from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+from crxml import RenameFields, DropFields, FilterRows, CastTypes
 
 src | RenameFields({"old": "new"}) | DropFields(["id"]) | \
     FilterRows(field="status", op="==", value="active") | \

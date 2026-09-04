@@ -1,6 +1,6 @@
 # Writing a Format Adapter { #writing-adapters }
 
-This guide teaches you how to write a **rypipe** adapter — a package that
+This guide teaches you how to write a **rypipe** adapter, a package that
 lets **rypipe** read your custom format.
 
 /// tip
@@ -51,11 +51,41 @@ The engine provides `TableBuilder` as the production
 
 /// note
 
-Adapters **repack the API** — they include their own copies of the pipeline
-stage classes so users never import from **rypipe** directly. This makes
-the adapter self-contained.
+Adapters **repack the API**: they include their own copies of the pipeline
+stage classes (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) and
+sink functions (`collect`, `to_dataframe`, `to_csv`) so users never import
+from **rypipe** directly. This makes the adapter self-contained.
+
+The only exception is `rypipe.read()`: users call it directly for
+one-liner reads via the adapter registry.
 
 ///
+
+## User API { #user-api }
+
+End users should only import from the adapter package. Here is what a
+user of your adapter sees:
+
+```python
+# One-liner read (via adapter registry)
+import rypipe
+import my_adapter  # registers the adapter
+
+table = rypipe.read("file.myfmt")
+
+# Pipeline (everything from the adapter)
+from my_adapter import MySource, CastTypes, FilterRows
+
+src = MySource("file.myfmt")
+result = (
+    src
+    | CastTypes({"age": int})
+    | FilterRows(field="active", op="==", value="true")
+).to_arrow()
+```
+
+Users never write `from rypipe import CastTypes`: they write
+`from my_adapter import CastTypes`. This is the **crxml formula**.
 
 ## How the engine works { #how-the-engine-works }
 
@@ -82,14 +112,14 @@ pyarrow.Table                  (Python API)
 
 **rypipe** handles:
 
-* **Parallel execution** — split the file, parse chunks concurrently on
+* **Parallel execution**: split the file, parse chunks concurrently on
   multiple threads.
-* **Bounded-memory streaming** — process one chunk at a time, keeping only
+* **Bounded-memory streaming**: process one chunk at a time, keeping only
   the current chunk in memory.
-* **Pushdown plans** — rename, drop, filter, type coercion, dictionary
+* **Pushdown plans**: rename, drop, filter, type coercion, dictionary
   encoding, all pushed into the Rust parse loop.
-* **Zero-copy Arrow export** — column buffers move directly into Arrow arrays.
-* **Schema discovery** — find field names from a sample of the file.
+* **Zero-copy Arrow export**: column buffers move directly into Arrow arrays.
+* **Schema discovery**: find field names from a sample of the file.
 
 ## Guide contents { #guide-contents }
 
@@ -113,10 +143,10 @@ parse_chunk → begin_row → [put_field × N] → end_row → [repeat]
 
 Each `put_field` call goes through:
 
-1. **Scan** — find the field's byte extent in the input (your parser does this).
-2. **Resolve** — map raw name to output column name (engine does this).
-3. **Push** — write the value into the column builder (engine does this).
-4. **Filter** — check if the row passes the predicate (engine does this).
+1. **Scan**: find the field's byte extent in the input (your parser does this).
+2. **Resolve**: map raw name to output column name (engine does this).
+3. **Push**: write the value into the column builder (engine does this).
+4. **Filter**: check if the row passes the predicate (engine does this).
 
 The engine optimizes steps 2–4. Your parser's job is to make step 1 fast.
 

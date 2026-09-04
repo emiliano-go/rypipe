@@ -6,7 +6,7 @@ Thank you for your interest in contributing to **rypipe**!
 
 ### Prerequisites { #prerequisites }
 
-* Rust toolchain (1.78+) — [rustup.rs](https://rustup.rs)
+* Rust toolchain (1.78+): [rustup.rs](https://rustup.rs)
 * Python 3.10+
 * `maturin` (`pip install maturin`)
 * `pytest` (`pip install pytest`)

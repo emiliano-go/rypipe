@@ -1,7 +1,7 @@
 # Pipeline { #pipeline }
 
 The pipeline operator (`|`) lets you chain transformation stages on a Source.
-Each stage transforms the data as it flows through — like a Unix pipe.
+Each stage transforms the data as it flows through, like a Unix pipe.
 
 ## Basic usage { #basic-usage }
 
@@ -40,7 +40,7 @@ When you call `.to_arrow()` on a pipeline, **rypipe**:
 3. Runs remaining stages (lambda predicates, complex combinators) over Arrow
    batches in Python.
 
-This means fusable stages run at Rust speed during parsing — they never touch
+This means fusable stages run at Rust speed during parsing: they never touch
 Python.
 
 ## Available stages { #available-stages }
@@ -66,11 +66,11 @@ stage = RenameFields({"Name": "name", "Amount": "amount"})
 
 **Parameters:**
 
-* `mapping: dict[str, str]` — mapping from old names to new names.
+* `mapping: dict[str, str]`: mapping from old names to new names.
 
 ### DropFields { #dropfields }
 
-Removes columns entirely. Dropped columns are skipped during parsing — no
+Removes columns entirely. Dropped columns are skipped during parsing: no
 scanning, no decoding.
 
 ```python
@@ -85,7 +85,7 @@ stage = DropFields(["InternalId", "TempCol", "DebugInfo"])
 
 **Parameters:**
 
-* `fields: list[str]` — list of column names to drop.
+* `fields: list[str]`: list of column names to drop.
 
 /// warning
 
@@ -107,7 +107,7 @@ stage = CastTypes({"amount": float, "age": int})
 
 **Parameters:**
 
-* `mapping: dict[str, Callable]` — mapping from column name to Python callable
+* `mapping: dict[str, Callable]`: mapping from column name to Python callable
   (`int`, `float`, `str`, `bool`).
 
 /// note
@@ -121,7 +121,7 @@ fails (e.g., `int("abc")`), a `ValueError` is raised with the row value.
 
 Filters rows by a predicate. Supports three forms:
 
-**Constant filter** — compare a field to a value:
+**Constant filter**: compare a field to a value:
 
 ```python
 from crxml import FilterRows
@@ -133,14 +133,14 @@ stage = FilterRows(field="status", op="==", value="active")
 stage = FilterRows(field="age", op="!=", value="0")
 ```
 
-**Column comparison** — compare two fields:
+**Column comparison**: compare two fields:
 
 ```python
 # Keep rows where price > cost
 stage = FilterRows(field_a="price", op=">", field_b="cost")
 ```
 
-**Callable predicate** — arbitrary Python logic:
+**Callable predicate**: arbitrary Python logic:
 
 ```python
 # Keep rows where name starts with "A"
@@ -149,13 +149,13 @@ stage = FilterRows(lambda r: r["name"].startswith("A"))
 
 **Parameters:**
 
-* `predicate` — a callable `(dict) -> bool` (mutually exclusive with the
+* `predicate`: a callable `(dict) -> bool` (mutually exclusive with the
   keyword forms below).
-* `field: str` — column name for constant filter.
-* `op: str` — operator: `"=="`, `"!="`, `"eq"`, `"ne"`.
-* `value: str` — value to compare against (constant filter).
-* `field_a: str` — left column for column comparison.
-* `field_b: str` — right column for column comparison.
+* `field: str`: column name for constant filter.
+* `op: str`: operator: `"=="`, `"!="`, `"eq"`, `"ne"`.
+* `value: str`: value to compare against (constant filter).
+* `field_a: str`: left column for column comparison.
+* `field_b: str`: right column for column comparison.
 
 Column comparison operators: `">"`, `"<"`, `">="`, `"<="`, `"=="`, `"!="`,
 `"gt"`, `"lt"`, `">="`, `"<="`, `"eq"`, `"ne"`.
@@ -192,7 +192,7 @@ with `field`/`field_a`). Callable predicates cannot be combined.
 
 ## Chaining multiple stages { #chaining-multiple-stages }
 
-Stages are applied in order. Each `|` returns a new `Pipeline` — the original
+Stages are applied in order. Each `|` returns a new `Pipeline`: the original
 Source is not modified:
 
 ```python
@@ -201,7 +201,7 @@ from crxml import RenameFields, DropFields, CastTypes, FilterRows
 
 src = CrystalXMLSource("report.xml", row_tag="Details")
 
-# All stages are fusable — runs entirely in Rust
+# All stages are fusable: runs entirely in Rust
 table = (
     src
     | RenameFields({"Name": "name"})
@@ -238,9 +238,9 @@ for row in pipeline:
 ## Collecting to a list { #collecting-to-a-list }
 
 ```python
-from rypipe import collect
+import rypipe
 
-rows = collect(src | FilterRows(field="status", op="==", value="active"))
+rows = rypipe.collect(src | FilterRows(field="status", op="==", value="active"))
 print(rows)
 # [{"name": "Alice", "amount": 150.0, "status": "active"}, ...]
 ```
@@ -253,4 +253,4 @@ print(rows)
 * Call `.to_arrow()`, `.to_pandas()`, or `.to_polars()` to materialize.
 * Iterate with `for row in pipeline` or collect with `rypipe.collect()`.
 
-**Next:** [Stages](stages.md#stages) — detailed reference for each stage class.
+**Next:** [Stages](stages.md#stages): detailed reference for each stage class.

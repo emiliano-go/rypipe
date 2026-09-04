@@ -66,11 +66,11 @@ pub struct FrozenSchema {
 
 Key design decisions:
 
-- **`names` uses `Arc<str>`**: shared across workers without cloning
+- **`names` uses `Arc<str>`**: shared across workers without cloning.
 - **`index` maps raw names to `Option<u32>`**: collapses rename, drop, and
-  lookup into a single hash probe
-- **`types` is parallel to `names`**: type for column `i` is `types[i]`
-- **`exact` tracks discovery method**: affects error messages and cache behavior
+  lookup into a single hash probe.
+- **`types` is parallel to `names`**: type for column `i` is `types[i]`.
+- **`exact` tracks discovery method**: affects error messages and cache behavior.
 
 ### Construction: explicit schema { #construction-explicit-schema }
 
@@ -99,10 +99,10 @@ pub fn from_plan(names: &[&str], plan: &ExecutionPlan) -> Self {
 
 Properties:
 
-- **O(n)** construction where n = number of columns
-- **No I/O**: the schema is pure computation
-- **Exact**: all columns are known, no sampling uncertainty
-- **`exact = true`**: enables the "unknown field is an error" behavior
+- **O(n)** construction where n = number of columns.
+- **No I/O**: the schema is pure computation.
+- **Exact**: all columns are known, no sampling uncertainty.
+- **`exact = true`**: enables the "unknown field is an error" behavior.
 
 ### Construction: discovered schema { #construction-discovered-schema }
 
@@ -146,10 +146,10 @@ pub fn from_discovered(names_in_order: &[String], plan: &ExecutionPlan) -> Self 
 
 Properties:
 
-- **Applies renames**: `field_map` entries are resolved during construction
-- **Applies drops**: dropped fields get `None` in the index
-- **`exact = false`**: sampled discovery may miss rare columns
-- **Order**: follows discovery order (file order, then document order)
+- **Applies renames**: `field_map` entries are resolved during construction.
+- **Applies drops**: dropped fields get `None` in the index.
+- **`exact = false`**: sampled discovery may miss rare columns.
+- **Order**: follows discovery order (file order, then document order).
 
 ### Resolution: the hot path { #resolution-the-hot-path }
 
@@ -277,9 +277,9 @@ pub fn layout_signature(bytes: &[u8], opts: &DiscoveryOpts) -> (u64, u64) {
 
 Properties:
 
-- **Fast**: ~1 us for small files, ~5 us for large files
-- **Collision-resistant**: 4-window hash for large files
-- **Stable**: same layout always produces the same key
+- **Fast**: ~1 us for small files, ~5 us for large files.
+- **Collision-resistant**: 4-window hash for large files.
+- **Stable**: same layout always produces the same key.
 
 ### Cache operations { #cache-operations }
 
@@ -297,9 +297,9 @@ pub fn insert_schema_cache(sig: (u64, u64), order: Arc<Vec<String>>) {
 }
 ```
 
-- Evicts arbitrary entry when at capacity (128)
+- Evicts arbitrary entry when at capacity (128).
 - `FxHashMap` does not track insertion order; this is acceptable for a
-  bounded cache
+  bounded cache.
 
 **Lookup**: done via `SCHEMA_CACHE.read()` in the discovery path
 
@@ -329,9 +329,9 @@ pub fn schema_cache_stats() -> (u64, u64) {
 
 For 1,000 files with the same layout:
 
-- First file: miss (5.3 ms discovery + cache insert)
-- Files 2-1000: hit (cache lookup ~1 us each)
-- Total: 5.3 ms + 1 ms = 6.3 ms (vs 5.3 s without cache)
+- First file: miss (5.3 ms discovery + cache insert).
+- Files 2-1000: hit (cache lookup ~1 us each).
+- Total: 5.3 ms + 1 ms = 6.3 ms (vs 5.3 s without cache).
 
 ## ensure_schema { #ensure_schema }
 
@@ -354,11 +354,11 @@ pub fn ensure_schema(&mut self, schema: &FrozenSchema) -> Result<()> {
 
 Steps:
 
-1. Iterate over all columns in the schema
+1. Iterate over all columns in the schema.
 2. For each column not already in the builder:
-   a. Create a typed column builder for the correct `FieldType`
-   b. Pre-fill with nulls up to the current row count
-3. After this call, the builder has all declared columns
+   a. Create a typed column builder for the correct `FieldType`.
+   b. Pre-fill with nulls up to the current row count.
+3. After this call, the builder has all declared columns.
 
 ### Why pre-fill with nulls? { #why-pre-fill-with-nulls }
 
@@ -409,9 +409,9 @@ pub fn sort_columns(&mut self) {
 
 Properties:
 
-- **Stable sort**: columns not in `schema_order` preserve relative order
-- **O(n log n)** where n = number of columns (typically <100)
-- **Called once**: at finish time, not per row
+- **Stable sort**: columns not in `schema_order` preserve relative order.
+- **O(n log n)** where n = number of columns (typically <100).
+- **Called once**: at finish time, not per row.
 
 ### Example { #example }
 
@@ -499,9 +499,9 @@ pub fn column_type(&self, name: &str) -> FieldType {
 
 Priority:
 
-1. `field_types[name]` (explicit override)
-2. `dictionary_columns` contains `name` (dictionary encoding)
-3. `FieldType::String` (default)
+1. `field_types[name]` (explicit override).
+2. `dictionary_columns` contains `name` (dictionary encoding).
+3. `FieldType::String` (default).
 
 This is called during `ensure_schema` to create the correct column builder.
 
@@ -628,22 +628,22 @@ For a 533 MB file on a Ryzen 5800X:
 
 | Phase | Time | Notes |
 |-------|------|-------|
-| Schema resolution | 0.005 ms | `from_plan` construction |
-| `ensure_schema` | 0.1 ms | 16 chunks x 10 columns |
-| `sort_columns` | 0.01 ms | Once at finish |
-| `resolve` per field | 0.000015 ms | ~15 cycles (FxHash) |
-| Total schema overhead | ~0.12 ms | <0.01% of parse time |
+| Schema resolution | 0.005 ms | `from_plan` construction. |
+| `ensure_schema` | 0.1 ms | 16 chunks x 10 columns. |
+| `sort_columns` | 0.01 ms | Once at finish. |
+| `resolve` per field | 0.000015 ms | ~15 cycles (FxHash). |
+| Total schema overhead | ~0.12 ms | <0.01% of parse time. |
 
 Without explicit schema:
 
 | Phase | Time | Notes |
 |-------|------|-------|
-| Discovery (parallel) | 5.3 ms | 16x2 MiB sampling |
-| `from_discovered` | 0.01 ms | Apply renames/drops |
-| `ensure_schema` | 0.1 ms | Same as above |
-| `sort_columns` | 0.01 ms | Same as above |
-| Cache lookup | 0.001 ms | If cached |
-| Total schema overhead | ~5.4 ms | ~0.4% of parse time |
+| Discovery (parallel) | 5.3 ms | 16x2 MiB sampling. |
+| `from_discovered` | 0.01 ms | Apply renames/drops. |
+| `ensure_schema` | 0.1 ms | Same as above. |
+| `sort_columns` | 0.01 ms | Same as above. |
+| Cache lookup | 0.001 ms | If cached. |
+| Total schema overhead | ~5.4 ms | ~0.4% of parse time. |
 
 Explicit schema saves ~5.3 ms per file. For 1,000 files, that is 5.3 seconds.
 

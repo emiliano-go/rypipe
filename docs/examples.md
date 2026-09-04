@@ -19,7 +19,7 @@ print(table.num_rows, table.num_columns)
 
 ```python
 from crxml import CrystalXMLSource
-from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+from crxml import RenameFields, DropFields, FilterRows, CastTypes
 
 df = (
     CrystalXMLSource("data.xml", row_tag="Row")
@@ -90,13 +90,14 @@ table = rypipe.read_par("large.xml", format="crxml", chunks=16)
 
 ```python
 from crxml import CrystalXMLSource
-from rypipe import FilterRows, to_parquet
+import rypipe
+from crxml import FilterRows
 
 pipeline = (
     CrystalXMLSource("data.xml", row_tag="Row")
     | FilterRows(field="status", op="==", value="active")
 )
-to_parquet(pipeline, "active.parquet")
+rypipe.to_parquet(pipeline, "active.parquet")
 ```
 
 ## Rust API examples { #rust-api-examples }
