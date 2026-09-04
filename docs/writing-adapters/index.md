@@ -176,7 +176,7 @@ custom streaming adapter.
 The hot path is:
 
 ```
-parse_chunk → begin_row → [put_field × N] → end_row → [repeat]
+parse_chunk -> begin_row -> [put_field x N] -> end_row -> [repeat]
 ```
 
 Each `put_field` call goes through:
@@ -187,6 +187,41 @@ Each `put_field` call goes through:
 4. **Filter**: check if the row passes the predicate (engine does this)
 
 The engine optimizes steps 2-4. Your parser's job is to make step 1 fast.
+
+### Schema: the biggest performance lever
+
+When your format has a known set of columns, declare them upfront with
+`schema_order` and `field_types`. This is the single largest performance
+gain available to adapter authors:
+
+- **Skips column discovery**: the engine does not need to scan the file to
+  learn field names (saves one full I/O pass)
+- **Stabilizes column order**: parallel chunks produce identical schemas,
+  enabling the fast export path
+- **Enables typed arrays**: `field_types` builds Arrow arrays directly from
+  parsed values (no intermediate strings, no post-parse casting)
+- **Activates `row_satisfied` byte-jump**: with explicit schema, the scanner
+  can skip remaining fields once all wanted columns arrive
+
+In the crxml reference adapter, explicit schema lifts throughput from
+4.2 GB/s to 7.6 GB/s on production data (+80%). See
+[Schema](./schema.md) for the full guide.
+
+```rust
+// In your RecordParser, check wants() before scanning field bytes
+fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+    for row in self.split_rows(bytes) {
+        sink.begin_row();
+        for field in self.fields(row) {
+            if sink.wants(field.name) {  // skip dropped fields entirely
+                sink.put_field(field.name, Value::Str(Cow::Borrowed(field.value)));
+            }
+        }
+        sink.end_row();
+    }
+    Ok(())
+}
+```
 
 See [Sink](./sink.md) for the full method reference and fast paths.
 
@@ -241,6 +276,7 @@ This gives you the full pipeline API (`| RenameFields | FilterRows |
 | [Splitter](./splitter.md) | Finding chunk boundaries, `next_record_start`, default `find_split_points` |
 | [Parser](./parser.md) | `RecordParser` trait, `parse_chunk`, `parse_chunk_generic`, performance tips |
 | [Sink](./sink.md) | `ColumnarSink`: all 21 methods, fast paths, projection, layout prediction |
+| [Schema](./schema.md) | `schema_order`, `field_types`, `FrozenSchema`, the performance lever |
 | [Scan primitives](./scan.md) | `find`, `find2`, `starts_with`, `find_literal` |
 | [Skip regions](./skip-regions.md) | `SkipRegionFinder` for comments, CDATA, quoted fields |
 | [Chunk planning](./chunk-planning.md) | `plan_chunk_count`, `MIN_CHUNK_BYTES`, thread caps |

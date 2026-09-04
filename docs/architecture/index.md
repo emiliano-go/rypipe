@@ -102,6 +102,8 @@ typing, and Arrow logic in one place.
 | `scan` | Portable byte-search primitives (find, find2, find_literal) |
 | `bench` | Tier ladder, alloc_baseline, ParProfile (behind bench feature) |
 | `schema` | FrozenSchema, DiscoveryOpts, layout_signature caching |
+
+See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `dict` | SeedDict, unify_dictionaries, apply_remap |
 | `block_masks` | SIMD 64-byte block delimiter scanning |
 | `parallel_stream` | ParallelStreamingExecutor, discovery, ordered/unordered delivery |
