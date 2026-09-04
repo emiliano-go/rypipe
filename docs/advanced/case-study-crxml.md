@@ -51,7 +51,7 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 
 ## The decoder
 
-`CrystalXmlDecoder` uses the hand-rolled `memchr`/`memmem` scanner in `scanner.rs` (replacing `quick_xml` as of crxml 1.2). Events reference the input bytes directly instead of copying into a scratch buffer. For each row element it:
+`CrystalXmlDecoder` uses the hand-rolled `memchr`/`memmem` scanner in `scanner.rs`. Events reference the input bytes directly instead of copying into a scratch buffer. For each row element it:
 
 1. Emits row attributes as fields.
 2. Walks child elements.

@@ -53,8 +53,6 @@ implementing two small traits: `Splitter` and `RecordParser`.
 other format. Those live in separate adapter packages. Install the engine plus
 the adapters you need.
 
-> **Note:** `crxml` was the original idea: a fast Crystal Reports XML parser that needed parallel, bounded-memory, and Arrow-native execution. The engine that made `crxml` fast (`Splitter` + `RecordParser` + `TableBuilder` + `ExecutionPlan`) was then separated and abstracted into `rypipe` so any format could reuse it. `crxml` now lives as a thin adapter (`crxml-core` + `CrystalXMLSource`) on top of `rypipe-core`. See `rypipe` `docs/crxml-adapter.md` for the `3 GB/s` evolution.
-
 ## Why rypipe
 
 - **One runtime, many formats.** XML, JSON, CSV, HTML, TSV, and any future
@@ -210,18 +208,27 @@ packages are absent. Set `RYPIPE_REQUIRE_OPTIONAL_DEPS=1` to turn a missing
 optional dependency into a hard failure instead. CI sets it so that optional
 coverage cannot silently disappear from a green run.
 
-## Benchmark: parallel streaming with frozen schema (parallel Discovery)
+## Benchmark: parallel streaming with explicit schema
 
-`crxml` (reference adapter) on Ryzen 5800X, 533 MB real / 1 GB synthetic, warm, median-of-7, frozen schema (`FrozenSchema` `crates/rypipe-core/src/schema.rs:21`, `discovery_ns` in `get_par_profile()`):
+`crxml` (reference adapter) on Ryzen 5800X, 533 MB / 1 GB, warm, median-of-7, explicit schema (`FrozenSchema` `crates/rypipe-core/src/schema.rs:21`, `discovery_ns` in `get_par_profile()`):
 
 | Mode | 533 MB Table | 1 GB Table | RssAnon 533 MB | Schema |
 |---|---|---|---|---|
 | `Pipeline::read_path_par` `par128` (4 MB) | **4470 MB/s** | 4278 MB/s | 137 MB | N/A |
-| `ParallelStreamingExecutor` `64MB/16t` auto (2 MB) | **4497 MB/s** | 3782* MB/s | **88 MB** | parallel 16×2 MiB sampled Discovery (5.3 ms, was 19 ms serial) |
+| `ParallelStreamingExecutor` `64MB/16t` auto (2 MB) | **4497 MB/s** | 3782* MB/s | **88 MB** | parallel 16x2 MiB sampled Discovery (5.3 ms) |
 | `ParallelStreamingExecutor` `64MB/16t` explicit `schema=[10 cols]` | **4980 MB/s** | ~4900 MB/s | **88 MB** | `from_plan` exact, no Discovery |
 | `ParallelStreamingExecutor` Vec\<Batch\> auto | 4485 MB/s | 3863* MB/s | 88 MB | same |
 
-\* 1 GB auto still 3782/3863 from before parallel Discovery was re-measured on 533 MB only (parallel 19→5.3 ms). Before frozen schema, auto was 4770/4551 (unstable: batch 2 order `FieldG` vs `Text20` last, `pq.ParquetWriter` raised). Frozen schema fixes order (every batch same, sparse `FieldG` 30%/`Text21` 1% as all-null) via `ensure_schema` `crates/rypipe-core/src/engine.rs:79` but adds 5.3 ms (was 15% at 19 ms, now 4% at 5.3 ms), making auto **+0.6% vs `par128`** (4497 vs 4470, within CoV), unblocking `auto` default. Explicit still +11% and defines the ceiling. Sweep: `par` peaks at 4 MB, streaming at 2 MB; one divisor cannot serve both, kept split (`par` `4 MB`, streaming `2 MB` via `budget/(threads×2)`). Cap raised `8×threads`→`16×threads` (256) so 533 MB now hits ideal 133 for 4 MB (was capped 128). See `crxml` `docs/performance.md` for like-for-like, chunk-per-cell, fixed-chunk isolation (par 1 MB collapses 3553 vs streaming 3812, +7% via `chunk_buf` reuse).
+\* 1 GB auto still 3782/3863; 533 MB auto matches par128 (4497 vs 4470, +0.6%, within CoV) with Discovery at 5.3 ms. Explicit schema is +11% vs par128 (4980 vs 4470) and defines the ceiling. `par` peaks at 4 MB, streaming at 2 MB; one divisor cannot serve both, kept split (`par` `4 MB`, streaming `2 MB` via `budget/(threads*2)`). See `crxml` `docs/performance.md` for like-for-like, chunk-per-cell, fixed-chunk isolation.
+
+### Schema pre-declaration
+
+The biggest performance lever for known schemas is declaring `schema=[...]`
+and `field_types={...}` up front. This skips column discovery, builds typed
+Arrow arrays directly (no intermediate strings), and stabilizes column order
+across parallel chunks. In the crxml reference adapter, explicit schema
+lifts throughput from 4.2 GB/s to 7.6 GB/s on production data (+80%), and
+the `row_satisfied` byte-jump reaches 11 GB/s on benchmarks.
 
 Run the engine throughput benchmark:
 
