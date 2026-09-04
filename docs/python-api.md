@@ -1,84 +1,30 @@
 # Python API
 
-`rypipe` is the engine; adapters are separate packages. This page covers the
-Python API for both **end users** (consuming data) and **adapter authors**
-(subclassing `Source`/`Adapter`).
-
-!!! note
-    `rypipe` itself does **not** ship any format parsers. Install an adapter
-    package (e.g. `pip install crxml`) and import it. The adapter registers
-    itself with `rypipe` so `rypipe.read()` works.
+`rypipe` provides the engine; adapters are separate packages. End users
+**import the adapter** (e.g. `crxml`), not `rypipe`. Adapter creators
+import `rypipe` to subclass `Source`/`Adapter` and register with the engine.
 
 ## End users
 
-### `rypipe.read` -- single entry point
-
-```python
-import rypipe
-import crxml  # registers the "crxml" adapter
-
-table = rypipe.read("report.xml", row_tag="Details")
-```
-
-All common options are passed through to the adapter:
-
-```python
-table = rypipe.read(
-    "report.xml",
-    format="crxml",                    # inferred from extension when omitted
-    row_tag="Details",                 # adapter-specific
-    field_types={"amount": "float64", "qty": "int64"},
-    dictionary_columns=["status"],
-    schema=["id", "status", "amount"],  # column order + skip discovery
-    filter={"field": "status", "op": "==", "value": "active"},
-    auto_dict=False,
-    use_mmap=False,
-    prefault=False,
-)
-```
-
-Returns a `pyarrow.Table`.
-
-You can also pass an adapter object directly:
-
-```python
-table = rypipe.read("report.xml", adapter=my_crxml_instance, row_tag="Details")
-```
-
-### `rypipe.read_par` -- parallel read
-
-Convenience wrapper that passes `chunks` to the adapter:
-
-```python
-table = rypipe.read_par("report.xml", chunks=8, row_tag="Details")
-```
-
-### `rypipe.read_stream` -- bounded-memory streaming
-
-Convenience wrapper that passes a memory budget. `memory` accepts an int
-(bytes) or a human-readable string:
-
-```python
-table = rypipe.read_stream("huge.xml", memory="500MiB", row_tag="Details")
-```
-
-### Streaming batches
-
-```python
-for batch in rypipe.read_batches("huge.xml", memory="256MiB", row_tag="Details"):
-    process(batch)
-```
-
-Yields `pyarrow.RecordBatch` objects one at a time. Parsing memory is bounded
-independently of input-file size.
-
-### Pipeline API
-
-When an adapter exposes a `Source` subclass, you get the pipeline `|` operator:
+### Import the adapter, not rypipe
 
 ```python
 from crxml import CrystalXMLSource
-from rypipe import RenameFields, DropFields, CastTypes, FilterRows
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+df = src.to_dataframe()
+```
+
+Each adapter exports its own `Source` class and pipeline stages. You do not
+need to import `rypipe` directly.
+
+### Two APIs: Source class vs rypipe.read
+
+**Source class (recommended):** Direct access to the adapter's parser, with
+full pipeline support:
+
+```python
+from crxml import CrystalXMLSource, RenameFields, DropFields, CastTypes, FilterRows
 
 src = CrystalXMLSource("report.xml", row_tag="Details")
 
@@ -91,7 +37,19 @@ table = (
 ).to_arrow()
 ```
 
-#### Stages
+**rypipe.read (optional):** If `rypipe` is also installed, adapters register
+themselves automatically. This provides a generic entry point:
+
+```python
+import rypipe  # optional: only needed for the generic API
+
+table = rypipe.read("report.xml", format="crxml", row_tag="Details")
+```
+
+Most users should prefer the Source class API. `rypipe.read` is useful for
+generic ETL scripts that handle multiple formats.
+
+### Pipeline stages
 
 | Stage | Effect |
 |-------|--------|
@@ -102,93 +60,112 @@ table = (
 | `FilterRows(field_a="a", op=">", field_b="b")` | Column-to-column comparison |
 | `FilterRowsAny(...)`, `FilterRowsAll(...)`, `FilterRowsNot(...)` | Boolean combinators |
 
-Stages that rename, drop, cast, or filter constants are fused into the Rust
-parse loop when the adapter supports plan kwargs.
+Stages are fused into the Rust parse loop when the adapter supports plan
+kwargs. Without fusion, they fall back to Python execution over a full table.
 
-#### Sinks
-
-```python
-from rypipe import collect, to_arrow, to_dataframe, to_csv, to_parquet
-
-rows = collect(pipeline)
-table = to_arrow(pipeline)
-df = to_dataframe(pipeline)
-to_csv(pipeline, "out.csv")
-to_parquet(pipeline, "out.parquet")
-```
-
-Or use `Source` methods directly:
+### Sinks
 
 ```python
+from crxml import to_dataframe, to_csv, collect
+
 table = src.to_arrow()
 df = src.to_pandas()
 df = src.to_polars()
 src.to_parquet("out.parquet")
+
+# Or use pipeline sinks
+df = to_dataframe(pipeline)
+to_csv(pipeline, "out.csv")
+rows = collect(pipeline)
 ```
+
+### Streaming batches
+
+```python
+for batch in src.iter_record_batches(memory="256MiB"):
+    process(batch)
+```
+
+Yields `pyarrow.RecordBatch` objects with bounded memory.
 
 ### Plan kwargs
 
-All `read` functions and `Source` constructors accept these pushdown kwargs:
+All `Source` constructors accept pushdown kwargs:
 
 | Kwarg | Type | Effect |
 |-------|------|--------|
-| `rename` / `field_mapping` | `dict[str, str]` | Rename raw fields |
-| `drop` / `drop_fields` | `list[str]` | Drop fields by resolved name |
 | `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, `"string"`, `"date32"`, `"timestamp"` |
 | `dictionary_columns` | `list[str]` | Explicit dictionary encoding |
-| `filter` | `dict` | Per-row filter (see Filters below) |
 | `schema` | `list[str]` | Output column order (skips discovery) |
-| `auto_dict` | `bool` | Upgrade low-cardinality string columns to dictionary |
-| `auto_dict_threshold` | `float` | Max distinct/row ratio for auto-dict (default `0.05`) |
-| `auto_dict_max_size` | `int` | Max dictionary entries for auto-dict (default `256`) |
+| `filter` | `dict` | Per-row filter (see below) |
+| `auto_dict` | `bool` | Upgrade low-cardinality strings to dictionary |
 | `use_mmap` | `bool` | Memory-map the input file |
 | `prefault` | `bool` | `MADV_WILLNEED` when mmap is enabled |
 
 ### Filters
 
-Constant equality/inequality (evaluated per-row during parse):
+Constant equality/inequality:
 
 ```python
-filter={"field": "status", "op": "==", "value": "active"}
-filter={"field": "status", "op": "!=", "value": "archived"}
+FilterRows(field="status", op="==", value="active")
 ```
 
-Column-to-column comparison (native-typed, with numeric promotion):
+Column-to-column comparison:
 
 ```python
-filter={"field_a": "amount", "op": ">", "field_b": "threshold"}
+FilterRows(field_a="amount", op=">", field_b="threshold")
 ```
 
 Boolean combinators:
 
 ```python
-filter={"or": [{"field": "status", "op": "==", "value": "active"},
-               {"not": {"field": "flag", "op": "==", "value": "deleted"}}]}
-filter={"and": [{"field": "a", op: "==", "value": "1"},
-                {"field_a": "x", "op": ">", "field_b": "y"}]}
+from crxml import FilterRowsAny, FilterRowsAll, FilterRowsNot
+
+FilterRowsAny(
+    FilterRows(field="status", op="==", value="active"),
+    FilterRows(field_a="age", op=">=", field_b="min_age"),
+)
 ```
-
-### Format auto-detection
-
-`rypipe.read` infers the adapter from the file extension when `format` is not
-provided. Only extensions registered by an installed adapter package work.
-If no adapter is registered, pass `format=` explicitly or install the adapter.
 
 ### Exceptions
 
 | Exception | Meaning |
 |-----------|---------|
-| `rypipe.ParseError` | Malformed input or parse failure |
-| `rypipe.PlanError` | Invalid pushdown plan (unknown field type, bad filter op) |
-| `rypipe.MergeError` | Chunk-merge conflict (type mismatch across chunks) |
-| `rypipe.RypipeError` | Invalid API usage (bad memory string, unknown extension) |
+| `crxml.XmlError` | Malformed input or parse failure |
+| `crxml.PlanError` | Invalid pushdown plan |
+| `crxml.MergeError` | Chunk-merge conflict |
+
+### Schema performance
+
+When the column set is known, pass `schema=` to skip discovery and hit the
+fast path. This is the single largest performance lever:
+
+```python
+schema = src.schema()  # discover once
+fast = CrystalXMLSource("report.xml", row_tag="Details", schema=schema)
+df = fast.to_dataframe()
+```
+
+Or use `discover_schema` for batch workloads:
+
+```python
+from crxml import discover_schema
+
+schema = discover_schema("sample.xml")  # 5 ms once
+for f in files:
+    src = CrystalXMLSource(f, row_tag="Details", schema=schema)
+    for batch in src.iter_record_batches(memory="64MB"):
+        writer.write_batch(batch)
+```
+
+See [Schema](./advanced/schema-and-types.md) for details.
 
 ## Adapter authors
 
 ### `rypipe.Source`
 
-Abstract base class for row-oriented file sources. Implement `_read_arrow`
-to get pipelines, stages, and sinks for free:
+Abstract base class. Implement `_read_arrow` to get pipelines, stages, and
+sinks for free:
 
 ```python
 from rypipe import Source
@@ -198,22 +175,12 @@ class MySource(Source):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
-        # Pass merged plan to your Rust reader:
         return my_rust_read(str(self._path), **plan)
 ```
 
-Once implemented, `MySource` exposes:
-
-- Row iteration: `for row in source`
-- Table export: `source.to_arrow()`, `source.to_pandas()`, `source.to_polars()`
-- Pipeline operator: `source | RenameFields(...)`
-- Batch iteration: `source.iter_arrow_batches(batch_size=10_000)`
-- Caching: `source.clear_cache()`
-
 ### `rypipe.Adapter`
 
-Simpler alternative: subclass `Adapter` and implement only `read(path, **kwargs)`.
-Plan kwargs are merged automatically:
+Simpler alternative. Implement only `read(path, **kwargs)`:
 
 ```python
 from rypipe import Adapter
@@ -221,8 +188,6 @@ from rypipe import Adapter
 class CsvAdapter(Adapter):
     def read(self, path, **kwargs):
         return _rypipe_csv.read_csv(path, **kwargs)
-
-source = CsvAdapter("data.csv")
 ```
 
 ### Registration
@@ -233,11 +198,7 @@ import rypipe
 rypipe.register_adapter("csv", CsvAdapter(), extensions=[".csv"])
 ```
 
-Now `rypipe.read("data.csv")` works automatically.
-
 ### Pure-Python adapters
-
-You can write an adapter entirely in Python:
 
 ```python
 import rypipe, pyarrow as pa
@@ -254,24 +215,7 @@ rypipe.register_adapter("json", JSONAdapter(), extensions=[".json"])
 
 > **Performance warning:** Pure-Python adapters run at Python speed. The Rust
 > `Splitter`/`RecordParser` traits deliver 4+ GB/s via SIMD scanning and
-> zero-copy export. Pure Python is typically 10-50x slower. Use it for
-> correctness and prototyping; use Rust for throughput.
-
-## Low-level API (`import _rypipe`)
-
-`_rypipe` is the Rust extension that adapter packages build on. It exposes
-shared exceptions and Rust helpers; adapter crates implement the actual
-`read` functions.
-
-### Rust helpers (used from adapter crates)
-
-```rust
-use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
-```
-
-- `execution_plan_from_kwargs`: Python kwargs to `ExecutionPlan`
-- `record_batches_to_pyarrow_table`: `&[RecordBatch]` to `pyarrow.Table`
-- `record_batches_to_pyarrow_batches`: streaming export as `list[RecordBatch]`
+> zero-copy export. Pure Python is typically 10-50x slower.
 
 ## See also
 
