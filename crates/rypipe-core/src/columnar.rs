@@ -10,7 +10,7 @@ use arrow::datatypes::{
     DataType, Int32Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType,
 };
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::FxHashSet as HashSet;
 
 use crate::plan::FieldType;
 use crate::value::Value;
