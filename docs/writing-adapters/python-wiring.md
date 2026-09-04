@@ -29,15 +29,14 @@ my_adapter/
     └── drop.py            # DropFields
 ```
 
-/// important
+!!! important
 
-**Users only import from your adapter.** They write
-`from my_adapter import CastTypes, FilterRows`: never
-`from rypipe import CastTypes`. This is the **crxml formula**:
-adapters repack the full pipeline API so end users never depend on
-**rypipe** directly.
+    **Users only import from your adapter.** They write
+    `from my_adapter import CastTypes, FilterRows`: never
+    `from rypipe import CastTypes`. This is the **crxml formula**:
+    adapters repack the full pipeline API so end users never depend on
+    **rypipe** directly.
 
-///
 
 ## Source subclass { #source-subclass }
 
@@ -87,13 +86,12 @@ You must merge these with your construction kwargs and pass them to your
 Rust reader. If you ignore `plan_overrides`, fused stages silently fall back
 to Python execution: 10–50× slower.
 
-/// warning
+!!! warning
 
-Never ignore `plan_overrides`. Fused stages silently fall back to Python
-execution over a full table when plan kwargs are not forwarded, turning a
-microsecond Rust path into a millisecond Python loop.
+    Never ignore `plan_overrides`. Fused stages silently fall back to Python
+    execution over a full table when plan kwargs are not forwarded, turning a
+    microsecond Rust path into a millisecond Python loop.
 
-///
 
 ## Adapter class { #adapter-class }
 
@@ -125,13 +123,12 @@ class MyAdapter:
         )
 ```
 
-/// note
+!!! note
 
-The adapter's `read()` method returns a `pyarrow.Table`, not a Source.
-This is by design: `rypipe.read()` calls `adapter.read()` and expects a
-table. Users who want pipelines use the Source directly.
+    The adapter's `read()` method returns a `pyarrow.Table`, not a Source.
+    This is by design: `rypipe.read()` calls `adapter.read()` and expects a
+    table. Users who want pipelines use the Source directly.
 
-///
 
 ## Registration { #registration }
 
@@ -300,13 +297,12 @@ class FilterRows:
         return {"filter": self._filter_spec} if self._filter_spec else None
 ```
 
-/// tip
+!!! tip
 
-If your format is text-only and has no numeric fields, the `str` cast is a
-no-op: `_plan_kwargs` returns `None` and the engine skips fusing it. No
-harm done, but you can skip the `CastTypes` stage entirely.
+    If your format is text-only and has no numeric fields, the `str` cast is a
+    no-op: `_plan_kwargs` returns `None` and the engine skips fusing it. No
+    harm done, but you can skip the `CastTypes` stage entirely.
 
-///
 
 ### RenameFields and DropFields { #rename-and-drop }
 
@@ -347,13 +343,12 @@ class DropFields:
         return {"drop_fields": sorted(self._fields_set)}
 ```
 
-/// warning
+!!! warning
 
-`DropFields` expects a `list[str]`, not a bare string. Passing a string
-raises a `TypeError` with a helpful message: but this is a common mistake
-when migrating from other libraries.
+    `DropFields` expects a `list[str]`, not a bare string. Passing a string
+    raises a `TypeError` with a helpful message: but this is a common mistake
+    when migrating from other libraries.
 
-///
 
 ## Streaming { #streaming }
 

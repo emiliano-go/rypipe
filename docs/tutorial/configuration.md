@@ -38,12 +38,11 @@ them:
 | `schema` | `list[str]` | Expected column names and order. |
 | `auto_dict` | `bool` | Auto-dictionary-encode low-cardinality string columns. |
 
-/// note
+!!! note
 
-Not all adapters support all kwargs. Check your adapter's documentation
-for supported options. Unsupported kwargs are silently ignored.
+    Not all adapters support all kwargs. Check your adapter's documentation
+    for supported options. Unsupported kwargs are silently ignored.
 
-///
 
 ## Source constructor options { #source-constructor-options}
 

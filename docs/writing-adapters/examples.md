@@ -92,14 +92,13 @@ let batch = pipeline.read_path("data.csv", false, false)?;
 
 ---
 
-/// warning
+!!! warning
 
-CSV splitting must handle quoted fields. A newline inside `"..."` is not a
-record boundary: without `skip_regions`, the splitter will break rows
-mid-quote, producing corrupt chunks. Always implement `SkipRegionFinder`
-for CSV.
+    CSV splitting must handle quoted fields. A newline inside `"..."` is not a
+    record boundary: without `skip_regions`, the splitter will break rows
+    mid-quote, producing corrupt chunks. Always implement `SkipRegionFinder`
+    for CSV.
 
-///
 
 ## JSONL Adapter { #jsonl-adapter }
 
@@ -172,14 +171,13 @@ impl RecordParser for JsonlParser {
 
 ---
 
-/// tip
+!!! tip
 
-JSON values are inherently typed: `serde_json::Number` maps cleanly to
-`Value::Int64` or `Value::Float64`. Avoid converting everything to strings
-when your format already has a typed representation. Emit typed values
-directly to skip post-parse casting.
+    JSON values are inherently typed: `serde_json::Number` maps cleanly to
+    `Value::Int64` or `Value::Float64`. Avoid converting everything to strings
+    when your format already has a typed representation. Emit typed values
+    directly to skip post-parse casting.
 
-///
 
 ## TSV Adapter { #tsv-adapter }
 

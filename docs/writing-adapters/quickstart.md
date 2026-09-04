@@ -119,13 +119,12 @@ impl RecordParser for LogParser {
 }
 ```
 
-/// tip
+!!! tip
 
-Always check `sink.wants(key)` before parsing a field's value. When the user
-drops a column, `wants()` returns `false` and you skip all work for that
-field: no scanning, no decoding.
+    Always check `sink.wants(key)` before parsing a field's value. When the user
+    drops a column, `wants()` returns `false` and you skip all work for that
+    field: no scanning, no decoding.
 
-///
 
 ## Step 4: Expose to Python { #step-4-expose-to-python }
 
@@ -251,14 +250,13 @@ def _register() -> None:
 _register()
 ```
 
-/// tip
+!!! tip
 
-Pass `schema=["id", "name", "active"]` and `field_types={"active": "bool"}`
-when constructing `LogSource` to skip column discovery and emit typed Arrow
-arrays directly. This alone can boost throughput by +80% on projection
-workloads.
+    Pass `schema=["id", "name", "active"]` and `field_types={"active": "bool"}`
+    when constructing `LogSource` to skip column discovery and emit typed Arrow
+    arrays directly. This alone can boost throughput by +80% on projection
+    workloads.
 
-///
 
 For the full stage implementations (`CastTypes`, `FilterRows`, etc.), see
 [Python Wiring](./python-wiring.md).
@@ -329,13 +327,12 @@ print(result)
 * [Techniques](./techniques.md): performance optimizations
 * [Examples](./examples.md): worked CSV, JSONL, and TSV adapters
 
-/// warning
+!!! warning
 
-The `LogSource._read_arrow` method **must** forward `plan_overrides` to the
-Rust reader. If you ignore them, fused pipeline stages silently fall back
-to Python execution: 10–50× slower than the Rust path.
+    The `LogSource._read_arrow` method **must** forward `plan_overrides` to the
+    Rust reader. If you ignore them, fused pipeline stages silently fall back
+    to Python execution: 10–50× slower than the Rust path.
 
-///
 
 ## Recap { #recap }
 

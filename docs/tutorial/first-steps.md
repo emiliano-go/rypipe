@@ -35,12 +35,11 @@ from rypipe_log import LogAdapter
 table = rypipe.read("app.log", adapter=LogAdapter())
 ```
 
-/// tip
+!!! tip
 
-If no adapter is registered for the extension, **rypipe** raises a
-`RypipeError` with a helpful message suggesting which adapter to install.
+    If no adapter is registered for the extension, **rypipe** raises a
+    `RypipeError` with a helpful message suggesting which adapter to install.
 
-///
 
 ## Passing adapter kwargs { #passing-adapter-kwargs }
 
@@ -115,12 +114,11 @@ The filter spec is a dictionary with:
 * `op`: comparison operator (`"=="`, `"!="`, `">"`, `"<"`, `">="`, `"<="`)
 * `value`: the value to compare against
 
-/// note
+!!! note
 
-Pushdown filters are adapter-dependent. Check your adapter's documentation
-to see which filters are supported.
+    Pushdown filters are adapter-dependent. Check your adapter's documentation
+    to see which filters are supported.
 
-///
 
 ## Error handling { #error-handling }
 

@@ -166,13 +166,12 @@ and `put_field("amount", ...)` builds `Float64Array` directly. The filter
 checks `amount > 100.0` per row with native f64 comparison. Without
 `field_types`, the filter falls back to string comparison or is skipped.
 
-/// tip
+!!! tip
 
-Partial schemas work too: declare the columns you know and the engine
-automatically appends unknown columns in parallel streaming. This is useful
-when the format has optional fields that appear only in some rows.
+    Partial schemas work too: declare the columns you know and the engine
+    automatically appends unknown columns in parallel streaming. This is useful
+    when the format has optional fields that appear only in some rows.
 
-///
 
 ## Common patterns { #common-patterns }
 
@@ -298,13 +297,12 @@ column order enables parallel export (~4,980 MB/s, +11%). With `schema_order`
 + projection, the scanner skips unwanted fields via `row_satisfied` byte-jump
 (~7,630 MB/s, +80%).
 
-/// warning
+!!! warning
 
-Without `field_types`, string-to-number filters compare lexicographically
-(`"9" > "10"` is `true`). Always set `field_types` on columns used in
-numeric filters to get native comparison.
+    Without `field_types`, string-to-number filters compare lexicographically
+    (`"9" > "10"` is `true`). Always set `field_types` on columns used in
+    numeric filters to get native comparison.
 
-///
 
 ## Troubleshooting { #troubleshooting }
 

@@ -87,12 +87,11 @@ stage = DropFields(["InternalId", "TempCol", "DebugInfo"])
 
 * `fields: list[str]`: list of column names to drop.
 
-/// warning
+!!! warning
 
-Pass a list, not a bare string. `DropFields("name")` raises `TypeError`.
-Use `DropFields(["name"])` instead.
+    Pass a list, not a bare string. `DropFields("name")` raises `TypeError`.
+    Use `DropFields(["name"])` instead.
 
-///
 
 ### CastTypes { #casttypes}
 
@@ -110,12 +109,11 @@ stage = CastTypes({"amount": float, "age": int})
 * `mapping: dict[str, Callable]`: mapping from column name to Python callable
   (`int`, `float`, `str`, `bool`).
 
-/// note
+!!! note
 
-If a row is missing the field, the cast is silently skipped. If the cast
-fails (e.g., `int("abc")`), a `ValueError` is raised with the row value.
+    If a row is missing the field, the cast is silently skipped. If the cast
+    fails (e.g., `int("abc")`), a `ValueError` is raised with the row value.
 
-///
 
 ### FilterRows { #filterrows}
 
@@ -183,12 +181,11 @@ stage = FilterRowsAll(
 stage = FilterRowsNot(FilterRows(field="status", op="==", value="deleted"))
 ```
 
-/// warning
+!!! warning
 
-Combinators only accept fusable `FilterRows` instances (the keyword form
-with `field`/`field_a`). Callable predicates cannot be combined.
+    Combinators only accept fusable `FilterRows` instances (the keyword form
+    with `field`/`field_a`). Callable predicates cannot be combined.
 
-///
 
 ## Chaining multiple stages { #chaining-multiple-stages }
 
@@ -211,12 +208,11 @@ table = (
 ).to_arrow()
 ```
 
-/// tip
+!!! tip
 
-When all stages are fusable, **rypipe** pushes the entire pipeline into the
-Rust parse loop. No Python row processing occurs.
+    When all stages are fusable, **rypipe** pushes the entire pipeline into the
+    Rust parse loop. No Python row processing occurs.
 
-///
 
 ## Iterating rows { #iterating-rows }
 

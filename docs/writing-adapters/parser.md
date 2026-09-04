@@ -93,13 +93,12 @@ The buffered filter path may hold values past the end of your parse function,
 so a borrow of a temporary would dangle. `Cow::Borrowed` is safe because it
 borrows from the chunk's byte slice, which lives long enough.
 
-/// note
+!!! note
 
-The chunk's byte slice outlives `parse_chunk`: the engine holds the buffer
-while it merges results. Your `Cow::Borrowed` references are valid through
-the entire merge pass, not just during parsing.
+    The chunk's byte slice outlives `parse_chunk`: the engine holds the buffer
+    while it merges results. Your `Cow::Borrowed` references are valid through
+    the entire merge pass, not just during parsing.
 
-///
 
 ### 2. Check `wants()` before expensive extraction { #2-check-wants-before-expensive-extraction }
 
@@ -149,13 +148,12 @@ still stores the value correctly and exports it as the right Arrow type.
 If your parser reaches the end of the chunk mid-record, just return. The engine
 discards partial trailing rows automatically during `normalize()`.
 
-/// warning
+!!! warning
 
-If your parser calls `end_row()` on a partial trailing row, the engine will
-keep it: null-filling the missing fields. This produces wrong results
-silently. Always let the engine handle incomplete records at chunk boundaries.
+    If your parser calls `end_row()` on a partial trailing row, the engine will
+    keep it: null-filling the missing fields. This produces wrong results
+    silently. Always let the engine handle incomplete records at chunk boundaries.
 
-///
 
 ### 6. Consider `parse_chunk_generic` for hot paths { #6-consider-parse_chunk_generic-for-hot-paths }
 

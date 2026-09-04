@@ -86,12 +86,11 @@ stage = DropFields(["InternalId"])
 skips the dropped column entirely: no scanning, no decoding, no memory
 allocation for that column.
 
-/// tip
+!!! tip
 
-Dropped columns are the cheapest optimization. The engine uses `wants()`
-to skip all work for the column during parsing.
+    Dropped columns are the cheapest optimization. The engine uses `wants()`
+    to skip all work for the column during parsing.
 
-///
 
 ## CastTypes { #casttypes }
 
@@ -195,13 +194,12 @@ or `False` to drop:
 stage = FilterRows(lambda r: r["name"].startswith("A") and r["amount"] > 100)
 ```
 
-/// warning
+!!! warning
 
-Callable predicates **cannot be fused** into the Rust parse loop. They run
-in Python over the full table. For best performance, use the keyword form
-(`field`/`op`/`value`) whenever possible.
+    Callable predicates **cannot be fused** into the Rust parse loop. They run
+    in Python over the full table. For best performance, use the keyword form
+    (`field`/`op`/`value`) whenever possible.
 
-///
 
 ### Plan fusion { #filterrows-fusion }
 
@@ -248,12 +246,11 @@ stage = FilterRowsAll(
 
 **Parameters:** At least two `FilterRows` instances (keyword form only).
 
-/// note
+!!! note
 
-Chaining plain `FilterRows` with `|` already implies AND. `FilterRowsAll`
-is useful when combining inside another combinator or when the order matters.
+    Chaining plain `FilterRows` with `|` already implies AND. `FilterRowsAll`
+    is useful when combining inside another combinator or when the order matters.
 
-///
 
 ## FilterRowsNot { #filterrowsnot }
 

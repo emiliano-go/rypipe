@@ -67,12 +67,10 @@ table = rypipe.read(
 print(table.num_rows, table.num_columns)
 ```
 
-/// note
+!!! note
 
-`import my_adapter` is only needed once to register the adapter.
-After that, `rypipe.read("data.myfmt")` auto-detects the format.
-
-///
+    `import my_adapter` is only needed once to register the adapter.
+    After that, `rypipe.read("data.myfmt")` auto-detects the format.
 
 ### Pipeline API { #pipeline-api }
 

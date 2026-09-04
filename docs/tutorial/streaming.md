@@ -100,12 +100,11 @@ for batch in pipeline.iter_record_batches(memory="64MiB"):
     process(batch)
 ```
 
-/// note
+!!! note
 
-When all stages are fusable, **rypipe** pushes the entire pipeline into the
-streaming parse loop. Non-fusable stages run after each batch is parsed.
+    When all stages are fusable, **rypipe** pushes the entire pipeline into the
+    streaming parse loop. Non-fusable stages run after each batch is parsed.
 
-///
 
 ## Writing to Parquet { #writing-to-parquet}
 
@@ -164,12 +163,11 @@ numbers for the crxml adapter:
 | Single-thread | ~1 GB/s | File size |
 | Streaming (64 MiB) | ~500 MB/s | ~64 MiB |
 
-/// tip
+!!! tip
 
-Use streaming when your file is larger than ~50% of available RAM. For
-smaller files, the default parallel mode is faster.
+    Use streaming when your file is larger than ~50% of available RAM. For
+    smaller files, the default parallel mode is faster.
 
-///
 
 ## Recap { #recap }
 
