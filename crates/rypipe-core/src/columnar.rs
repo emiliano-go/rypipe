@@ -579,7 +579,12 @@ impl ColumnBuilder {
                 ColumnBuilder::Int64(v) => v.push(Some(i)),
                 ColumnBuilder::Float64(v) => v.push(Some(i as f64)),
                 ColumnBuilder::String(col) => col.push(Some(&i.to_string())),
-                ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                ColumnBuilder::Dictionary {
+                    codes,
+                    data,
+                    offsets,
+                    index,
+                } => {
                     let code = dict_code(data, offsets, index, &i.to_string());
                     codes.push(Some(code));
                 }
@@ -589,7 +594,12 @@ impl ColumnBuilder {
                 ColumnBuilder::Float64(v) => v.push(Some(f)),
                 ColumnBuilder::Int64(v) => v.push(Some(f as i64)),
                 ColumnBuilder::String(col) => col.push(Some(&f.to_string())),
-                ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                ColumnBuilder::Dictionary {
+                    codes,
+                    data,
+                    offsets,
+                    index,
+                } => {
                     let code = dict_code(data, offsets, index, &f.to_string());
                     codes.push(Some(code));
                 }
@@ -598,7 +608,12 @@ impl ColumnBuilder {
             Value::Bool(b) => match self {
                 ColumnBuilder::Boolean(v) => v.push(Some(b)),
                 ColumnBuilder::String(col) => col.push(Some(&b.to_string())),
-                ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                ColumnBuilder::Dictionary {
+                    codes,
+                    data,
+                    offsets,
+                    index,
+                } => {
                     let code = dict_code(data, offsets, index, &b.to_string());
                     codes.push(Some(code));
                 }
@@ -609,7 +624,12 @@ impl ColumnBuilder {
                 ColumnBuilder::Int64(v) => v.push(Some(d as i64)),
                 ColumnBuilder::Float64(v) => v.push(Some(d as f64)),
                 ColumnBuilder::String(col) => col.push(Some(&format_date32(d))),
-                ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                ColumnBuilder::Dictionary {
+                    codes,
+                    data,
+                    offsets,
+                    index,
+                } => {
                     let code = dict_code(data, offsets, index, &format_date32(d));
                     codes.push(Some(code));
                 }
@@ -626,7 +646,12 @@ impl ColumnBuilder {
                         Some(unit) => col.push(Some(&format_timestamp(ts, unit))),
                         None => col.push(Some(&ts.to_string())),
                     },
-                    ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                    ColumnBuilder::Dictionary {
+                        codes,
+                        data,
+                        offsets,
+                        index,
+                    } => {
                         let text = match unit {
                             Some(unit) => format_timestamp(ts, unit),
                             None => ts.to_string(),
@@ -719,7 +744,12 @@ impl ColumnBuilder {
                     None => codes.push(None),
                 }
             }
-            *self = ColumnBuilder::Dictionary { codes, data, offsets, index };
+            *self = ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                index,
+            };
             return Ok(());
         }
 
@@ -748,7 +778,12 @@ impl ColumnBuilder {
             ColumnBuilder::Timestamp(unit, v) => {
                 v.push(value.and_then(|s| parse_timestamp(&s, *unit)));
             }
-            ColumnBuilder::Dictionary { codes, data, offsets, index } => match value {
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                index,
+            } => match value {
                 Some(v) => {
                     let idx = dict_code(data, offsets, index, &v);
                     codes.push(Some(idx));
@@ -778,7 +813,12 @@ impl ColumnBuilder {
             ColumnBuilder::Timestamp(unit, v) => {
                 v.push(value.and_then(|s| parse_timestamp(s, *unit)));
             }
-            ColumnBuilder::Dictionary { codes, data, offsets, index } => match value {
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                index,
+            } => match value {
                 Some(v) => {
                     let idx = dict_code(data, offsets, index, v);
                     codes.push(Some(idx));
@@ -820,7 +860,12 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => v.bytes_used(),
             ColumnBuilder::Date32(v) => v.bytes_used(),
             ColumnBuilder::Timestamp(_, v) => v.bytes_used(),
-            ColumnBuilder::Dictionary { codes, data, offsets, .. } => codes.len() * 4 + data.len() + offsets.len() * 4,
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                ..
+            } => codes.len() * 4 + data.len() + offsets.len() * 4,
         }
     }
 
@@ -833,9 +878,12 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => v.capacity_bytes(),
             ColumnBuilder::Date32(v) => v.capacity_bytes(),
             ColumnBuilder::Timestamp(_, v) => v.capacity_bytes(),
-            ColumnBuilder::Dictionary { codes, data, offsets, .. } => {
-                codes.capacity_bytes() + data.capacity() + offsets.capacity() * 4
-            }
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                ..
+            } => codes.capacity_bytes() + data.capacity() + offsets.capacity() * 4,
         }
     }
 
@@ -848,7 +896,12 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => ColumnBuilder::Boolean(v.split_off(n)),
             ColumnBuilder::Date32(v) => ColumnBuilder::Date32(v.split_off(n)),
             ColumnBuilder::Timestamp(unit, v) => ColumnBuilder::Timestamp(*unit, v.split_off(n)),
-            ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                index,
+            } => {
                 let other_codes = codes.split_off(n);
                 ColumnBuilder::Dictionary {
                     codes: other_codes,
@@ -866,13 +919,16 @@ impl ColumnBuilder {
     pub(crate) fn get_filter_view(&self, index: usize) -> Option<&str> {
         match self {
             ColumnBuilder::String(v) => v.get(index),
-            ColumnBuilder::Dictionary { codes, data, offsets, .. } => {
-                codes.get(index).map(|code| {
-                    let start = offsets[*code as usize] as usize;
-                    let end = offsets[*code as usize + 1] as usize;
-                    std::str::from_utf8(&data[start..end]).unwrap_or("")
-                })
-            }
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                ..
+            } => codes.get(index).map(|code| {
+                let start = offsets[*code as usize] as usize;
+                let end = offsets[*code as usize + 1] as usize;
+                std::str::from_utf8(&data[start..end]).unwrap_or("")
+            }),
             _ => None,
         }
     }
@@ -890,13 +946,16 @@ impl ColumnBuilder {
                 let unit = *unit;
                 v.get(index).map(|ts| format_timestamp(ts, unit))
             }
-            ColumnBuilder::Dictionary { codes, data, offsets, .. } => {
-                codes.get(index).map(|code| {
-                    let start = offsets[*code as usize] as usize;
-                    let end = offsets[*code as usize + 1] as usize;
-                    String::from_utf8_lossy(&data[start..end]).into_owned()
-                })
-            }
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                ..
+            } => codes.get(index).map(|code| {
+                let start = offsets[*code as usize] as usize;
+                let end = offsets[*code as usize + 1] as usize;
+                String::from_utf8_lossy(&data[start..end]).into_owned()
+            }),
         }
     }
 
@@ -910,13 +969,16 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => v.get(index).map(TypedValue::Bool),
             ColumnBuilder::Date32(v) => v.get(index).map(TypedValue::Date32),
             ColumnBuilder::Timestamp(_, v) => v.get(index).map(TypedValue::Timestamp),
-            ColumnBuilder::Dictionary { codes, data, offsets, .. } => codes
-                .get(index)
-                .map(|&idx| {
-                    let start = offsets[idx as usize] as usize;
-                    let end = offsets[idx as usize + 1] as usize;
-                    TypedValue::Str(std::str::from_utf8(&data[start..end]).unwrap_or(""))
-                }),
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                ..
+            } => codes.get(index).map(|&idx| {
+                let start = offsets[idx as usize] as usize;
+                let end = offsets[idx as usize + 1] as usize;
+                TypedValue::Str(std::str::from_utf8(&data[start..end]).unwrap_or(""))
+            }),
         }
     }
 
@@ -1025,7 +1087,12 @@ impl ColumnBuilder {
                 None => codes.push(None),
             }
         }
-        *self = ColumnBuilder::Dictionary { codes, data, offsets, index };
+        *self = ColumnBuilder::Dictionary {
+            codes,
+            data,
+            offsets,
+            index,
+        };
     }
 
     /// Mutable access to dictionary codes for in-place remap.
@@ -1045,7 +1112,13 @@ impl ColumnBuilder {
         new_offsets: Vec<i32>,
         new_index: rustc_hash::FxHashMap<Box<str>, i32>,
     ) {
-        if let ColumnBuilder::Dictionary { data, offsets, index, .. } = self {
+        if let ColumnBuilder::Dictionary {
+            data,
+            offsets,
+            index,
+            ..
+        } = self
+        {
             *data = new_data;
             *offsets = new_offsets;
             *index = new_index;
@@ -1134,7 +1207,12 @@ impl ColumnBuilder {
                 TimeUnit::Microsecond => v.to_arrow::<TimestampMicrosecondType>()?,
                 TimeUnit::Nanosecond => v.to_arrow::<TimestampNanosecondType>()?,
             },
-            ColumnBuilder::Dictionary { codes, data, offsets, .. } => {
+            ColumnBuilder::Dictionary {
+                codes,
+                data,
+                offsets,
+                ..
+            } => {
                 use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
                 let codes_arr: Int32Array = std::mem::take(codes).into_options().collect();
                 // Zero-copy: wrap contiguous data+offsets directly into StringArray.
@@ -1312,7 +1390,13 @@ mod tests {
         d.push_value(Value::Float64(7.0)); // same string as Int64(7)
         d.push_value(Value::Bool(true));
         d.push_value(Value::Null);
-        if let ColumnBuilder::Dictionary { codes, data, offsets, .. } = &d {
+        if let ColumnBuilder::Dictionary {
+            codes,
+            data,
+            offsets,
+            ..
+        } = &d
+        {
             // Verify dictionary values via the contiguous buffer
             let vals: Vec<&str> = (0..offsets.len() - 1)
                 .map(|i| {

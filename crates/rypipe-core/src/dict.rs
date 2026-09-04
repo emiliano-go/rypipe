@@ -115,7 +115,13 @@ pub(crate) fn unify_dictionaries(
     // Build remap tables: local code -> global code
     let mut remaps = Vec::with_capacity(locals.len());
     for col in locals {
-        if let ColumnBuilder::Dictionary { data, offsets, index, .. } = col {
+        if let ColumnBuilder::Dictionary {
+            data,
+            offsets,
+            index,
+            ..
+        } = col
+        {
             let local_len = offsets.len() - 1;
             let mut map = Vec::with_capacity(local_len);
             let mut is_identity = true;

@@ -153,18 +153,22 @@ impl ParallelExecutor {
                     let first_idx = engines[0].field_index.get(col_name).copied();
                     if let Some(idx) = first_idx {
                         if engines[0].columns[idx].variant_key() == "dictionary" {
-                            let first_data =
-                                if let crate::columnar::ColumnBuilder::Dictionary { data, offsets, .. } =
-                                    &engines[0].columns[idx]
-                                {
-                                    (data, offsets)
-                                } else {
-                                    continue;
-                                };
+                            let first_data = if let crate::columnar::ColumnBuilder::Dictionary {
+                                data,
+                                offsets,
+                                ..
+                            } = &engines[0].columns[idx]
+                            {
+                                (data, offsets)
+                            } else {
+                                continue;
+                            };
                             for e in &engines[1..] {
                                 if let Some(&j) = e.field_index.get(col_name) {
                                     if let crate::columnar::ColumnBuilder::Dictionary {
-                                        data, offsets, ..
+                                        data,
+                                        offsets,
+                                        ..
                                     } = &e.columns[j]
                                     {
                                         if data != first_data.0 || offsets != first_data.1 {
@@ -214,7 +218,8 @@ impl ParallelExecutor {
                     .collect();
                 let (unified_dict, remaps) = crate::dict::unify_dictionaries(&seed, &col_refs);
                 // Build unified data+offsets+index for replace_dict.
-                let mut new_index: rustc_hash::FxHashMap<Box<str>, i32> = rustc_hash::FxHashMap::default();
+                let mut new_index: rustc_hash::FxHashMap<Box<str>, i32> =
+                    rustc_hash::FxHashMap::default();
                 for i in 0..(unified_dict.offsets.len() - 1) {
                     let start = unified_dict.offsets[i] as usize;
                     let end = unified_dict.offsets[i + 1] as usize;
