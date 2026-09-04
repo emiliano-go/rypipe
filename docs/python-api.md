@@ -1,162 +1,36 @@
 # Python API
 
-`rypipe-python` builds a mixed Rust/Python package. The public API lives in the
-`rypipe` package; `_rypipe` is the low-level Rust extension that adapter
-packages build on.
-
-`rypipe` itself does **not** ship any format parsers. Install a separate adapter
-package and import it; the adapter registers itself with `rypipe` so the
-high-level `read` API works. Adapters can also expose a `Source` subclass and
-get the pipeline/stage/sink API for free.
+`rypipe` is the engine; adapters are separate packages. This page covers the
+Python API for both **end users** (consuming data) and **adapter authors**
+(subclassing `Source`/`Adapter`).
 
 !!! note
-    **Adapters are written in Rust** for performance. Python users consume
-    data through `rypipe.read()` and the pipeline API without writing Rust.
-    Only adapter authors need to implement the Rust `Splitter` and
-    `RecordParser` traits (see [Writing a format adapter](./writing-adapters.md)).
+    `rypipe` itself does **not** ship any format parsers. Install an adapter
+    package (e.g. `pip install crxml`) and import it. The adapter registers
+    itself with `rypipe` so `rypipe.read()` works.
 
-## Building the Python module
+## End users
 
-```bash
-export PYO3_PYTHON=/path/to/python3.12
-maturin develop --release
-```
-
-`maturin` builds `crates/rypipe-python/Cargo.toml` and installs both the `rypipe`
-Python package and the `_rypipe` Rust extension.
-
-## Public API (`import rypipe`)
-
-### `rypipe.Source`
-
-Abstract base class for row-oriented file sources. Adapter packages subclass it
-and implement `_read_arrow`. Once they do, users get pipelines, stages, and
-sinks with no extra work.
-
-```python
-from rypipe import Source
-
-class MySource(Source):
-    def _read_arrow(self, plan_overrides=None):
-        # Build plan from construction kwargs + overrides, call the parser,
-        # return a pyarrow.Table.
-        ...
-```
-
-### `rypipe.Adapter`
-
-Even simpler: subclass `Adapter` and implement only ``read(path, **kwargs)``.
-Plan kwargs are merged and passed through automatically.
-
-```python
-from rypipe import Adapter
-
-class CsvAdapter(Adapter):
-    def read(self, path, **kwargs):
-        return _rypipe_csv.read_csv(path, **kwargs)
-
-source = CsvAdapter("data.csv")
-```
-
-A `Source` exposes:
-
-- Row iteration: `for row in source`
-- Table export: `source.to_arrow()`, `source.to_pandas()`, `source.to_polars()`,
-  `source.to_parquet(path)`
-- Pipeline operator: `source | RenameFields(...)`
-- Caching: `source.clear_cache()`
-
-### Pipeline stages
-
-`rypipe` ships fusable pipeline stages. Stages that rename, drop, cast, or
-filter constants are pushed into the Rust parse loop when the source supports
-plan kwargs.
-
-```python
-from rypipe import RenameFields, DropFields, CastTypes, FilterRows
-
-pipeline = (
-    source
-    | RenameFields({"old_name": "new_name"})
-    | DropFields(["internal_id"])
-    | CastTypes({"amount": float, "qty": int})
-    | FilterRows(field="status", op="==", value="active")
-)
-```
-
-`CastTypes` accepts Python callables (`int`, `float`, `bool`, `str`). When the
-callable maps to a Rust type (`int64`, `float64`, `bool`), it is fused into the
-Rust parse loop.
-
-`FilterRows` supports both constant filters and column-to-column comparisons:
-
-```python
-FilterRows(field="status", op="==", value="active")
-FilterRows(field_a="amount", op=">", field_b="threshold")
-```
-
-Supported ops: `==`, `!=`, `>`, `<`, `>=`, `<=`.
-
-Boolean combinators (`FilterRowsAny`, `FilterRowsAll`, `FilterRowsNot`) are
-fusable and build predicate trees that are evaluated per-row inside the Rust
-parse loop:
-
-```python
-from rypipe import FilterRowsAny, FilterRowsAll, FilterRowsNot
-
-# OR, AND, NOT (keyword-form leaves only; callables are not fusable)
-FilterRowsAny(
-    FilterRows(field="status", op="==", value="active"),
-    FilterRows(field_a="age", op=">=", field_b="min_age"),
-)
-FilterRowsAll(
-    FilterRows(field="region", op="==", value="us"),
-    FilterRows(field="status", op="==", value="active"),
-)
-FilterRowsNot(FilterRows(field="flag", op="==", value="deleted"))
-
-# Chaining FilterRows stages is an implicit AND:
-pipeline = src | FilterRows(field="a", op="==", value="1") | FilterRows(field="b", op="==", value="2")
-# equivalent to FilterRowsAll(...)
-
-# Arbitrary nesting via the filter dict:
-filter={"or": [{"field": "status", "op": "==", "value": "active"}, {"not": {"field": "flag", "op": "==", "value": "deleted"}}]}
-filter={"and": [{"field": "a", "op": "==", "value": "1"}, {"field_a": "x", "op": ">", "field_b": "y"}]}
-```
-
-### Pipeline sinks
-
-```python
-from rypipe import collect, to_arrow, to_dataframe, to_csv, to_parquet
-
-rows = collect(pipeline)
-table = to_arrow(pipeline)
-df = to_dataframe(pipeline)
-to_csv(pipeline, "out.csv")
-to_parquet(pipeline, "out.parquet")
-```
-
-Sinks try the fused Arrow path first and fall back to dict iteration when the
-pipeline ends with a generic stage.
-
-### `rypipe.read`
-
-Single entry point for all registered adapters.
+### `rypipe.read` -- single entry point
 
 ```python
 import rypipe
-import my_adapter  # registers the "myfmt" adapter
+import crxml  # registers the "crxml" adapter
 
-table = rypipe.read("data.myfmt")
+table = rypipe.read("report.xml", row_tag="Details")
+```
 
-# Same call with all common options:
+All common options are passed through to the adapter:
+
+```python
 table = rypipe.read(
-    "data.myfmt",
-    format="myfmt",          # inferred from extension when omitted
+    "report.xml",
+    format="crxml",                    # inferred from extension when omitted
+    row_tag="Details",                 # adapter-specific
     field_types={"amount": "float64", "qty": "int64"},
     dictionary_columns=["status"],
+    schema=["id", "status", "amount"],  # column order + skip discovery
     filter={"field": "status", "op": "==", "value": "active"},
-    schema=["id", "status", "amount"],
     auto_dict=False,
     use_mmap=False,
     prefault=False,
@@ -168,91 +42,109 @@ Returns a `pyarrow.Table`.
 You can also pass an adapter object directly:
 
 ```python
-table = rypipe.read("data.myfmt", adapter=my_adapter, row_tag="Row")
+table = rypipe.read("report.xml", adapter=my_crxml_instance, row_tag="Details")
 ```
 
-### `rypipe.read_par`
+### `rypipe.read_par` -- parallel read
 
-Convenience wrapper that passes `chunks` to the adapter.
+Convenience wrapper that passes `chunks` to the adapter:
 
 ```python
-table = rypipe.read_par("data.myfmt", chunks=8, field_types={"amount": "float64"})
+table = rypipe.read_par("report.xml", chunks=8, row_tag="Details")
 ```
 
-### `rypipe.read_stream`
+### `rypipe.read_stream` -- bounded-memory streaming
 
-Convenience wrapper that passes a memory budget to the adapter. `memory`
-accepts an int (bytes) or a human-readable string such as `"128MiB"`.
+Convenience wrapper that passes a memory budget. `memory` accepts an int
+(bytes) or a human-readable string:
 
 ```python
-table = rypipe.read_stream("huge.myfmt", memory="500MiB", row_tag="Row")
+table = rypipe.read_stream("huge.xml", memory="500MiB", row_tag="Details")
 ```
 
-### Format auto-detection
+### Streaming batches
 
-`rypipe.read` infers the adapter from the file extension when `format` is not
-provided, but only for extensions registered by an installed adapter package.
-If no adapter is registered, pass `format=` explicitly or install the adapter.
-
-### Exceptions
-
-| Exception | Meaning |
-|-----------|---------|
-| `rypipe.ParseError` | Malformed input or parse failure (including invalid UTF-8). |
-| `rypipe.XmlError` | Backward-compatible alias of `ParseError`. |
-| `rypipe.PlanError` | Invalid pushdown plan (unknown field type, bad filter op). |
-| `rypipe.MergeError` | Chunk-merge conflict (e.g. type mismatch across chunks). |
-| `rypipe.RypipeError` | Invalid API usage (bad memory string, unknown extension). |
-
-## Low-level API (`import _rypipe`)
-
-`_rypipe` is the Rust extension that adapter packages build on. It exposes the
-shared exceptions and Rust helper functions; adapter packages implement the
-actual `read` functions and call these helpers from their own PyO3 code.
-
-### Exceptions
-
-- `_rypipe.ParseError`
-- `_rypipe.XmlError`
-- `_rypipe.PlanError`
-- `_rypipe.MergeError`
-
-Adapter code raises these so users can catch them through `rypipe` as well.
-
-### Rust helpers (used from adapter crates)
-
-Adapter crates written in Rust use `rypipe_python` directly:
-
-```rust
-use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
+```python
+for batch in rypipe.read_batches("huge.xml", memory="256MiB", row_tag="Details"):
+    process(batch)
 ```
 
-`execution_plan_from_kwargs` converts Python kwargs into a
-`rypipe_core::ExecutionPlan`. `record_batches_to_pyarrow_table` turns a slice of
-Arrow `RecordBatch`es into a single `pyarrow.Table`;
-`record_batches_to_pyarrow_batches` exports them as a list of individual
-`pyarrow.RecordBatch` objects for streaming-style APIs.
+Yields `pyarrow.RecordBatch` objects one at a time. Parsing memory is bounded
+independently of input-file size.
 
-## Plan kwargs
+### Pipeline API
 
-All public `read` functions and `Source` constructors accept the same pushdown
-kwargs, which are passed through to the adapter.
+When an adapter exposes a `Source` subclass, you get the pipeline `|` operator:
+
+```python
+from crxml import CrystalXMLSource
+from rypipe import RenameFields, DropFields, CastTypes, FilterRows
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+table = (
+    src
+    | RenameFields({"{Report.InvoiceNo}": "invoice"})
+    | DropFields(["{Report.TaxRate}"])
+    | CastTypes({"amount": float})
+    | FilterRows(field="status", op="==", value="active")
+).to_arrow()
+```
+
+#### Stages
+
+| Stage | Effect |
+|-------|--------|
+| `RenameFields({"old": "new"})` | Rename fields |
+| `DropFields(["field"])` | Drop fields |
+| `CastTypes({"col": int})` | Cast to `int64`, `float64`, `bool`, or `str` |
+| `FilterRows(field="col", op="==", value="x")` | Filter rows |
+| `FilterRows(field_a="a", op=">", field_b="b")` | Column-to-column comparison |
+| `FilterRowsAny(...)`, `FilterRowsAll(...)`, `FilterRowsNot(...)` | Boolean combinators |
+
+Stages that rename, drop, cast, or filter constants are fused into the Rust
+parse loop when the adapter supports plan kwargs.
+
+#### Sinks
+
+```python
+from rypipe import collect, to_arrow, to_dataframe, to_csv, to_parquet
+
+rows = collect(pipeline)
+table = to_arrow(pipeline)
+df = to_dataframe(pipeline)
+to_csv(pipeline, "out.csv")
+to_parquet(pipeline, "out.parquet")
+```
+
+Or use `Source` methods directly:
+
+```python
+table = src.to_arrow()
+df = src.to_pandas()
+df = src.to_polars()
+src.to_parquet("out.parquet")
+```
+
+### Plan kwargs
+
+All `read` functions and `Source` constructors accept these pushdown kwargs:
 
 | Kwarg | Type | Effect |
 |-------|------|--------|
-| `rename` / `field_mapping` | `dict[str, str]` | Rename raw fields. |
-| `drop` / `drop_fields` | `list[str]` | Drop fields by resolved name. |
-| `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, `"string"`, `"date32"`, or `"timestamp"` (also `"timestamp[s]"`, `"timestamp[ms]"`, `"timestamp[us]"`, `"timestamp[ns]"`). |
-| `dictionary_columns` | `list[str]` | Explicit dictionary encoding. |
-| `filter` | `dict` | Per-row filter (see below). |
-| `schema` | `list[str]` | Output column order. |
-| `auto_dict` | `bool` | Upgrade low-cardinality string columns to dictionary. |
-| `auto_dict_threshold` | `float` | Max distinct/row ratio for auto-dict (default `0.05`). |
-| `auto_dict_max_size` | `int` | Max dictionary entries for auto-dict (default `256`). |
-| `use_mmap` | `bool` | Memory-map the input file. |
-| `prefault` | `bool` | `MADV_WILLNEED` when mmap is enabled. |
+| `rename` / `field_mapping` | `dict[str, str]` | Rename raw fields |
+| `drop` / `drop_fields` | `list[str]` | Drop fields by resolved name |
+| `field_types` | `dict[str, str]` | Cast columns to `"int64"`, `"float64"`, `"bool"`, `"dictionary"`, `"string"`, `"date32"`, `"timestamp"` |
+| `dictionary_columns` | `list[str]` | Explicit dictionary encoding |
+| `filter` | `dict` | Per-row filter (see Filters below) |
+| `schema` | `list[str]` | Output column order (skips discovery) |
+| `auto_dict` | `bool` | Upgrade low-cardinality string columns to dictionary |
+| `auto_dict_threshold` | `float` | Max distinct/row ratio for auto-dict (default `0.05`) |
+| `auto_dict_max_size` | `int` | Max dictionary entries for auto-dict (default `256`) |
+| `use_mmap` | `bool` | Memory-map the input file |
+| `prefault` | `bool` | `MADV_WILLNEED` when mmap is enabled |
 
-## Filters
+### Filters
 
 Constant equality/inequality (evaluated per-row during parse):
 
@@ -261,44 +153,128 @@ filter={"field": "status", "op": "==", "value": "active"}
 filter={"field": "status", "op": "!=", "value": "archived"}
 ```
 
-Column-to-column comparison (evaluated per-row during parse with native-typed
-comparison; numeric columns promote Int64/Float64):
+Column-to-column comparison (native-typed, with numeric promotion):
 
 ```python
 filter={"field_a": "amount", "op": ">", "field_b": "threshold"}
 ```
 
-Supported comparison ops: `>`, `<`, `>=`, `<=`, `==`, `!=`. Mismatched
-non-numeric types or null operands fail the row.
+Boolean combinators:
 
-Boolean combinators use the same leaf shapes above with
-`{"and": [spec, ...]}`, `{"or": [spec, ...]}`, and `{"not": spec}` and may be
-nested arbitrarily; evaluation is per-row with short-circuiting, so missing-
-field and type-mismatch behaviour of leaves is preserved (a negated missing
-field, for example, keeps the row).
+```python
+filter={"or": [{"field": "status", "op": "==", "value": "active"},
+               {"not": {"field": "flag", "op": "==", "value": "deleted"}}]}
+filter={"and": [{"field": "a", op: "==", "value": "1"},
+                {"field_a": "x", "op": ">", "field_b": "y"}]}
+```
 
-## Streaming batches
+### Format auto-detection
+
+`rypipe.read` infers the adapter from the file extension when `format` is not
+provided. Only extensions registered by an installed adapter package work.
+If no adapter is registered, pass `format=` explicitly or install the adapter.
+
+### Exceptions
+
+| Exception | Meaning |
+|-----------|---------|
+| `rypipe.ParseError` | Malformed input or parse failure |
+| `rypipe.PlanError` | Invalid pushdown plan (unknown field type, bad filter op) |
+| `rypipe.MergeError` | Chunk-merge conflict (type mismatch across chunks) |
+| `rypipe.RypipeError` | Invalid API usage (bad memory string, unknown extension) |
+
+## Adapter authors
+
+### `rypipe.Source`
+
+Abstract base class for row-oriented file sources. Implement `_read_arrow`
+to get pipelines, stages, and sinks for free:
+
+```python
+from rypipe import Source
+
+class MySource(Source):
+    def _read_arrow(self, *, plan_overrides=None, **kwargs):
+        plan = self._build_plan_kwargs()
+        if plan_overrides:
+            plan.update(plan_overrides)
+        # Pass merged plan to your Rust reader:
+        return my_rust_read(str(self._path), **plan)
+```
+
+Once implemented, `MySource` exposes:
+
+- Row iteration: `for row in source`
+- Table export: `source.to_arrow()`, `source.to_pandas()`, `source.to_polars()`
+- Pipeline operator: `source | RenameFields(...)`
+- Batch iteration: `source.iter_arrow_batches(batch_size=10_000)`
+- Caching: `source.clear_cache()`
+
+### `rypipe.Adapter`
+
+Simpler alternative: subclass `Adapter` and implement only `read(path, **kwargs)`.
+Plan kwargs are merged automatically:
+
+```python
+from rypipe import Adapter
+
+class CsvAdapter(Adapter):
+    def read(self, path, **kwargs):
+        return _rypipe_csv.read_csv(path, **kwargs)
+
+source = CsvAdapter("data.csv")
+```
+
+### Registration
 
 ```python
 import rypipe
 
-# Bounded-memory read yielding pyarrow.RecordBatch objects.
-for batch in rypipe.read_batches("huge.csv", memory="256MiB"):
-    process(batch)
-
-# Same, from a Source or Pipeline.
-src = MySource("huge.csv")
-for batch in src.iter_arrow_batches(batch_size=10_000):
-    process(batch)
+rypipe.register_adapter("csv", CsvAdapter(), extensions=[".csv"])
 ```
 
-`read_batches` and `iter_arrow_batches` yield Arrow record batches one at a
-time. Parsing memory is bounded independently of input-file size; the current
-Python batch iterator may still materialize the bounded result set before
-yielding individual batches.
+Now `rypipe.read("data.csv")` works automatically.
+
+### Pure-Python adapters
+
+You can write an adapter entirely in Python:
+
+```python
+import rypipe, pyarrow as pa
+
+class JSONAdapter(rypipe.Adapter):
+    def read(self, path, **kwargs):
+        import json
+        with open(path) as f:
+            data = json.load(f)
+        return pa.table({col: [row[col] for row in data] for col in data[0]})
+
+rypipe.register_adapter("json", JSONAdapter(), extensions=[".json"])
+```
+
+> **Performance warning:** Pure-Python adapters run at Python speed. The Rust
+> `Splitter`/`RecordParser` traits deliver 4+ GB/s via SIMD scanning and
+> zero-copy export. Pure Python is typically 10-50x slower. Use it for
+> correctness and prototyping; use Rust for throughput.
+
+## Low-level API (`import _rypipe`)
+
+`_rypipe` is the Rust extension that adapter packages build on. It exposes
+shared exceptions and Rust helpers; adapter crates implement the actual
+`read` functions.
+
+### Rust helpers (used from adapter crates)
+
+```rust
+use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
+```
+
+- `execution_plan_from_kwargs`: Python kwargs to `ExecutionPlan`
+- `record_batches_to_pyarrow_table`: `&[RecordBatch]` to `pyarrow.Table`
+- `record_batches_to_pyarrow_batches`: streaming export as `list[RecordBatch]`
 
 ## See also
 
-- [Rust API](./rust-api.md): the Rust engine and `Pipeline` API.
-- [Writing a format adapter](./writing-adapters.md): adding formats as separate packages.
-- [Architecture](./architecture/): design overview.
+- [Rust API](./rust-api.md): the Rust engine and `Pipeline` API
+- [Writing a format adapter](./writing-adapters/): adding formats as separate packages
+- [Architecture](./architecture/): design overview
