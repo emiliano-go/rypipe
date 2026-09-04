@@ -1,117 +1,106 @@
 # Python Adapter Wiring
 
 This page explains how to wire your Rust adapter to Python using PyO3, and
-how to expose it through `rypipe.Adapter` or `rypipe.Source` for full
-pipeline support.
+how to expose it through a Source subclass for full pipeline support.
 
 ## Overview
 
 A rypipe adapter has two layers:
 
 1. **Rust layer**: `Splitter` + `RecordParser` (the parsing logic)
-2. **Python layer**: Registration with `rypipe` so users can call
-   `rypipe.read()` or use pipeline syntax
+2. **Python layer**: A `Source` subclass, a thin adapter that delegates to it,
+   repacked stage classes, and registration with `rypipe`
 
-The Python layer is thin. It wraps the Rust extension and registers the
-adapter. Users never see the Rust code.
-
-## Two approaches
-
-### Approach 1: Minimal adapter (no pipeline support)
-
-The simplest adapter exposes a `read(path, **kwargs)` method that returns
-a `pyarrow.Table`. Users call `rypipe.read("file.ext")`.
+Users never see the Rust code. They import everything from the adapter
+package:
 
 ```python
-import rypipe
-import _rypipe_log
+from my_adapter import MySource, CastTypes, FilterRows
+```
+
+## The crxml formula
+
+The reference adapter (`crxml`) defines the standard pattern:
+
+1. **`MySource(Source)`** — pipeline-capable source with `_read_arrow()` and
+   plan forwarding
+2. **`MyAdapter`** — stateless class with `read()` that delegates to
+   `MySource(...).to_arrow()`
+3. **`my_adapter.stages/`** — own copies of `CastTypes`, `FilterRows`,
+   `RenameFields`, `DropFields`
+4. **Registration** — adapter registered at import time via side-effect import
+
+### Minimal adapter
+
+```python
+from .source import MySource
 
 
-class LogAdapter:
+class MyAdapter:
     def read(self, path, **kwargs):
-        return _rypipe_log.read_log(path, **kwargs)
+        return MySource(path, **kwargs).to_arrow()
 
 
-rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
+def _register():
+    try:
+        import rypipe
+    except Exception:
+        return
+    rypipe.register_adapter("myfmt", MyAdapter(), extensions=[".myfmt"])
+
+
+_register()
 ```
 
-Users:
+### Source subclass
 
 ```python
-import rypipe
-import rypipe_log  # registers the adapter
-
-table = rypipe.read("app.log")
-```
-
-### Approach 2: Source subclass (pipeline support)
-
-Subclass `rypipe.Source` to get the pipeline `|` operator, fusion, and
-all sinks (`.to_arrow()`, `.to_pandas()`, `.to_parquet()`, etc.).
-
-```python
-import rypipe
+import _rypipe_myfmt
 from rypipe import Source
-import _rypipe_log
 
 
-class LogSource(Source):
+class MySource(Source):
     def _read_arrow(self, plan_overrides=None):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
-        return _rypipe_log.read_log(str(self._path), **plan)
-
-
-# Register as a class (not instance) for Source subclasses
-rypipe.register_adapter("log", LogSource, extensions=[".log"])
+        return _rypipe_myfmt.read(str(self._path), **plan)
 ```
 
-Users:
+### Registration
+
+Register at module load time. The side-effect import in `__init__.py`
+ensures the adapter is registered before user code calls `rypipe.read()`:
 
 ```python
-from rypipe_log import LogSource
-from rypipe import RenameFields, DropFields, CastTypes, FilterRows
-
-src = LogSource("app.log")
-
-# Pipeline syntax
-table = (
-    src
-    | RenameFields({"name": "user_name"})
-    | CastTypes({"age": int})
-    | FilterRows(field="active", op="==", value="true")
-)
-
-# Materialize the result
-result = rypipe.to_arrow(table)
-
-# Or use Source methods directly
-df = src.to_pandas()
-src.to_parquet("out.parquet")
+from . import rypipe_adapter  # noqa: F401 — registers the adapter
 ```
 
-## `rypipe.Source` vs `rypipe.Adapter`
+After registration:
 
-| Feature | `Source` | `Adapter` |
-|---------|----------|-----------|
-| Pipeline `\|` operator | Yes | Yes |
-| Fusion (stages in Rust) | Yes (with `_read_arrow`) | Yes (with `read` forwarding kwargs) |
-| `.to_pandas()`, `.to_parquet()` | Yes | Yes |
-| `.iter_arrow_batches()` | Yes | Yes |
+- `rypipe.read("file.myfmt")` auto-detects the extension
+- `rypipe.read("file.myfmt", format="myfmt")` works explicitly
+- `rypipe.read("file.txt", format="myfmt")` works with explicit format
+
+Users can also pass the adapter directly:
+
+```python
+from my_adapter import MyAdapter
+table = rypipe.read("file.myfmt", adapter=MyAdapter())
+```
+
+## `rypipe.Source` vs adapter duck-type
+
+| Feature | `Source` subclass | Duck-type adapter |
+|---------|-------------------|-------------------|
+| Pipeline `\|` operator | Yes | No |
+| Fusion (stages in Rust) | Yes (with `_read_arrow`) | No |
+| `.to_pandas()`, `.to_parquet()` | Yes | No |
+| `.iter_arrow_batches()` | Yes | No |
 | Complexity | More (must handle `plan_overrides`) | Less (just `read`) |
 
-**Choose `Adapter` if:**
-
-- You want the simplest possible code
-- Your format does not benefit from fusion (e.g., pure Python parsing)
-- You are prototyping
-
-**Choose `Source` if:**
-
-- You want maximum performance (fusion pushes stages into Rust)
-- You need streaming batches
-- You want full pipeline support
+**Always prefer a Source subclass.** The duck-type adapter only supports
+`rypipe.read()` and cannot use pipelines, fusion, or streaming.
 
 ## How `_read_arrow` works
 

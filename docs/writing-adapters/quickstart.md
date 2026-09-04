@@ -218,22 +218,344 @@ fn _rypipe_log(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 ## Step 5: Create the Python wrapper
 
+Follow the crxml adapter formula: a `Source` subclass for pipeline support,
+a thin adapter that delegates to it, and repacked stage classes so users
+never import from rypipe directly.
+
+### Directory layout
+
+```
+rypipe_log/
+├── __init__.py        # LogSource, LogAdapter, registration
+└── stages/
+    ├── __init__.py    # lazy re-exports
+    ├── cast.py        # CastTypes
+    ├── filter.py      # FilterRows
+    ├── rename.py      # RenameFields
+    └── drop.py        # DropFields
+```
+
 ### `rypipe_log/__init__.py`
 
 ```python
-import rypipe
+import importlib
+
+from . import rypipe_adapter  # noqa: F401  — registers with rypipe on import
+
+__all__ = [
+    "LogSource",
+    "LogAdapter",
+    "CastTypes",
+    "FilterRows",
+    "RenameFields",
+    "DropFields",
+]
+
+_modules = {
+    "LogSource": ".source",
+    "CastTypes": ".stages",
+    "FilterRows": ".stages",
+    "RenameFields": ".stages",
+    "DropFields": ".stages",
+}
+
+
+def __getattr__(name):
+    if name in _modules:
+        mod = importlib.import_module(_modules[name], __package__)
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return __all__
+```
+
+### `rypipe_log/source.py`
+
+```python
+from __future__ import annotations
+
+from typing import Any
+
 import _rypipe_log
+from rypipe import Source
+
+
+class LogSource(Source):
+    """Pipeline-capable source for newline-delimited key=value logs."""
+
+    def _read_arrow(self, plan_overrides: dict[str, Any] | None = None) -> Any:
+        plan = self._build_plan_kwargs()
+        if plan_overrides:
+            plan.update(plan_overrides)
+        return _rypipe_log.read_log(str(self._path), **plan)
+```
+
+### `rypipe_log/rypipe_adapter.py`
+
+```python
+from __future__ import annotations
+
+from typing import Any
+
+from .source import LogSource
 
 
 class LogAdapter:
-    """rypipe adapter for newline-delimited key=value logs."""
+    """rypipe-compatible adapter for newline-delimited key=value logs."""
 
-    def read(self, path, **kwargs):
-        return _rypipe_log.read_log(path, **kwargs)
+    def read(self, path: str, **kwargs: Any) -> Any:
+        """Parse ``path`` and return a ``pyarrow.Table``."""
+        return LogSource(path, **kwargs).to_arrow()
+
+    def iter_record_batches(
+        self, path: str, memory: str | int = "64MiB",
+        batch_size: int | None = None, **kwargs: Any,
+    ):
+        """Yield ``pyarrow.RecordBatch`` objects with constant memory."""
+        yield from LogSource(path, **kwargs).iter_record_batches(
+            memory=memory, batch_size=batch_size
+        )
 
 
-# Register with rypipe so rypipe.read("file.log") works
-rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
+def _register() -> None:
+    try:
+        import rypipe
+    except Exception:  # pragma: no cover — rypipe is optional
+        return
+    rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
+
+
+_register()
+```
+
+### `rypipe_log/stages/__init__.py`
+
+```python
+import importlib
+
+__all__ = ["CastTypes", "FilterRows", "RenameFields", "DropFields"]
+
+_modules = {
+    "CastTypes": ".cast",
+    "FilterRows": ".filter",
+    "RenameFields": ".rename",
+    "DropFields": ".drop",
+}
+
+
+def __getattr__(name):
+    if name in _modules:
+        mod = importlib.import_module(_modules[name], __package__)
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return __all__
+```
+
+### `rypipe_log/stages/cast.py`
+
+```python
+from typing import Callable
+
+_PY_TO_RUST_TYPE = {
+    int: "int64",
+    float: "float64",
+    str: None,
+    bool: "bool",
+}
+
+
+class CastTypes:
+    __slots__ = ("_mapping",)
+
+    def __init__(self, mapping: dict[str, Callable]):
+        self._mapping = mapping
+
+    def apply(self, record: dict) -> dict:
+        mapping = self._mapping
+        if not mapping:
+            return record
+        for field, cast_fn in mapping.items():
+            try:
+                record[field] = cast_fn(record[field])
+            except KeyError:
+                pass
+            except (ValueError, TypeError) as e:
+                val = record[field]
+                raise ValueError(
+                    f"CastTypes: cannot cast field '{field}' "
+                    f"value {val!r}: {e}"
+                ) from e
+        return record
+
+    def __call__(self, stream):
+        return map(self.apply, stream)
+
+    def _plan_kwargs(self) -> dict | None:
+        ft = {}
+        for field, fn in self._mapping.items():
+            rust_type = _PY_TO_RUST_TYPE.get(fn)
+            if rust_type is None:
+                if fn is str:
+                    continue
+                return None
+            ft[field] = rust_type
+        if not ft:
+            return None
+        return {"field_types": ft}
+```
+
+### `rypipe_log/stages/filter.py`
+
+```python
+class _ConstantPredicate:
+    __slots__ = ("_field", "_op", "_value")
+
+    _VALID_OPS = frozenset({"==", "eq", "!=", "ne"})
+
+    def __init__(self, field: str, op: str, value: str):
+        if op not in self._VALID_OPS:
+            raise ValueError(
+                f"FilterRows: unsupported operator {op!r} for constant filter; "
+                f"use '==' or '!='"
+            )
+        self._field = field
+        self._op = op
+        self._value = value
+
+    def __call__(self, record: dict) -> bool:
+        actual = record.get(self._field)
+        if self._op in ("==", "eq"):
+            return actual == self._value
+        return actual != self._value
+
+
+class _ComparePredicate:
+    __slots__ = ("_field_a", "_op", "_field_b")
+
+    _OPS = {
+        ">": lambda a, b: a > b,
+        "<": lambda a, b: a < b,
+        ">=": lambda a, b: a >= b,
+        "<=": lambda a, b: a <= b,
+        "==": lambda a, b: a == b,
+        "!=": lambda a, b: a != b,
+        "eq": lambda a, b: a == b,
+        "ne": lambda a, b: a != b,
+        "gt": lambda a, b: a > b,
+        "lt": lambda a, b: a < b,
+        "ge": lambda a, b: a >= b,
+        "le": lambda a, b: a <= b,
+    }
+
+    def __init__(self, field_a: str, op: str, field_b: str):
+        if op not in self._OPS:
+            valid = ", ".join(sorted(self._OPS))
+            raise ValueError(
+                f"FilterRows: unsupported operator {op!r} for column comparison; "
+                f"valid operators: {valid}"
+            )
+        self._field_a = field_a
+        self._op = op
+        self._field_b = field_b
+
+    def __call__(self, record: dict) -> bool:
+        fn = self._OPS.get(self._op)
+        return bool(fn(record.get(self._field_a), record.get(self._field_b)))
+
+
+class FilterRows:
+    __slots__ = ("_predicate", "_filter_spec")
+
+    def __init__(
+        self,
+        predicate=None,
+        *,
+        field=None,
+        op=None,
+        value=None,
+        field_a=None,
+        field_b=None,
+    ):
+        if predicate is not None:
+            self._predicate = predicate
+            self._filter_spec = None
+        elif field is not None and op is not None and value is not None:
+            self._filter_spec = {"field": field, "op": op, "value": value}
+            self._predicate = _ConstantPredicate(field, op, value)
+        elif field_a is not None and op is not None and field_b is not None:
+            self._filter_spec = {"field_a": field_a, "op": op, "field_b": field_b}
+            self._predicate = _ComparePredicate(field_a, op, field_b)
+        else:
+            raise ValueError(
+                "FilterRows requires either a callable predicate or "
+                "keyword arguments (field+op+value for constant filter, "
+                "or field_a+op+field_b for column comparison). "
+                f"Got predicate={predicate!r}, field={field!r}, op={op!r}, "
+                f"value={value!r}, field_a={field_a!r}, field_b={field_b!r}"
+            )
+
+    def apply(self, record: dict) -> dict | None:
+        return record if self._predicate(record) else None
+
+    def __call__(self, stream):
+        return (r for r in map(self.apply, stream) if r is not None)
+
+    def _plan_kwargs(self) -> dict | None:
+        if self._filter_spec is not None:
+            return {"filter": self._filter_spec}
+        return None
+```
+
+### `rypipe_log/stages/rename.py`
+
+```python
+class RenameFields:
+    __slots__ = ("_mapping",)
+
+    def __init__(self, mapping: dict[str, str]):
+        self._mapping = mapping
+
+    def apply(self, record: dict) -> dict:
+        mapping = self._mapping
+        return {mapping.get(k, k): v for k, v in record.items()}
+
+    def __call__(self, stream):
+        return map(self.apply, stream)
+
+    def _plan_kwargs(self) -> dict | None:
+        return {"field_mapping": self._mapping}
+```
+
+### `rypipe_log/stages/drop.py`
+
+```python
+class DropFields:
+    __slots__ = ("_fields_set",)
+
+    def __init__(self, fields: list[str]):
+        if isinstance(fields, str):
+            raise TypeError(
+                "DropFields expects a list of field names, got a bare "
+                f"string; use DropFields([{fields!r}])"
+            )
+        self._fields_set = frozenset(fields)
+
+    def apply(self, record: dict) -> dict:
+        fields_set = self._fields_set
+        if not fields_set:
+            return record
+        return {k: v for k, v in record.items() if k not in fields_set}
+
+    def __call__(self, stream):
+        return map(self.apply, stream)
+
+    def _plan_kwargs(self) -> dict | None:
+        return {"drop_fields": sorted(self._fields_set)}
 ```
 
 ## Step 6: Build and test
@@ -256,7 +578,7 @@ with open("test.log", "w") as f:
     f.write("name=Alice,age=30,active=true\n")
     f.write("name=Bob,age=25,active=false\n")
 
-# Read with rypipe
+# Pattern 1: one-liner via rypipe (extension auto-detected)
 table = rypipe.read("test.log")
 print(table)
 # pyarrow.Table<name: string, age: string, active: string>
@@ -265,12 +587,12 @@ print(table)
 # age: ["30", "25"]
 # active: ["true", "false"]
 
-# Read with pipeline
-from rypipe import CastTypes, FilterRows
+# Pattern 2: pipeline via LogSource + repacked stages
+from rypipe_log import LogSource, CastTypes, FilterRows
 
-src = rypipe_log.LogAdapter()
+src = LogSource("test.log")
 result = (
-    src.read("test.log")
+    src
     | CastTypes({"age": int})
     | FilterRows(field="active", op="==", value="true")
 ).to_arrow()
@@ -383,16 +705,37 @@ fn _rypipe_log(m: &Bound<'_, PyModule>) -> PyResult<()> {
 ### `rypipe_log/__init__.py`
 
 ```python
-import rypipe
-import _rypipe_log
+import importlib
+
+from . import rypipe_adapter  # noqa: F401
+
+__all__ = [
+    "LogSource",
+    "LogAdapter",
+    "CastTypes",
+    "FilterRows",
+    "RenameFields",
+    "DropFields",
+]
+
+_modules = {
+    "LogSource": ".source",
+    "CastTypes": ".stages",
+    "FilterRows": ".stages",
+    "RenameFields": ".stages",
+    "DropFields": ".stages",
+}
 
 
-class LogAdapter:
-    def read(self, path, **kwargs):
-        return _rypipe_log.read_log(path, **kwargs)
+def __getattr__(name):
+    if name in _modules:
+        mod = importlib.import_module(_modules[name], __package__)
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
+def __dir__():
+    return __all__
 ```
 
 ### `Cargo.toml`
@@ -416,17 +759,9 @@ simdutf8 = "0.1"
 
 ## Extending the adapter
 
-### Adding schema support
+### Schema support
 
-Once your basic adapter works, add schema support for better performance:
-
-```python
-class LogAdapter:
-    def read(self, path, **kwargs):
-        return _rypipe_log.read_log(path, **kwargs)
-```
-
-Users can now pass schema kwargs:
+Users can pass schema kwargs through the adapter:
 
 ```python
 table = rypipe.read(
@@ -436,62 +771,57 @@ table = rypipe.read(
 )
 ```
 
-### Adding pipeline support
-
-To support the pipeline `|` operator, upgrade to a Source subclass:
-
-```python
-from rypipe import Source
-
-class LogSource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
-        plan = self._build_plan_kwargs()
-        if plan_overrides:
-            plan.update(plan_overrides)
-        return _rypipe_log.read_log(str(self._path), **plan)
-
-rypipe.register_adapter("log", LogSource, extensions=[".log"])
-```
-
-Now users can write:
+Or directly on the Source:
 
 ```python
 from rypipe_log import LogSource
-from rypipe import CastTypes, FilterRows
+
+src = LogSource("app.log", schema=["name", "age"], field_types={"age": "int64"})
+table = src.to_arrow()
+```
+
+### Pipeline support
+
+`LogSource` already supports the pipeline `|` operator. Users import
+stages from the adapter package:
+
+```python
+from rypipe_log import LogSource, CastTypes, FilterRows, RenameFields, DropFields
 
 src = LogSource("app.log")
 table = (
     src
+    | RenameFields({"name": "user_name"})
     | CastTypes({"age": int})
     | FilterRows(field="active", op="==", value="true")
 ).to_arrow()
 ```
 
-### Adding streaming support
+### Streaming support
 
-To support bounded-memory streaming:
+`LogSource` inherits `iter_record_batches` from `rypipe.Source`. For
+true bounded-memory streaming, override it in `rypipe_log/source.py`:
 
 ```python
 class LogSource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
+    def _read_arrow(self, plan_overrides=None):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
         return _rypipe_log.read_log(str(self._path), **plan)
 
-    def iter_record_batches(self, *, memory="64MiB", batch_size=None, **kwargs):
+    def iter_record_batches(self, memory="64MiB", batch_size=None, **kwargs):
         plan = self._build_plan_kwargs()
         return _rypipe_log.iter_batches(
-            str(self._path),
-            memory=memory,
-            batch_size=batch_size,
-            **plan,
+            str(self._path), memory=memory, batch_size=batch_size, **plan
         )
 ```
 
-Users can now process large files:
+Users can then process large files:
 
 ```python
+from rypipe_log import LogSource
+
 src = LogSource("huge.log")
 for batch in src.iter_record_batches(memory="256MiB"):
     process(batch)
@@ -511,7 +841,7 @@ table = rypipe.read("app.log")
 ### "cannot infer adapter from extension '.log'"
 
 The adapter was not registered with the `.log` extension. Check your
-`register_adapter` call:
+`register_adapter` call in `rypipe_adapter.py`:
 
 ```python
 rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
@@ -527,10 +857,10 @@ maturin develop --release
 
 ### Pipeline stages not fusing
 
-Make sure your Source forwards `plan_overrides`:
+Make sure `LogSource` forwards `plan_overrides` in `_read_arrow`:
 
 ```python
-def _read_arrow(self, *, plan_overrides=None, **kwargs):
+def _read_arrow(self, plan_overrides=None):
     plan = self._build_plan_kwargs()
     if plan_overrides:
         plan.update(plan_overrides)
