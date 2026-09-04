@@ -24,14 +24,11 @@ Input bytes
 ## The Splitter trait
 
 ```rust
-pub trait Splitter: Send + Sync + Clone + Default + 'static {
+pub trait Splitter: Send + Sync {
     /// Find the start of the next record after byte offset `from`.
     ///
     /// Returns the byte offset of the first byte of the next record,
     /// or `None` if we have reached the end of the input.
-    ///
-    /// The default implementation calls `next_record_start` in a loop
-    /// to find all split points. Override this for performance.
     fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize>;
 
     /// Estimate bytes per row from a sample of the file.
@@ -101,7 +98,7 @@ fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
 ## The RecordParser trait
 
 ```rust
-pub trait RecordParser: Send + Sync + Clone + Default + 'static {
+pub trait RecordParser: Send + Sync {
     /// Validate that the bytes are valid for this format.
     ///
     /// Called once per chunk before parsing. Common implementation:
@@ -190,9 +187,10 @@ pub enum Value<'a> {
     Str(Cow<'a, str>),
     Int64(i64),
     Float64(f64),
-    Boolean(bool),
+    Bool(bool),
     Date32(i32),
-    Timestamp(TimeUnit, i64),
+    Timestamp(i64),
+    Null,
 }
 ```
 
@@ -203,9 +201,10 @@ pub enum Value<'a> {
 | `Str(Cow::Borrowed)` | Default for text data | `"hello"`, `"2024-01-01"` |
 | `Int64` | Integer columns | `"123"` -> `123` |
 | `Float64` | Float columns | `"123.45"` -> `123.45` |
-| `Boolean` | Boolean columns | `"true"` / `"1"` -> `true` |
-| `Date32` | Date columns | `"2024-01-01"` -> days since epoch |
-| `Timestamp` | Timestamp columns | `"2024-01-01T00:00:00Z"` |
+| `Bool` | Boolean columns | `"true"` / `"1"` -> `true` |
+| `Date32` | Date columns | Days since Unix epoch |
+| `Timestamp` | Timestamp columns | Raw integer; unit declared via `field_types` |
+| `Null` | Explicit missing value | Use when field is absent or invalid |
 
 ### Borrowed vs owned strings
 
@@ -249,11 +248,14 @@ pub trait ColumnarSink {
     /// Check if the engine needs a field (projection pushdown).
     fn wants(&self, name: &str) -> bool;
 
-    /// Resolve a raw field name to a column index (single hash probe).
-    fn resolve(&self, name: &str) -> Option<u32>;
+    /// Resolve a raw field name to the output column name.
+    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str>;
 
-    /// Push a value using a pre-resolved column index.
-    fn put_field_resolved(&mut self, idx: u32, value: Value<'_>);
+    /// Push a value using a pre-resolved name.
+    fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>);
+
+    /// Finalize into an Arrow RecordBatch.
+    fn finish(&mut self) -> Result<RecordBatch>;
 }
 ```
 
@@ -286,11 +288,11 @@ if sink.wants(name) {
 ```
 
 **`resolve()` + `put_field_resolved()`**: Single hash probe (resolve returns
-the index, put_field_resolved uses it directly). Faster for hot paths.
+the resolved name, put_field_resolved uses it directly). Faster for hot paths.
 
 ```rust
-if let Some(idx) = sink.resolve(name) {
-    sink.put_field_resolved(idx, value);
+if let Some(resolved) = sink.resolve(name) {
+    sink.put_field_resolved(resolved, value);
 }
 ```
 
@@ -463,7 +465,7 @@ fn parse_field(&self, name: &str, value: &str, sink: &mut dyn ColumnarSink) {
         }
         "active" => {
             let b = matches!(value, "true" | "1" | "yes");
-            sink.put_field(name, Value::Boolean(b));
+            sink.put_field(name, Value::Bool(b));
         }
         _ => {
             sink.put_field(name, Value::Str(Cow::Borrowed(value)));

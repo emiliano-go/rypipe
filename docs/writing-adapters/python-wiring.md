@@ -56,13 +56,14 @@ import _rypipe_log
 
 
 class LogSource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
+    def _read_arrow(self, plan_overrides=None):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
         return _rypipe_log.read_log(str(self._path), **plan)
 
 
+# Register as a class (not instance) for Source subclasses
 rypipe.register_adapter("log", LogSource, extensions=[".log"])
 ```
 
@@ -80,9 +81,12 @@ table = (
     | RenameFields({"name": "user_name"})
     | CastTypes({"age": int})
     | FilterRows(field="active", op="==", value="true")
-).to_arrow()
+)
 
-# Or direct methods
+# Materialize the result
+result = rypipe.to_arrow(table)
+
+# Or use Source methods directly
 df = src.to_pandas()
 src.to_parquet("out.parquet")
 ```
@@ -92,8 +96,8 @@ src.to_parquet("out.parquet")
 | Feature | `Source` | `Adapter` |
 |---------|----------|-----------|
 | Pipeline `\|` operator | Yes | Yes |
-| Fusion (stages in Rust) | Yes (with `_read_arrow`) | No (stages fall back to Python) |
-| `.to_arrow()`, `.to_pandas()` | Yes | Yes |
+| Fusion (stages in Rust) | Yes (with `_read_arrow`) | Yes (with `read` forwarding kwargs) |
+| `.to_pandas()`, `.to_parquet()` | Yes | Yes |
 | `.iter_arrow_batches()` | Yes | Yes |
 | Complexity | More (must handle `plan_overrides`) | Less (just `read`) |
 
@@ -130,7 +134,7 @@ You must merge these with your construction kwargs and pass them to your
 Rust reader:
 
 ```python
-def _read_arrow(self, *, plan_overrides=None, **kwargs):
+def _read_arrow(self, plan_overrides=None):
     plan = self._build_plan_kwargs()  # kwargs from __init__
     if plan_overrides:
         plan.update(plan_overrides)   # fused stages override
@@ -252,27 +256,46 @@ fn read_log(path: String, kwargs: Option<HashMap<String, PyObject>>) -> PyResult
 
 ### Using `execution_plan_from_kwargs`
 
-For complex adapters, use the `rypipe_python` helper:
+For complex adapters, use the `rypipe_python` helper. It accepts individual
+typed parameters (not a HashMap) and returns a `PyResult<ExecutionPlan>`:
 
 ```rust
 use rypipe_python::execution_plan_from_kwargs;
 
 #[pyfunction]
-fn read_log(path: String, kwargs: HashMap<String, PyObject>) -> PyResult<PyArrowTable> {
-    let plan = execution_plan_from_kwargs(&kwargs)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+fn read_log(
+    path: String,
+    field_mapping: Option<HashMap<String, String>>,
+    drop_fields: Option<Vec<String>>,
+    filter: Option<&Bound<'_, PyAny>>,
+    field_types: Option<HashMap<String, String>>,
+    dictionary_columns: Option<Vec<String>>,
+    schema: Option<Vec<String>>,
+    auto_dict: bool,
+    auto_dict_threshold: Option<f64>,
+    auto_dict_max_size: Option<usize>,
+) -> PyResult<PyObject> {
+    let plan = execution_plan_from_kwargs(
+        field_mapping, drop_fields, filter, field_types,
+        dictionary_columns, schema, auto_dict,
+        auto_dict_threshold, auto_dict_max_size,
+    )?;
 
-    let table = Pipeline::new(LogSplitter::new(), LogParser::new())
+    let batches = Pipeline::new(LogSplitter, LogParser)
         .with_plan(plan)
         .read_path(&path, false, false)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    Ok(table.into())
+    Python::with_gil(|py| {
+        rypipe_python::record_batches_to_pyarrow_table(py, &[batches])
+            .map(|obj| obj.into())
+    })
 }
 ```
 
 This handles all standard plan kwargs (`field_types`, `schema`, `filter`,
-`drop_fields`, `field_mapping`, `dictionary_columns`, etc.) automatically.
+`drop_fields`, `field_mapping`, `dictionary_columns`, `auto_dict`, etc.)
+automatically.
 
 ## Error handling
 
