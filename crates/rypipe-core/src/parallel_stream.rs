@@ -190,7 +190,7 @@ pub fn discover_schema_for_bytes<P: crate::decoder::RecordParser>(
 ) -> FrozenSchema {
     if !plan.schema_order.is_empty() {
         let names: Vec<&str> = plan.schema_order.iter().map(|s| s.as_str()).collect();
-        return FrozenSchema::from_plan(&names, plan);
+        return FrozenSchema::from_partial_plan(&names, plan);
     }
     let opts = DiscoveryOpts::default();
     let sig = crate::schema::layout_signature(bytes, &opts);
@@ -318,14 +318,14 @@ impl ParallelStreamingExecutor {
         // Without it, batch 2 can have different column order (FieldG vs Text20
         // last) even when the set is identical, breaking `write_batch`.
         // If opts.schema is None, auto-discover:
-        //  - explicit plan.schema_order → from_plan (exact)
+        //  - explicit plan.schema_order → from_partial_plan (allows unknown columns)
         //  - else sampled discovery (16×2 MiB windows for >128 MiB, else full)
         let schema: Option<FrozenSchema> = match opts.schema {
             Some(s) => Some(s),
             None => {
                 if !plan.schema_order.is_empty() {
                     let names: Vec<&str> = plan.schema_order.iter().map(|s| s.as_str()).collect();
-                    Some(FrozenSchema::from_plan(&names, &plan))
+                    Some(FrozenSchema::from_partial_plan(&names, &plan))
                 } else {
                     let opts = DiscoveryOpts::default();
                     let sig = crate::schema::layout_signature(actual_bytes, &opts);

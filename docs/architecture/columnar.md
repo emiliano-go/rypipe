@@ -77,8 +77,9 @@ pub(crate) enum ColumnBuilder {
     Timestamp(TimeUnit, PrimColumn<i64>),
     Dictionary {
         codes: NullableColumn<i32>,
-        dict: Vec<String>,
-        index: HashMap<String, i32>,
+        data: Vec<u8>,
+        offsets: Vec<i32>,
+        index: FxHashMap<Box<str>, i32>,
     },
 }
 ```

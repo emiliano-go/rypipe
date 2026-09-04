@@ -7,8 +7,9 @@ Arrow dictionaries store string values as integer indices into a separate value 
 `rypipe-core` stores string columns in a `StrColumn`: a contiguous byte arena plus `i32` offsets and a validity bitmap. When a column is dictionary-encoded, the engine instead builds:
 
 - a `codes: NullableColumn<i32>` array of indices;
-- a `dict: Vec<String>` ordered list of distinct values;
-- an `index: HashMap<String, i32>` lookup from value to index.
+- a `data: Vec<u8>` contiguous byte buffer for all dictionary values;
+- an `offsets: Vec<i32>` byte offsets into `data` for each entry;
+- an `index: FxHashMap<Box<str>, i32>` lookup from value to code.
 
 On Arrow export, these become a `DictionaryArray` with `Int32` indices and a `StringArray` dictionary. The layout is exactly what Arrow compute kernels expect, so downstream filters and group-by operations can use the encoded form directly.
 
