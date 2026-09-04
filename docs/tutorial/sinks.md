@@ -188,5 +188,5 @@ avoid re-parsing.
 * Source methods reuse the cached table. Standalone functions re-parse if
   the pipeline hasn't been materialized yet.
 
-**Next:** [Streaming](#streaming) — processing large files with bounded
+**Next:** [Streaming](streaming.md#streaming) — processing large files with bounded
 memory.

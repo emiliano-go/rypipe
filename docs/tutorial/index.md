@@ -6,7 +6,7 @@ and DataFrames. You do not need to write Rust or build anything — just install
 
 /// tip
 
-If you are in a hurry, jump to [First Steps](#first-steps) for a 5-minute
+If you are in a hurry, jump to [First Steps](first-steps.md#first-steps) for a 5-minute
 quickstart. If you want to write your own format adapter, see the
 [Writing Adapters](../writing-adapters/index.md) guide instead.
 
@@ -132,4 +132,4 @@ The Source parses the file once and caches the result. Subsequent calls to
   operator.
 * Convert to pandas with `.to_pandas()` or to Polars with `.to_polars()`.
 
-**Next:** [First Steps](#first-steps) — learn about `rypipe.read()` in depth.
+**Next:** [First Steps](first-steps.md#first-steps) — learn about `rypipe.read()` in depth.

@@ -179,4 +179,4 @@ smaller files, the default parallel mode is faster.
 * Streaming works with pipelines — fusable stages run in the parse loop.
 * Use `rypipe.iter_record_batches()` for module-level streaming.
 
-**Next:** [Configuration](#configuration) — all available options.
+**Next:** [Configuration](configuration.md#configuration) — all available options.

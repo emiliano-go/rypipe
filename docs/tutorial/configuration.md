@@ -32,7 +32,7 @@ them:
 |-------|------|-------------|
 | `field_mapping` | `dict[str, str]` | Rename columns: `{"old_name": "new_name"}`. |
 | `drop_fields` | `list[str]` | Columns to skip entirely. |
-| `filter` | `dict` | Pushdown filter spec (see [Pipeline](#pipeline)). |
+| `filter` | `dict` | Pushdown filter spec (see [Pipeline](pipeline.md#pipeline)). |
 | `field_types` | `dict[str, str]` | Type hints: `{"col": "int64"}`. |
 | `dictionary_columns` | `list[str]` | Columns to dictionary-encode. |
 | `schema` | `list[str]` | Expected column names and order. |
