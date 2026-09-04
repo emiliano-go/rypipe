@@ -1,4 +1,4 @@
-# Tutorial - User Guide { #tutorial }
+# Tutorial { #tutorial }
 
 This tutorial teaches you how to use **rypipe** to read files into Arrow tables
 and DataFrames. You do not need to write Rust or build anything; just install
