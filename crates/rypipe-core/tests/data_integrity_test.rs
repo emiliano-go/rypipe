@@ -727,7 +727,7 @@ fn dictionary_push_and_codes() {
     let dict_arr = col.as_dictionary::<arrow::datatypes::Int32Type>();
     let values = dict_arr.values().as_string::<i32>();
     assert_eq!(values.len(), 3); // alpha, beta, gamma
-    // Check codes are valid (0..3)
+                                 // Check codes are valid (0..3)
     let codes = dict_arr.keys();
     for i in 0..5 {
         let code = codes.value(i);
@@ -771,7 +771,7 @@ fn dictionary_single_value() {
     let dict_arr = col.as_dictionary::<arrow::datatypes::Int32Type>();
     let values = dict_arr.values().as_string::<i32>();
     assert_eq!(values.len(), 1); // only "same"
-    // All codes should be 0
+                                 // All codes should be 0
     let codes = dict_arr.keys();
     for i in 0..100 {
         assert_eq!(codes.value(i), 0);
@@ -796,7 +796,18 @@ fn dictionary_across_all_modes() {
     let plan = ExecutionPlan::new().dictionary("X");
     let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
     let data: String = (0..500)
-        .map(|i| format!("X={}\n", if i % 3 == 0 { "alpha" } else if i % 3 == 1 { "beta" } else { "gamma" }))
+        .map(|i| {
+            format!(
+                "X={}\n",
+                if i % 3 == 0 {
+                    "alpha"
+                } else if i % 3 == 1 {
+                    "beta"
+                } else {
+                    "gamma"
+                }
+            )
+        })
         .collect();
     let bytes = data.as_bytes();
     let single = p.read_bytes(bytes).unwrap();
@@ -806,10 +817,13 @@ fn dictionary_across_all_modes() {
     assert_batches_equal(&[single.clone()], &stream);
     // Verify dictionary encoding
     let col = single.column_by_name("X").unwrap();
-    assert_eq!(col.data_type(), &arrow::datatypes::DataType::Dictionary(
-        Box::new(arrow::datatypes::DataType::Int32),
-        Box::new(arrow::datatypes::DataType::Utf8),
-    ));
+    assert_eq!(
+        col.data_type(),
+        &arrow::datatypes::DataType::Dictionary(
+            Box::new(arrow::datatypes::DataType::Int32),
+            Box::new(arrow::datatypes::DataType::Utf8),
+        )
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -825,12 +839,16 @@ fn plan_compare_filter_no_data_loss() {
     let data = "A=10 B=5\nA=3 B=7\nA=20 B=10\n";
     let single = p.read_bytes(data.as_bytes()).unwrap();
     assert_eq!(single.num_rows(), 2); // rows 1 and 3 (10>5, 20>10)
-    let a = single.column_by_name("A").unwrap()
+    let a = single
+        .column_by_name("A")
+        .unwrap()
         .as_primitive::<arrow::datatypes::Int64Type>();
     assert_eq!(a.value(0), 10);
     assert_eq!(a.value(1), 20);
     let par = p.read_bytes_par(data.as_bytes(), 2).unwrap();
-    let stream = p.read_bytes_stream(data.as_bytes(), MemoryBudget::new(128)).unwrap();
+    let stream = p
+        .read_bytes_stream(data.as_bytes(), MemoryBudget::new(128))
+        .unwrap();
     assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
@@ -845,7 +863,9 @@ fn plan_compare_filter_with_typed_columns() {
     let data = "A=10 B=5\nA=3 B=7\nA=20 B=10\n";
     let single = p.read_bytes(data.as_bytes()).unwrap();
     assert_eq!(single.num_rows(), 2);
-    let a = single.column_by_name("A").unwrap()
+    let a = single
+        .column_by_name("A")
+        .unwrap()
         .as_primitive::<arrow::datatypes::Int64Type>();
     assert_eq!(a.value(0), 10);
     assert_eq!(a.value(1), 20);
@@ -858,8 +878,14 @@ fn plan_compare_filter_with_typed_columns() {
 fn plan_filter_and_both_true() {
     let plan = ExecutionPlan {
         filter: Some(FilterPredicate::all(
-            FilterPredicate::Equal { field: "A".into(), value: "1".into() },
-            FilterPredicate::Equal { field: "B".into(), value: "2".into() },
+            FilterPredicate::Equal {
+                field: "A".into(),
+                value: "1".into(),
+            },
+            FilterPredicate::Equal {
+                field: "B".into(),
+                value: "2".into(),
+            },
         )),
         ..Default::default()
     };
@@ -873,8 +899,14 @@ fn plan_filter_and_both_true() {
 fn plan_filter_or_either_true() {
     let plan = ExecutionPlan {
         filter: Some(FilterPredicate::any(
-            FilterPredicate::Equal { field: "A".into(), value: "1".into() },
-            FilterPredicate::Equal { field: "B".into(), value: "2".into() },
+            FilterPredicate::Equal {
+                field: "A".into(),
+                value: "1".into(),
+            },
+            FilterPredicate::Equal {
+                field: "B".into(),
+                value: "2".into(),
+            },
         )),
         ..Default::default()
     };
@@ -908,10 +940,19 @@ fn plan_filter_nested_and_or() {
     let plan = ExecutionPlan {
         filter: Some(FilterPredicate::any(
             FilterPredicate::all(
-                FilterPredicate::Equal { field: "A".into(), value: "1".into() },
-                FilterPredicate::Equal { field: "B".into(), value: "2".into() },
+                FilterPredicate::Equal {
+                    field: "A".into(),
+                    value: "1".into(),
+                },
+                FilterPredicate::Equal {
+                    field: "B".into(),
+                    value: "2".into(),
+                },
             ),
-            FilterPredicate::Equal { field: "C".into(), value: "keep".into() },
+            FilterPredicate::Equal {
+                field: "C".into(),
+                value: "keep".into(),
+            },
         )),
         ..Default::default()
     };
@@ -941,7 +982,9 @@ fn bounded_executor_large_budget() {
     let data: String = (0..100).map(|i| format!("A={i} B={}\n", i * 2)).collect();
     let bytes = data.as_bytes();
     // Large budget (1 MB)
-    let stream = p.read_bytes_stream(bytes, MemoryBudget::new(1_000_000)).unwrap();
+    let stream = p
+        .read_bytes_stream(bytes, MemoryBudget::new(1_000_000))
+        .unwrap();
     let total: usize = stream.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 100);
 }
@@ -950,7 +993,9 @@ fn bounded_executor_large_budget() {
 fn bounded_executor_exact_budget() {
     let p = pipeline();
     let data = "A=1 B=2\nA=3 B=4\nA=5 B=6\n";
-    let stream = p.read_bytes_stream(data.as_bytes(), MemoryBudget::new(64)).unwrap();
+    let stream = p
+        .read_bytes_stream(data.as_bytes(), MemoryBudget::new(64))
+        .unwrap();
     let total: usize = stream.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 3);
 }
@@ -1050,7 +1095,10 @@ fn all_column_types_push_and_export() {
         ("F", FieldType::Float64),
         ("B", FieldType::Boolean),
         ("D", FieldType::Date32),
-        ("T", FieldType::Timestamp(arrow::datatypes::TimeUnit::Microsecond)),
+        (
+            "T",
+            FieldType::Timestamp(arrow::datatypes::TimeUnit::Microsecond),
+        ),
         ("P", FieldType::Dictionary),
     ];
     for (name, ft) in &variants {
@@ -1059,7 +1107,10 @@ fn all_column_types_push_and_export() {
         let data = format!("{name}=test\n{name}=value\n{name}=ok\n");
         let batch = p.read_bytes(data.as_bytes()).unwrap();
         assert_eq!(batch.num_rows(), 3, "failed for {name}");
-        assert!(batch.column_by_name(name).is_some(), "column {name} missing");
+        assert!(
+            batch.column_by_name(name).is_some(),
+            "column {name} missing"
+        );
     }
 }
 
@@ -1123,11 +1174,7 @@ fn schema_order_reorders_correctly() {
     let data = "V=1 W=2 X=3 Y=4 Z=5\n";
     let batch = p.read_bytes(data.as_bytes()).unwrap();
     let schema = batch.schema();
-    let names: Vec<&str> = schema
-        .fields()
-        .iter()
-        .map(|f| f.name().as_str())
-        .collect();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert_eq!(names, vec!["Z", "Y", "X", "W", "V"]);
 }
 
@@ -1151,9 +1198,14 @@ fn combined_plan_all_pushdowns() {
     assert!(single.column_by_name("C").is_none());
     // B should be dictionary-encoded
     let b = single.column_by_name("B").unwrap();
-    assert!(matches!(b.data_type(), arrow::datatypes::DataType::Dictionary(..)));
+    assert!(matches!(
+        b.data_type(),
+        arrow::datatypes::DataType::Dictionary(..)
+    ));
     let par = p.read_bytes_par(data.as_bytes(), 2).unwrap();
-    let stream = p.read_bytes_stream(data.as_bytes(), MemoryBudget::new(128)).unwrap();
+    let stream = p
+        .read_bytes_stream(data.as_bytes(), MemoryBudget::new(128))
+        .unwrap();
     assert_batches_equal(std::slice::from_ref(&single), &par);
     assert_batches_equal(&[single], &stream);
 }
@@ -1204,11 +1256,14 @@ fn mmap_vs_owned_equivalence() {
     let dir = std::env::temp_dir().join(format!("rypipe_mmap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("data.txt");
-    std::fs::File::create(&path).unwrap().write_all(&bytes).unwrap();
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
 
     let p = pipeline();
     let via_owned = p.read_path(&path, false, false).unwrap(); // no mmap
-    let via_mmap = p.read_path(&path, true, false).unwrap();   // mmap
+    let via_mmap = p.read_path(&path, true, false).unwrap(); // mmap
     assert_batches_equal(
         std::slice::from_ref(&via_owned),
         std::slice::from_ref(&via_mmap),
