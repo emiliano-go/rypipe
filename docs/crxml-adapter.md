@@ -6,7 +6,7 @@
 
 Crystal Reports exports tabular data inside XML elements like `<Field Name="X"><Value>123</Value></Field>` and `<Text Name="Y"><TextValue>abc</TextValue></Text>`. `crxml` reads these exports and turns them into Arrow tables or DataFrames.
 
-On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 9 5900X 3.8 GHz, Arch Linux, 5800X 8C/16T measured), `crxml` parses Crystal Reports XML at **2.6-3.0 GB/s parallel** (1 GB, 926k `Details` rows, `par32` 2994 MB/s, `par16` 2720 MB/s, `par8` 2485 MB/s) and **714 MB/s single** (`read_to_columnar`), all warm-cache best-of-3. Streaming (`CrxmlReader` `lib.rs:534`, scanner-based via `RowSink` `lib.rs:564`) is **508 MB/s** 100 MB / **498 MB/s** 1 GB, within 30% of columnar. The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O: `cat` 33 GB/s, `prefault` only +6%). That number is parser-bound; the `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine/table_builder.rs:44`, `row_dirty` `engine/table_builder.rs:54`) keeps up without being the bottleneck.
+On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 5800X, 8C/16T), `crxml` parses Crystal Reports XML at **~4.2 GB/s parallel** (533 MB, par128) and **~950 MB/s single** (533 MB columnar). Streaming (single-threaded, bounded) is **723 MB/s** at 1 MB budget. Parallel streaming with explicit `schema=[...]` reaches **4980 MB/s** (533 MB, +11% vs par128) while staying bounded at 88 MB RSS. The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O). The `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine/table_builder.rs:44`, `row_dirty` `engine/table_builder.rs:54`) keeps up without being the bottleneck. See `crxml` `docs/performance.md` for full benchmarks.
 
 ## How it fits into rypipe
 
@@ -146,7 +146,7 @@ The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from
 
 ## Lessons for adapter authors (from `crxml` super-optimization)
 
-1. **Specialize the parser**: generic line splitting is fine, but real throughput comes from a format-aware `memchr` scanner (crxml achieves 508 MB/s streaming, 714 MB/s columnar single).
+1. **Specialize the parser**: generic line splitting is fine, but real throughput comes from a format-aware `memchr` scanner (crxml achieves 723 MB/s streaming, ~950 MB/s columnar single, ~4.2 GB/s parallel).
 2. **Find split points cheaply**: one `memmem` `splitter.rs:27` + `find_special_regions` `splitter.rs:61` with `is_empty` fast path beats byte-by-byte; `estimate_bytes_per_row` `splitter.rs:41` sizes `TableBuilder` `lib.rs:275`.
 3. **Handle boundary cases**: chunks can start inside a row; `scan_one_row` `scanner.rs:81` (`Recover` → `pos+1`) and `wants`-driven `find_close_after` keep parallel correct.
 4. **Borrow strings into the engine**: `Value::Str(&str)` slices via `utf8_unchecked` `scanner.rs:39` + conditional `&` `scanner.rs:662` avoids `Cow` alloc (94% of values are plain ASCII). `RowSink` `lib.rs:564` pushes directly without `TableBuilder` hash/arena for streaming.

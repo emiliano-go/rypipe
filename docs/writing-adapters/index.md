@@ -19,6 +19,7 @@ Input bytes
 ```
 
 The engine handles:
+
 - **Parallel execution** via rayon: split the file, parse chunks concurrently
 - **Bounded-memory streaming**: parsing memory is independent of file size;
   the Python batch iterator may still materialize the bounded result set
@@ -202,6 +203,36 @@ See [Sink](./sink.md) for the full method reference and fast paths.
 See [Scan primitives](./scan.md) for byte-searching, [Skip regions](./skip-regions.md)
 for comment/CDATA handling, and [Chunk planning](./chunk-planning.md) for the
 2 MiB floor that prevents sub-MB chunk collapse.
+
+## Pure-Python adapters (no Rust)
+
+You can write an adapter entirely in Python by subclassing `rypipe.Adapter`:
+
+```python
+import rypipe, pyarrow as pa
+
+class CSVAdapter(rypipe.Adapter):
+    def read(self, path, **kwargs):
+        with open(path) as f:
+            rows = [line.strip().split(",") for line in f if line.strip()]
+        header = rows[0]
+        data = {col: [rows[i+1][j] for i in range(len(rows)-1)]
+                for j, col in enumerate(header)}
+        return pa.table(data)
+
+rypipe.register_adapter("csv", CSVAdapter(), extensions=[".csv"])
+table = rypipe.read("data.csv")
+```
+
+This gives you the full pipeline API (`| RenameFields | FilterRows |
+.to_dataframe()`), schema discovery, and Arrow export.
+
+> **Performance warning:** Pure-Python adapters run at Python speed, not Rust
+> speed. The Rust `Splitter`/`RecordParser` traits deliver 4+ GB/s by parsing
+> bytes directly into Arrow buffers with SIMD scanning, parallel chunking, and
+> zero-copy export. A pure-Python adapter parses via Python loops and PyArrow
+> compute, which is typically 10-50x slower. Use pure Python for correctness
+> and prototyping; use Rust for throughput.
 
 ## Pages
 
