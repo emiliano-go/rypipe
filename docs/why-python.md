@@ -5,7 +5,7 @@
 ## TL;DR
 
 * **Data work lives in Python.** Notebooks, ETL glue, and the modern lakehouse are Python-first.
-* **Rust wins the hot path, Python wins composition.** Parsing 100 M fields at 700 MB/s needs Rust; chaining `RenameFields | FilterRows | CastTypes → .to_pandas()` needs Python.
+* **Rust wins the hot path, Python wins composition.** Parsing 100 M fields at ~950 MB/s needs Rust; chaining `RenameFields | FilterRows | CastTypes -> .to_pandas()` needs Python.
 * **Arrow is the bridge.** `rypipe` produces Arrow in Rust and hands it to `pyarrow`/`pandas`/`Polars` with no copy via the C Data Interface, the same columnar substrate every data tool speaks.
 * **Pure Rust would shrink the audience 10×.** ETL and analysis are done by data engineers, analysts, and ML engineers, most never touch `cargo build`.
 
@@ -61,7 +61,7 @@ A pure-Rust engine would still need to export Arrow, and then every downstream s
 
 ## 4. Performance: Rust hot loop, Python orchestration
 
-`rypipe`'s single-thread XML throughput on a 533 MB file is ~1,100 MB/s (95% in `parse`, 3% in `split`, 2% in `finish`). Parallel x16 is ~6,000 MB/s. The profile for a real Crystal Reports export shows:
+`rypipe`'s single-thread XML throughput on a 533 MB file is ~950 MB/s (95% in `parse`, 3% in `split`, 2% in `finish`). Parallel x16 (par128) is ~4,200 MB/s. The profile for a real Crystal Reports export shows:
 
 * `field_element` / `scan_open_tag` ~17%, XML scanning (Rust)
 * `push_field_resolved` 2.76% + `field_index.get` 1.64%, column dispatch (Rust, Vec+map after 0.1.2)

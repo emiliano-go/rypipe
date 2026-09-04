@@ -18,7 +18,7 @@ Each page takes one optimization topic and explains the mechanism, the tuning kn
 | [Adapter design](./adapter-design.md) | Writing a fast `Splitter` and `RecordParser`; `memchr`; comments, CDATA, and quoted fields; borrowing strings; sparse rows; `sink.wants`. |
 | [Profiling](./profiling.md) | Profiling with `perf`, `cargo flamegraph`, and the `bench_throughput` example; measuring RSS; separating Python and Rust time. |
 | [Anti-patterns](./anti-patterns.md) | Common mistakes that silently remove fusion, increase memory, or waste CPU. |
-| [Case study: crxml](./case-study-crxml.md) | How crxml reaches ~2.4 GB/s by combining the techniques from the other pages. |
+| [Case study: crxml](./case-study-crxml.md) | How crxml reaches ~4.2 GB/s by combining the techniques from the other pages. |
 
 ## Quick checklist
 

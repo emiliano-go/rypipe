@@ -66,8 +66,9 @@ are consistent.
 `crxml` (Crystal Reports XML, at `docs/crxml-adapter.md`) is the reference
 for what a good adapter looks like: hand-rolled `memchr` scanner, shared
 between columnar and streaming paths, `wants`-driven skip-bytes, and
-parallel fast path. On a Ryzen 5800X: **714 MB/s single, 2.6-3.0 GB/s
-parallel**, with streaming at **508 MB/s** (2x over `quick-xml`).
+parallel fast path. On a Ryzen 5800X: **~950 MB/s single, ~4.2 GB/s
+parallel** (par128), with streaming at **723 MB/s** (single-thread, 1 MB
+budget).
 
 ## Future work
 
