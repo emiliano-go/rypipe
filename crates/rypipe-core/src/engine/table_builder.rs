@@ -398,20 +398,21 @@ impl TableBuilder {
         // push_field_resolved will have already early-returned after setting
         // unknown_error, so this path is only for non-frozen builders.
         if self.frozen.is_some() {
-            // Should have been caught in push_field_resolved; if we reach
-            // here, treat as unknown and record.
             if let Some(frozen) = &self.frozen {
-                if self.unknown_error.is_none() {
-                    self.unknown_error = Some(format!(
-                        "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...] with full column list or use full-scan discovery",
-                        name,
-                        frozen.num_columns(),
-                        frozen.is_exact()
-                    ));
+                if frozen.is_exact() {
+                    // Exact schema: error on unknown fields
+                    if self.unknown_error.is_none() {
+                        self.unknown_error = Some(format!(
+                            "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...] with full column list or use full-scan discovery",
+                            name,
+                            frozen.num_columns(),
+                            frozen.is_exact()
+                        ));
+                    }
+                    return 0;
                 }
+                // Non-exact (partial schema): fall through to create column dynamically
             }
-            // Return 0 as dummy to avoid panic; caller will have returned.
-            return 0;
         }
         let est = self.estimated_rows.max(64);
         let col_type = self.plan.column_type(name);
@@ -448,21 +449,25 @@ impl TableBuilder {
         // #[inline]: small hot path, called per-field. ensure_column_idx is not
         // inlined (too large); push_value is the real work and benefits from
         // being in the same compilation unit as its caller.
-        // Frozen check: hard error on unknown field (data loss would be silent
-        // on a default path). Sampling 16×2 MiB covers ~6% of 533 MB, so 0.05%
-        // column would be missed.
+        // Frozen check: hard error on unknown field when exact schema (data loss
+        // would be silent on a default path). Non-exact schemas allow unknown
+        // fields to be created dynamically.
         if self.frozen.is_some() && !self.field_index.contains_key(resolved_name) {
             if let Some(frozen) = &self.frozen {
-                if self.unknown_error.is_none() {
-                    self.unknown_error = Some(format!(
-                        "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...] with full column list or use full-scan discovery",
-                        resolved_name,
-                        frozen.num_columns(),
-                        frozen.is_exact()
-                    ));
+                if frozen.is_exact() {
+                    // Exact schema: error on unknown fields
+                    if self.unknown_error.is_none() {
+                        self.unknown_error = Some(format!(
+                            "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...] with full column list or use full-scan discovery",
+                            resolved_name,
+                            frozen.num_columns(),
+                            frozen.is_exact()
+                        ));
+                    }
+                    return;
                 }
+                // Non-exact (partial schema): fall through to ensure_column_idx
             }
-            return;
         }
         let idx = self.ensure_column_idx(resolved_name);
         // Track ordinal→slot mapping on first row for expect_slot fast path.
@@ -1213,7 +1218,9 @@ impl ColumnarSink for TableBuilder {
             && self.unknown_error.is_none()
         {
             if let Some(ref frozen) = self.frozen {
-                if !frozen.column_names().iter().any(|n| n.as_ref() == resolved) {
+                if frozen.is_exact()
+                    && !frozen.column_names().iter().any(|n| n.as_ref() == resolved)
+                {
                     self.unknown_error = Some(format!(
                             "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
                             resolved,
@@ -1316,10 +1323,11 @@ impl ColumnarSink for TableBuilder {
         // Buffered path for already-resolved name (no rename lookup)
         if self.frozen.is_some() && !self.field_index.contains_key(resolved_name) {
             if let Some(ref frozen) = self.frozen {
-                if !frozen
-                    .column_names()
-                    .iter()
-                    .any(|n| n.as_ref() == resolved_name)
+                if frozen.is_exact()
+                    && !frozen
+                        .column_names()
+                        .iter()
+                        .any(|n| n.as_ref() == resolved_name)
                 {
                     if self.unknown_error.is_none() {
                         self.unknown_error = Some(format!(
@@ -1422,10 +1430,11 @@ impl ColumnarSink for TableBuilder {
                 };
                 if self.frozen.is_some() && !self.field_index.contains_key(resolved.as_str()) {
                     if let Some(ref frozen) = self.frozen {
-                        if !frozen
-                            .column_names()
-                            .iter()
-                            .any(|n| n.as_ref() == resolved.as_str())
+                        if frozen.is_exact()
+                            && !frozen
+                                .column_names()
+                                .iter()
+                                .any(|n| n.as_ref() == resolved.as_str())
                         {
                             if self.unknown_error.is_none() {
                                 self.unknown_error = Some(format!(
@@ -1447,7 +1456,9 @@ impl ColumnarSink for TableBuilder {
             let resolved = name;
             if self.frozen.is_some() && !self.field_index.contains_key(resolved) {
                 if let Some(ref frozen) = self.frozen {
-                    if !frozen.column_names().iter().any(|n| n.as_ref() == resolved) {
+                    if frozen.is_exact()
+                        && !frozen.column_names().iter().any(|n| n.as_ref() == resolved)
+                    {
                         if self.unknown_error.is_none() {
                             self.unknown_error = Some(format!(
                                 "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",
@@ -1501,7 +1512,9 @@ impl ColumnarSink for TableBuilder {
                 let owned = resolved.to_owned();
                 if self.frozen.is_some() && !self.field_index.contains_key(&owned) {
                     if let Some(ref frozen) = self.frozen {
-                        if !frozen.column_names().iter().any(|n| n.as_ref() == owned) {
+                        if frozen.is_exact()
+                            && !frozen.column_names().iter().any(|n| n.as_ref() == owned)
+                        {
                             if self.unknown_error.is_none() {
                                 self.unknown_error = Some(format!(
                                     "unknown field {:?} not in frozen schema ({} columns, exact={}); pass schema=[...]",

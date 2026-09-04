@@ -98,15 +98,19 @@ cross-type cases become `None`.
 ```rust
 Dictionary {
     codes: NullableColumn<i32>,
-    dict: Vec<String>,
-    index: HashMap<String, i32>,
+    data: Vec<u8>,
+    offsets: Vec<i32>,
+    index: FxHashMap<Box<str>, i32>,
 }
 ```
 
-- **`dict_code`**: hash lookup, insert if missing. Average O(1).
+- **`data`**: contiguous byte buffer for all dictionary values (like `StrColumn`).
+- **`offsets`**: byte offsets into `data` for each dictionary entry.
+- **`index`**: hash lookup from value to code. Average O(1).
+- **`dict_code`**: hash lookup in `index`, insert if missing (append to `data`/`offsets`).
 - **`extend_owned`**: remaps right dictionary into left via a remap vector.
-  For each value in right's dict, look up its code in left's index. If
-  missing, append to left's dict. Then translate right's codes.
+  For each value in right's data, look up its code in left's index. If
+  missing, append to left's data. Then translate right's codes.
 - **`try_upgrade_to_dict`**: see [Columnar](./columnar.md).
 
 ## Unification and promotion

@@ -134,8 +134,8 @@ impl FrozenSchema {
     /// Build from explicit column names and an execution plan.
     ///
     /// Declares the exact output columns.  Fields in the file not listed
-    /// here are governed by `UnknownFieldPolicy`.  Columns declared here
-    /// but absent from the file become all-null.
+    /// here cause a hard error.  Columns declared here but absent from the
+    /// file become all-null.
     pub fn from_plan(names: &[&str], plan: &ExecutionPlan) -> Self {
         let mut index = FxHashMap::default();
         let mut types = Vec::with_capacity(names.len());
@@ -155,6 +155,29 @@ impl FrozenSchema {
             index,
             types,
             exact: true,
+        }
+    }
+
+    /// Build from explicit column names with non-exact matching.
+    ///
+    /// Like `from_plan`, but fields in the file not listed in `names` are
+    /// appended in discovery order rather than causing an error.  The declared
+    /// columns keep their specified order; unknown columns appear after them.
+    pub fn from_partial_plan(names: &[&str], plan: &ExecutionPlan) -> Self {
+        let mut index = FxHashMap::default();
+        let mut types = Vec::with_capacity(names.len());
+
+        for (slot, &name) in names.iter().enumerate() {
+            let ty = plan.column_type(name);
+            types.push(ty);
+            index.insert(Box::from(name), Some(slot as u32));
+        }
+
+        FrozenSchema {
+            names: names.iter().map(|n| Arc::from(*n)).collect(),
+            index,
+            types,
+            exact: false,
         }
     }
 

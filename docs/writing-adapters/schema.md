@@ -601,11 +601,13 @@ fn test_ensure_schema_preserves_existing() {
 ### Memory savings
 
 Without `field_types`:
+
 - Each string value is stored as `String` (heap allocation)
 - After parse, a casting pass converts strings to typed arrays
 - Peak memory: original strings + typed arrays = 2x
 
 With `field_types`:
+
 - Values are parsed directly into typed builders (no `String` allocation)
 - No casting pass needed
 - Peak memory: typed arrays only = 1x
@@ -615,11 +617,13 @@ For a 533 MB file with 10 columns, this saves ~200-400 MB of peak memory.
 ### CPU savings
 
 Without `field_types`:
+
 - Every value is stored as a string (allocation + copy)
 - Post-parse casting: `str::parse::<i64>()` for each value
 - Two passes over the data
 
 With `field_types`:
+
 - Values are parsed once, directly into the correct type
 - No post-parse casting
 - One pass over the data
@@ -629,16 +633,19 @@ Typical savings: 10-20% of total parse time for numeric-heavy workloads.
 ### Export speed
 
 Without `schema_order`:
+
 - Each batch may have different column order
 - Engine must merge batches sequentially (merge path)
 - ~4,497 MB/s on 533 MB
 
 With `schema_order`:
+
 - Every batch has identical column order
 - Engine exports batches in parallel (fast path)
 - ~4,980 MB/s on 533 MB (+11%)
 
 With `schema_order` + projection:
+
 - Scanner skips unwanted fields via `row_satisfied` byte-jump
 - ~7,630 MB/s on 533 MB (+80%)
 
@@ -646,12 +653,13 @@ With `schema_order` + projection:
 
 ### "unknown field not in frozen schema"
 
-This error means a field appeared in the file that was not in `schema_order`.
-Options:
+This error means a field appeared in the file that was not in `schema_order`,
+and the schema is exact (default behavior). Options:
 
-1. Add the field to `schema_order`
-2. Use full-scan discovery instead of explicit schema
-3. Set `UnknownFieldPolicy::Skip` to ignore unknown fields
+1. Add the field to `schema_order` (complete the schema)
+2. Use full-scan discovery instead of explicit schema (omit `schema_order`)
+3. Unknown columns are automatically appended when using `schema_order`
+   (partial schema is supported by default in parallel streaming)
 
 ### Column order does not match `schema_order`
 
