@@ -9,7 +9,7 @@
 * **Arrow is the bridge.** `rypipe` produces Arrow in Rust and hands it to `pyarrow`/`pandas`/`Polars` with no copy via the C Data Interface, the same columnar substrate every data tool speaks.
 * **Pure Rust would shrink the audience 10×.** ETL and analysis are done by data engineers, analysts, and ML engineers, most never touch `cargo build`.
 
-If you need Rust-only, `rypipe-core` is still there (see [Rust API](./rust-api.md)). The Python layer is a *thin* orchestration shell, not a bottleneck.
+If you need Rust-only, `rypipe-core` is still there (see [Rust API](./reference/rust-api.md)). The Python layer is a *thin* orchestration shell, not a bottleneck.
 
 ---
 
@@ -127,7 +127,7 @@ Steps 1-2 demand a REPL. Step 4 demands Rust speed. rypipe gives both from the s
 For CSV alone you can. rypipe’s value is the *same* engine for XML, JSON, HTML, and other row-oriented formats where no fast Arrow-native reader exists, with parallel and memory-bounded execution, pushdown, and the same `source | ... | .to_polars()` surface.
 
 **“Can I avoid Python entirely?”**
-Yes. See [Rust API](./rust-api.md) and [Writing a format adapter](./writing-adapters/index.md). The Python bindings are optional; `rypipe-core` has zero Python dependency.
+Yes. See [Rust API](./reference/rust-api.md) and [Writing a format adapter](./writing-adapters/index.md). The Python bindings are optional; `rypipe-core` has zero Python dependency.
 
 **“Does Python add overhead?”**
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.

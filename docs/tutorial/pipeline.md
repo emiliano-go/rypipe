@@ -253,4 +253,4 @@ print(rows)
 * Call `.to_arrow()`, `.to_pandas()`, or `.to_polars()` to materialize.
 * Iterate with `for row in pipeline` or collect with `rypipe.collect()`.
 
-**Next:** [Stages](#stages) — detailed reference for each stage class.
+**Next:** [Stages](stages.md#stages) — detailed reference for each stage class.

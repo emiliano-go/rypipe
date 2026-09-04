@@ -155,4 +155,4 @@ except rypipe.RypipeError as e:
 * Use `rypipe.ParseError`, `rypipe.PlanError`, `rypipe.MergeError`, or
   `rypipe.RypipeError` for error handling.
 
-**Next:** [Pipeline](#pipeline) — chain stages with the `|` operator.
+**Next:** [Pipeline](pipeline.md#pipeline) — chain stages with the `|` operator.

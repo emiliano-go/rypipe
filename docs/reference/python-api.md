@@ -1,7 +1,7 @@
 # Python API Reference { #python-api }
 
 This page is a reference for the **rypipe** Python API. For a tutorial,
-see the [Tutorial](./tutorial/index.md).
+see the [Tutorial](../tutorial/index.md).
 
 ## rypipe.read() { #rypipe-read }
 

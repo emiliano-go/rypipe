@@ -305,4 +305,4 @@ table = result.to_arrow()
 * **FilterRowsAny**, **FilterRowsAll**, **FilterRowsNot** combine filters.
 * Import stages from the adapter package, not from **rypipe**.
 
-**Next:** [Sinks](#sinks) — materializing pipeline results.
+**Next:** [Sinks](sinks.md#sinks) — materializing pipeline results.

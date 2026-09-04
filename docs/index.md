@@ -107,8 +107,8 @@ let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
 
 - [Architecture](./architecture/): how the pieces fit together (start with [Overview](./architecture/index.md), then [Engine](./architecture/engine.md), [Columnar](./architecture/columnar.md), [Plan](./architecture/plan.md), [Execution](./architecture/execution.md), [Data flow](./architecture/data-flow.md), [Storage](./architecture/storage.md), [Optimizations](./architecture/optimizations.md)).
 - [Why Python?](./why-python.md): why rypipe is Rust core plus Python surface, not pure Rust, the data driven case for the hybrid.
-- [Python API](./python-api.md): the `rypipe` package and `_rypipe` helpers.
-- [Rust API](./rust-api.md): using `rypipe-core` and writing custom adapters.
+- [Python API](./reference/python-api.md): the `rypipe` package and `_rypipe` helpers.
+- [Rust API](./reference/rust-api.md): using `rypipe-core` and writing custom adapters.
 - [Writing a format adapter](./writing-adapters/): adding CSV, JSON, etc.
 - [Performance](./performance.md): benchmarks and tuning knobs.
 
