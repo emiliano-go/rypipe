@@ -27,12 +27,8 @@ result = (
 
 # Materialize to a table
 table = result.to_arrow()
-print(table)
-# pyarrow.Table<name: string, amount: double, status: string>
-# ----
-# name: ["Alice", "Bob"]
-# amount: [150.0, 75.0]
-# status: ["active", "active"]
+print(table.num_rows)
+# 12 (rows where Status == "Active")
 ```
 
 ### What **rypipe** does automatically { #what-rypipe-does }
@@ -252,6 +248,6 @@ print(rows)
 * **rypipe** pushes fusable stages into the Rust parse loop automatically.
 * Import stages from the adapter package, not from **rypipe**.
 * Call `.to_arrow()`, `.to_pandas()`, or `.to_polars()` to materialize.
-* Iterate with `for row in pipeline` or collect with `rypipe.collect()`.
+* Iterate with `for row in pipeline` or collect with `collect()`.
 
 **Next:** [Stages](stages.md#stages): detailed reference for each stage class.

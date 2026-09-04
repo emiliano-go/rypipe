@@ -42,9 +42,11 @@ source = CrystalXMLSource("report.xml", row_tag="Details")
 table = source.to_arrow()
 
 print(table.schema)
-# name: string
-# amount: double
-# status: string
+# Name: string
+# Department: string
+# Amount: string
+# Status: string
+# Date: string
 
 print(table.num_rows)
 # 15
