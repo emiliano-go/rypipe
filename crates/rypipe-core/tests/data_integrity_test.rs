@@ -814,7 +814,7 @@ fn dictionary_across_all_modes() {
     let par = p.read_bytes_par(bytes, 4).unwrap();
     let stream = p.read_bytes_stream(bytes, MemoryBudget::new(1024)).unwrap();
     assert_batches_equal(std::slice::from_ref(&single), &par);
-    assert_batches_equal(&[single.clone()], &stream);
+    assert_batches_equal(std::slice::from_ref(&single), &stream);
     // Verify dictionary encoding
     let col = single.column_by_name("X").unwrap();
     assert_eq!(
@@ -1233,8 +1233,8 @@ fn three_parsers_produce_identical_results() {
     let n = p_normal.read_bytes(bytes).unwrap();
     let r = p_resolved.read_bytes(bytes).unwrap();
     let rp = p_resolve_put.read_bytes(bytes).unwrap();
-    assert_batches_equal(std::slice::from_ref(&n), &std::slice::from_ref(&r));
-    assert_batches_equal(std::slice::from_ref(&n), &std::slice::from_ref(&rp));
+    assert_batches_equal(std::slice::from_ref(&n), std::slice::from_ref(&r));
+    assert_batches_equal(std::slice::from_ref(&n), std::slice::from_ref(&rp));
 
     let n_par = p_normal.read_bytes_par(bytes, 4).unwrap();
     let r_par = p_resolved.read_bytes_par(bytes, 4).unwrap();
