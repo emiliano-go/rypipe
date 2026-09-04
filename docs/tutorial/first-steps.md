@@ -1,5 +1,10 @@
 # First Steps { #first-steps }
 
+!!! note
+
+    The kwargs and options shown here are for the **crxml** adapter. Other
+    adapters may accept different parameters. Check your adapter's docs.
+
 This page covers reading files in depth: format inference, keyword
 arguments, and schema hints.
 

@@ -1,5 +1,10 @@
 # Streaming { #streaming }
 
+!!! note
+
+    Streaming options (`memory`, `batch_size`) are available in most adapters
+    but may have different defaults. Check your adapter's docs.
+
 When processing files larger than available memory, use streaming to process
 data in bounded chunks.
 

@@ -1,5 +1,10 @@
 # Configuration { #configuration }
 
+!!! note
+
+    The kwargs shown here are for the **crxml** adapter. Other adapters may
+    accept different parameters or have different defaults.
+
 This page is a reference for all **rypipe** options and kwargs.
 
 ## rypipe.read() options { #rypipe-read-options}
