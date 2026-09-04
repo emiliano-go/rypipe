@@ -250,7 +250,7 @@ pub static SCHEMA_CACHE: LazyLock<RwLock<FxHashMap<SchemaCacheKey, SchemaCacheVa
 
 - Key: `(file_len, sample_hash)` computed by `layout_signature`
 - Value: `Arc<Vec<String>>` of discovered column names
-- Cap: 128 entries (oldest evicted on overflow)
+- Cap: 128 entries (arbitrary entry evicted on overflow)
 
 Cache hits skip the discovery pass entirely. For 1,000 files with the same
 layout, this saves 5 ms per file (5 seconds total).
