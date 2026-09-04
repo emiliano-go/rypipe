@@ -1,81 +1,114 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Report Title="Sales Report">
   <Group Name="East">
-    <Details Attr1="1" Attr2="2">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Alice Johnson</FormattedValue><Value>Alice Johnson</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Sales</FormattedValue><Value>Sales</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>15000.50</FormattedValue><Value>15000.50</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Active</FormattedValue><Value>Active</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-05</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Alice Johnson</Value></Field>
+      <Field Name="Department"><Value>Sales</Value></Field>
+      <Field Name="Amount"><Value>15000.50</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-05</Value></Field>
     </Details>
-    <Details Attr1="2" Attr2="3">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Bob Smith</FormattedValue><Value>Bob Smith</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Engineering</FormattedValue><Value>Engineering</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>8500.00</FormattedValue><Value>8500.00</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Active</FormattedValue><Value>Active</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-06</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Bob Smith</Value></Field>
+      <Field Name="Department"><Value>Engineering</Value></Field>
+      <Field Name="Amount"><Value>8500.00</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-06</Value></Field>
     </Details>
-    <Details Attr1="3" Attr2="4">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Carol White</FormattedValue><Value>Carol White</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Marketing</FormattedValue><Value>Marketing</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>12000.75</FormattedValue><Value>12000.75</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Active</FormattedValue><Value>Active</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-07</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Carol White</Value></Field>
+      <Field Name="Department"><Value>Marketing</Value></Field>
+      <Field Name="Amount"><Value>12000.75</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-07</Value></Field>
+    </Details>
+    <Details>
+      <Field Name="Name"><Value>Dave Brown</Value></Field>
+      <Field Name="Department"><Value>Sales</Value></Field>
+      <Field Name="Amount"><Value>9800.25</Value></Field>
+      <Field Name="Status"><Value>Inactive</Value></Field>
+      <Field Name="Date"><Value>2026-01-08</Value></Field>
+    </Details>
+    <Details>
+      <Field Name="Name"><Value>Eve Davis</Value></Field>
+      <Field Name="Department"><Value>Engineering</Value></Field>
+      <Field Name="Amount"><Value>11200.00</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-09</Value></Field>
     </Details>
   </Group>
   <Group Name="West">
-    <Details Attr1="4" Attr2="5">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Dave Brown</FormattedValue><Value>Dave Brown</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Sales</FormattedValue><Value>Sales</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>9800.25</FormattedValue><Value>9800.25</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Inactive</FormattedValue><Value>Inactive</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-08</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Frank Miller</Value></Field>
+      <Field Name="Department"><Value>Sales</Value></Field>
+      <Field Name="Amount"><Value>13500.00</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-10</Value></Field>
     </Details>
-    <Details Attr1="5" Attr2="6">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Eve Davis</FormattedValue><Value>Eve Davis</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Engineering</FormattedValue><Value>Engineering</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>11200.00</FormattedValue><Value>11200.00</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Active</FormattedValue><Value>Active</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-09</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Grace Wilson</Value></Field>
+      <Field Name="Department"><Value>Marketing</Value></Field>
+      <Field Name="Amount"><Value>7600.50</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-11</Value></Field>
     </Details>
-    <Details Attr1="6" Attr2="7">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Frank Miller</FormattedValue><Value>Frank Miller</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Sales</FormattedValue><Value>Sales</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>13500.00</FormattedValue><Value>13500.00</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Active</FormattedValue><Value>Active</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-10</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Henry Taylor</Value></Field>
+      <Field Name="Department"><Value>Engineering</Value></Field>
+      <Field Name="Amount"><Value>14200.00</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-12</Value></Field>
+    </Details>
+    <Details>
+      <Field Name="Name"><Value>Ivy Anderson</Value></Field>
+      <Field Name="Department"><Value>Sales</Value></Field>
+      <Field Name="Amount"><Value>6300.75</Value></Field>
+      <Field Name="Status"><Value>Inactive</Value></Field>
+      <Field Name="Date"><Value>2026-01-13</Value></Field>
+    </Details>
+    <Details>
+      <Field Name="Name"><Value>Jack Thomas</Value></Field>
+      <Field Name="Department"><Value>Marketing</Value></Field>
+      <Field Name="Amount"><Value>10100.00</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-14</Value></Field>
     </Details>
   </Group>
   <Group Name="Central">
-    <Details Attr1="7" Attr2="8">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Grace Wilson</FormattedValue><Value>Grace Wilson</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Marketing</FormattedValue><Value>Marketing</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>7600.50</FormattedValue><Value>7600.50</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Active</FormattedValue><Value>Active</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-11</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Kate Martinez</Value></Field>
+      <Field Name="Department"><Value>Sales</Value></Field>
+      <Field Name="Amount"><Value>16800.25</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-15</Value></Field>
     </Details>
-    <Details Attr1="8" Attr2="9">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Henry Taylor</FormattedValue><Value>Henry Taylor</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Engineering</FormattedValue><Value>Engineering</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>14200.00</FormattedValue><Value>14200.00</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Active</FormattedValue><Value>Active</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-12</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Leo Garcia</Value></Field>
+      <Field Name="Department"><Value>Engineering</Value></Field>
+      <Field Name="Amount"><Value>9400.00</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-15</Value></Field>
     </Details>
-    <Details Attr1="9" Attr2="10">
-      <Field Name="Name" FieldName="{report.Name}"><FormattedValue>Ivy Anderson</FormattedValue><Value>Ivy Anderson</Value></Field>
-      <Field Name="Department" FieldName="{report.Department}"><FormattedValue>Sales</FormattedValue><Value>Sales</Value></Field>
-      <Field Name="Amount" FieldName="{report.Amount}"><FormattedValue>6300.75</FormattedValue><Value>6300.75</Value></Field>
-      <Field Name="Status" FieldName="{report.Status}"><FormattedValue>Inactive</FormattedValue><Value>Inactive</Value></Field>
-      <Text Name="Date"><TextValue>2026-01-13</TextValue></Text>
-      <Section SectionNumber="0"/>
+    <Details>
+      <Field Name="Name"><Value>Mia Robinson</Value></Field>
+      <Field Name="Department"><Value>Marketing</Value></Field>
+      <Field Name="Amount"><Value>11700.50</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-15</Value></Field>
+    </Details>
+    <Details>
+      <Field Name="Name"><Value>Noah Clark</Value></Field>
+      <Field Name="Department"><Value>Sales</Value></Field>
+      <Field Name="Amount"><Value>8900.00</Value></Field>
+      <Field Name="Status"><Value>Inactive</Value></Field>
+      <Field Name="Date"><Value>2026-01-15</Value></Field>
+    </Details>
+    <Details>
+      <Field Name="Name"><Value>Olivia Lewis</Value></Field>
+      <Field Name="Department"><Value>Engineering</Value></Field>
+      <Field Name="Amount"><Value>12600.75</Value></Field>
+      <Field Name="Status"><Value>Active</Value></Field>
+      <Field Name="Date"><Value>2026-01-15</Value></Field>
     </Details>
   </Group>
 </Report>

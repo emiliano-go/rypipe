@@ -26,8 +26,11 @@ Returns a `pyarrow.Table`. This is the default materialization:
 ```python
 table = src.to_arrow()
 print(table.schema)
-# name: string
-# amount: double
+# Name: string
+# Department: string
+# Amount: string
+# Status: string
+# Date: string
 ```
 
 ### to_pandas() { #to-pandas }
@@ -37,8 +40,11 @@ Returns a pandas DataFrame with PyArrow-backed dtypes by default:
 ```python
 df = src.to_pandas()
 print(df.dtypes)
-# name      string[pyarrow]
-# amount    double[pyarrow]
+# Name       string[pyarrow]
+# Department string[pyarrow]
+# Amount     string[pyarrow]
+# Status     string[pyarrow]
+# Date       string[pyarrow]
 ```
 
 You can disable PyArrow backing with `dtype_backend="numpy"`:
@@ -64,7 +70,7 @@ import polars as pl
 
 df = src.to_polars()
 print(df.columns)
-# ['name', 'amount']
+# ['Name', 'Department', 'Amount', 'Status', 'Date']
 ```
 
 ### to_parquet() { #to-parquet}
@@ -104,7 +110,9 @@ pipeline = src | FilterRows(field="status", op="==", value="active")
 Collects all rows into a list of dicts:
 
 ```python
-rows = rypipe.collect(pipeline)
+from crxml import collect
+
+rows = collect(pipeline)
 print(rows[0])
 # {"name": "Alice", "amount": 150.0, "status": "active"}
 ```
@@ -114,7 +122,9 @@ print(rows[0])
 Materializes a pipeline to a `pyarrow.Table`:
 
 ```python
-table = rypipe.to_arrow(pipeline)
+from crxml import to_arrow
+
+table = to_arrow(pipeline)
 ```
 
 ### to_pandas() (function) { #to-pandas-function}
@@ -122,7 +132,9 @@ table = rypipe.to_arrow(pipeline)
 Materializes a pipeline to a pandas DataFrame:
 
 ```python
-df = rypipe.to_pandas(pipeline)
+from crxml import to_pandas
+
+df = to_pandas(pipeline)
 ```
 
 ### to_polars() (function) { #to-polars-function}
@@ -130,7 +142,9 @@ df = rypipe.to_pandas(pipeline)
 Materializes a pipeline to a Polars DataFrame:
 
 ```python
-df = rypipe.to_polars(pipeline)
+from crxml import to_polars
+
+df = to_polars(pipeline)
 ```
 
 ### to_csv() (function) { #to-csv-function}
@@ -138,10 +152,12 @@ df = rypipe.to_polars(pipeline)
 Writes pipeline results to a CSV file:
 
 ```python
-rypipe.to_csv(pipeline, "output.csv")
+from crxml import to_csv
+
+to_csv(pipeline, "output.csv")
 
 # Custom delimiter and encoding
-rypipe.to_csv(pipeline, "output.tsv", delimiter="\t", encoding="utf-8")
+to_csv(pipeline, "output.tsv", delimiter="\t", encoding="utf-8")
 ```
 
 **Parameters:**
@@ -158,19 +174,21 @@ rypipe.to_csv(pipeline, "output.tsv", delimiter="\t", encoding="utf-8")
 Writes pipeline results to a Parquet file:
 
 ```python
-rypipe.to_parquet(pipeline, "output.parquet")
+from crxml import to_parquet
+
+to_parquet(pipeline, "output.parquet")
 ```
 
 ## Which sink should I use? { #which-sink}
 
 | Goal | Method |
 |------|--------|
-| Get a PyArrow table | `.to_arrow()` or `rypipe.to_arrow()` |
-| Get a pandas DataFrame | `.to_pandas()` or `rypipe.to_pandas()` |
-| Get a Polars DataFrame | `.to_polars()` or `rypipe.to_polars()` |
-| Write to Parquet | `.to_parquet(path)` or `rypipe.to_parquet(pipeline, path)` |
-| Write to CSV | `rypipe.to_csv(pipeline, path)` |
-| Get a list of dicts | `rypipe.collect(pipeline)` |
+| Get a PyArrow table | `.to_arrow()` or `crxml.to_arrow()` |
+| Get a pandas DataFrame | `.to_pandas()` or `crxml.to_pandas()` |
+| Get a Polars DataFrame | `.to_polars()` or `crxml.to_polars()` |
+| Write to Parquet | `.to_parquet(path)` or `crxml.to_parquet(pipeline, path)` |
+| Write to CSV | `crxml.to_csv(pipeline, path)` |
+| Get a list of dicts | `crxml.collect(pipeline)` |
 
 !!! tip
 
@@ -183,9 +201,9 @@ rypipe.to_parquet(pipeline, "output.parquet")
 
 * Source methods: `.to_arrow()`, `.to_pandas()`, `.to_polars()`,
   `.to_parquet()`, `.clear_cache()`.
-* Standalone functions: `rypipe.collect()`, `rypipe.to_arrow()`,
-  `rypipe.to_pandas()`, `rypipe.to_polars()`, `rypipe.to_csv()`,
-  `rypipe.to_parquet()`.
+* Standalone functions: `crxml.collect()`, `crxml.to_arrow()`,
+  `crxml.to_pandas()`, `crxml.to_polars()`, `crxml.to_csv()`,
+  `crxml.to_parquet()`.
 * Source methods reuse the cached table. Standalone functions re-parse if
   the pipeline hasn't been materialized yet.
 

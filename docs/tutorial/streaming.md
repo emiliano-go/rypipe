@@ -138,18 +138,6 @@ for batch in pipeline.iter_record_batches(memory="64MiB"):
 writer.close()
 ```
 
-## Streaming from a Source { #streaming-from-a-source}
-
-You can also stream directly from any Source:
-
-```python
-from crxml import CrystalXMLSource
-
-src = CrystalXMLSource("huge_report.xml", row_tag="Details")
-for batch in src.iter_record_batches(memory="64MiB"):
-    process(batch)
-```
-
 ## Performance { #performance}
 
 Streaming has slightly lower throughput than full-table parsing because
@@ -174,6 +162,5 @@ numbers for the crxml adapter:
 * Peak memory is `memory` + one batch + export buffer.
 * Control batch size with `batch_size` for tuning memory vs overhead.
 * Streaming works with pipelines: fusable stages run in the parse loop.
-* Use `rypipe.iter_record_batches()` for module-level streaming.
 
 **Next:** [Configuration](configuration.md#configuration): all available options.
