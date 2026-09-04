@@ -56,9 +56,9 @@ pip install rypipe my-adapter
 
 ```python
 import rypipe
-import my_adapter
+import my_adapter  # registers the adapter with rypipe
 
-# Format is inferred from the extension; mode defaults to parallel. { #format-is-inferred-from-the-extension-mode-defaults-to-parallel }
+# Format is inferred from the extension; mode defaults to parallel.
 table = rypipe.read(
     "data.myfmt",
     field_types={"amount": "float64"},
@@ -67,17 +67,23 @@ table = rypipe.read(
 print(table.num_rows, table.num_columns)
 ```
 
+/// note
+
+`import my_adapter` is only needed once to register the adapter.
+After that, `rypipe.read("data.myfmt")` auto-detects the format.
+
+///
+
 ### Pipeline API { #pipeline-api }
 
 Adapters that expose a `rypipe.Adapter` subclass give you a chainable pipeline
 with automatic fusion of rename, drop, cast, and filter stages into the Rust
-parse loop. Subclasses only implement ``read(path, **kwargs)``::
+parse loop. Users import everything from the adapter — never from **rypipe**:
 
 ```python
-from crxml import RenameFields, DropFields, CastTypes, FilterRows
-import my_adapter
+from my_adapter import MySource, CastTypes, FilterRows, RenameFields, DropFields
 
-source = my_adapter.MySource("data.myfmt")
+source = MySource("data.myfmt")
 
 df = (
     source
