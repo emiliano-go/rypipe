@@ -1,15 +1,15 @@
 # First Steps { #first-steps }
 
-This page covers `rypipe.read()` in depth: format inference, keyword
+This page covers reading files in depth: format inference, keyword
 arguments, and schema hints.
 
 ## The basics { #the-basics }
 
 ```python
-import rypipe
-import crxml  # registers the adapter
+from crxml import CrystalXMLSource
 
-table = rypipe.read("report.xml", row_tag="Details")
+source = CrystalXMLSource("report.xml", row_tag="Details")
+table = source.to_arrow()
 ```
 
 The `row_tag="Details"` argument is passed through to the **crxml** adapter.
@@ -122,26 +122,23 @@ The filter spec is a dictionary with:
 
 ## Error handling { #error-handling }
 
-**rypipe** raises specific exceptions for different error types:
+The adapter raises specific exceptions for different error types:
 
 ```python
-import rypipe
-import rypipe_log
+from crxml import CrystalXMLSource, XmlError, PlanError, MergeError
 
 try:
-    table = rypipe.read("bad_file.log")
-except rypipe.ParseError as e:
-    # The file could not be parsed (malformed data, encoding errors)
+    source = CrystalXMLSource("bad_file.xml", row_tag="Details")
+    table = source.to_arrow()
+except XmlError as e:
+    # The file could not be parsed (malformed XML, encoding errors)
     print(f"Parse error: {e}")
-except rypipe.PlanError as e:
+except PlanError as e:
     # Invalid plan kwargs (bad filter spec, unknown field type)
     print(f"Invalid plan: {e}")
-except rypipe.MergeError as e:
+except MergeError as e:
     # Schema mismatch between chunks (different columns in different parts)
     print(f"Schema merge error: {e}")
-except rypipe.RypipeError as e:
-    # General API error (no adapter registered, file not found, etc.)
-    print(f"API error: {e}")
 ```
 
 ## Recap { #recap }

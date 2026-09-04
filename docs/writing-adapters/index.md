@@ -44,7 +44,6 @@ The engine provides `TableBuilder` as the production
 | Component | Purpose |
 |-----------|---------|
 | **`MySource(Source)`** | Pipeline-capable source with `_read_arrow()` and plan forwarding |
-| **`MyAdapter`** | Stateless class with `read()` that delegates to `MySource(...).to_arrow()` |
 | **`my_adapter.stages/`** | Own copies of `CastTypes`, `FilterRows`, `RenameFields`, `DropFields` |
 | **Registration** | Adapter registered at import time via side-effect import |
 
@@ -55,8 +54,77 @@ The engine provides `TableBuilder` as the production
     sink functions (`collect`, `to_dataframe`, `to_csv`) so users never import
     from **rypipe** directly. This makes the adapter self-contained.
 
-    The only exception is `rypipe.read()`: users call it directly for
-    one-liner reads via the adapter registry.
+
+## Adapter API contract { #adapter-api-contract }
+
+Every adapter must expose these APIs:
+
+### Source class (required) { #source-class }
+
+```python
+from rypipe import Source
+
+class MySource(Source):
+    def _read_arrow(self, plan_overrides=None):
+        plan = self._build_plan_kwargs()
+        if plan_overrides:
+            plan.update(plan_overrides)
+        return _rypipe_myfmt.read(str(self._path), **plan)
+```
+
+The Source class gives users the pipeline `|` operator, caching, and all
+sinks (`.to_arrow()`, `.to_pandas()`, `.to_polars()`, `.to_parquet()`).
+
+### Stages (required) { #stages }
+
+Repack or reimplement these stage classes:
+
+- `CastTypes` — cast column types
+- `FilterRows` — filter rows by predicate
+- `RenameFields` — rename columns
+- `DropFields` — remove columns
+
+### Sinks (required) { #sinks }
+
+Repack or reimplement these sink functions:
+
+- `collect(pipeline)` — collect to list of dicts
+- `to_dataframe(pipeline)` — convert to pandas DataFrame
+- `to_csv(pipeline, path)` — write to CSV
+
+### Registration (required) { #registration }
+
+Register the adapter at import time so `rypipe.read("file.ext")` works:
+
+```python
+def _register():
+    try:
+        import rypipe
+    except Exception:
+        return
+    rypipe.register_adapter("myfmt", MyAdapter(), extensions=[".myfmt"])
+
+_register()
+```
+
+### What NOT to implement { #what-not-to-implement }
+
+Do **not** implement a `read()` convenience function. The Source class IS
+the primary API. Users write:
+
+```python
+from my_adapter import MySource
+
+source = MySource("file.myfmt")
+table = source.to_arrow()
+```
+
+Not:
+
+```python
+from my_adapter import read  # don't do this
+table = read("file.myfmt")
+```
 
 
 ## User API { #user-api }
@@ -65,18 +133,16 @@ End users should only import from the adapter package. Here is what a
 user of your adapter sees:
 
 ```python
-# One-liner read (via adapter registry)
-import rypipe
-import my_adapter  # registers the adapter
-
-table = rypipe.read("file.myfmt")
-
-# Pipeline (everything from the adapter)
 from my_adapter import MySource, CastTypes, FilterRows
 
-src = MySource("file.myfmt")
+source = MySource("file.myfmt")
+
+# One-liner
+table = source.to_arrow()
+
+# Pipeline
 result = (
-    src
+    source
     | CastTypes({"age": int})
     | FilterRows(field="active", op="==", value="true")
 ).to_arrow()

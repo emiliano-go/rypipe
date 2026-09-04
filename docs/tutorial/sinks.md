@@ -85,11 +85,10 @@ src.clear_cache()
 ## Pipeline functions { #pipeline-functions }
 
 When working with a Pipeline (the result of `src | stage`), use the
-standalone sink functions from **rypipe**:
+standalone sink functions from the adapter:
 
 ```python
-import rypipe
-from crxml import CrystalXMLSource, FilterRows
+from crxml import CrystalXMLSource, FilterRows, collect
 
 src = CrystalXMLSource("report.xml", row_tag="Details")
 pipeline = src | FilterRows(field="status", op="==", value="active")
