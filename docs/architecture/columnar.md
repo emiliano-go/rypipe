@@ -1,9 +1,9 @@
-# Columnar storage
+# Columnar storage { #columnar-storage }
 
 This page documents `columnar.rs` in depth. It is the storage layer that makes
 `TableBuilder` fast and Arrow export cheap.
 
-## StrColumn
+## StrColumn { #strcolumn }
 
 ```rust
 pub(crate) struct StrColumn {
@@ -16,7 +16,7 @@ pub(crate) struct StrColumn {
 This is exactly the Arrow `StringArray` layout (offsets + bytes + null bitmap)
 without per-cell `String` allocation.
 
-### Fields
+### Fields { #fields }
 
 - **`data: Vec<u8>`**: One contiguous arena. Every string's bytes are
   appended sequentially. No per-cell allocation.
@@ -28,7 +28,7 @@ without per-cell `String` allocation.
 - **`validity: ValidityBitmap`**: One bit per row. `true` means present;
   `false` means null (no bytes for that slot, but offsets still advance by 0).
 
-### Operations
+### Operations { #operations }
 
 - **`with_capacity(cap)`**: Preallocates `offsets` with `cap + 1` and
   `data` with `cap * 16` (heuristic 16 bytes per string).
@@ -51,7 +51,7 @@ without per-cell `String` allocation.
   with `OffsetBuffer`, `ScalarBuffer`, `Buffer`, and `NullBuffer`. Block
   copy, not per-cell.
 
-### ValidityBitmap
+### ValidityBitmap { #validitybitmap }
 
 ```rust
 struct ValidityBitmap {
@@ -65,7 +65,7 @@ One bit per row packed into bytes. Supports `push` (allocates new byte every
 8 rows), `pop`, `split_off`, `append`. Converts to Arrow `NullBuffer` via
 `into_arrow()`.
 
-## ColumnBuilder
+## ColumnBuilder { #columnbuilder }
 
 ```rust
 pub(crate) enum ColumnBuilder {
@@ -87,7 +87,7 @@ pub(crate) enum ColumnBuilder {
 Each variant stores a `PrimColumn<T>` (or `StrColumn` for strings). Created
 by `ExecutionPlan::column_type` at first use.
 
-### PrimColumn<T>
+### PrimColumn<T> { #primcolumnt }
 
 ```rust
 pub(crate) struct PrimColumn<T: Copy> {
@@ -99,7 +99,7 @@ pub(crate) struct PrimColumn<T: Copy> {
 Flat contiguous array. Zero-copy Arrow export via `to_arrow()` which moves
 `Vec<T>` into `ScalarBuffer`. Boolean specialization via `to_arrow_bool()`.
 
-### Push paths
+### Push paths { #push-paths }
 
 `push_value(Value<'_>)` is called for every field:
 - `Value::Str(s)` → `push_str(Some(s))` → parse according to column type
@@ -108,7 +108,7 @@ Flat contiguous array. Zero-copy Arrow export via `to_arrow()` which moves
 
 `dict_code(dict, index, v)` does hash lookup + insert. Average O(1).
 
-### Auto dictionary
+### Auto dictionary { #auto-dictionary }
 
 `try_upgrade_to_dict(min_rows, max_ratio, max_size)` upgrades String to
 Dictionary when cardinality is low:
@@ -125,7 +125,7 @@ Dictionary when cardinality is low:
 Called after each chunk parse when `plan.auto_dict` is true, and after merge
 via `TableBuilder::auto_dict_upgrade`.
 
-### Incremental dictionary unification
+### Incremental dictionary unification { #incremental-dictionary-unification }
 
 When `auto_dict=True` in parallel mode, chunks may produce different
 dictionaries. The incremental path:
@@ -139,7 +139,7 @@ dictionaries. The incremental path:
 
 This avoids the serial merge path while keeping the fast export path.
 
-### Merging and promotion
+### Merging and promotion { #merging-and-promotion }
 
 `extend_owned(other)` merges by consuming other. Both must be same variant:
 - String via `StrColumn::append` (base shift)
@@ -152,7 +152,7 @@ string+dictionary→dictionary, else None.
 
 `promote_to_variant(target)` mutates in place: Int64→Float64, String→Dict.
 
-### TypedValue
+### TypedValue { #typedvalue }
 
 ```rust
 pub(crate) enum TypedValue<'a> {
@@ -166,9 +166,9 @@ storage without allocation. `get_filter_value` formats as `String` for
 `Equal`/`NotEqual` predicates (dates via `format_date32`, timestamps via
 `format_timestamp`).
 
-## Performance characteristics
+## Performance characteristics { #performance-characteristics }
 
-### String push
+### String push { #string-push }
 
 `push_str` for the String variant does:
 
@@ -179,7 +179,7 @@ storage without allocation. `get_filter_value` formats as `String` for
 
 Cost: ~10 ns per string (arena append + 3 pushes). No per-cell allocation.
 
-### Numeric push
+### Numeric push { #numeric-push }
 
 `push_value` for Int64/Float64 does:
 
@@ -190,7 +190,7 @@ Cost: ~10 ns per string (arena append + 3 pushes). No per-cell allocation.
 
 Cost: ~5 ns per numeric value. No parsing overhead for typed values.
 
-### Dictionary push
+### Dictionary push { #dictionary-push }
 
 `dict_code` does:
 
@@ -200,7 +200,7 @@ Cost: ~5 ns per numeric value. No parsing overhead for typed values.
 
 Cost: ~5 ns per value (amortized O(1) lookup).
 
-### Arrow export
+### Arrow export { #arrow-export }
 
 `to_arrow_array` uses `std::mem::take` to move internal buffers into Arrow
 arrays. This is zero-copy, no data copying, just pointer moves.

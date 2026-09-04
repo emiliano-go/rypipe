@@ -36,7 +36,7 @@ let plan = ExecutionPlan::new()
 ```
 
 ```python
-# Python: pass schema as a list of column names
+# Python: pass schema as a list of column names { #python-pass-schema-as-a-list-of-column-names }
 source = MyAdapter("data.log", schema=["id", "timestamp", "amount", "status"])
 ```
 
@@ -56,7 +56,7 @@ let plan = ExecutionPlan::new()
 ```
 
 ```python
-# Python: map column names to type strings for direct parsing
+# Python: map column names to type strings for direct parsing { #python-map-column-names-to-type-strings-for-direct-parsing }
 source = MyAdapter(
     "data.log",
     schema=["id", "amount", "timestamp"],
@@ -165,6 +165,14 @@ returns `false` (skipped), `put_field("id", ...)` maps to "record_id",
 and `put_field("amount", ...)` builds `Float64Array` directly. The filter
 checks `amount > 100.0` per row with native f64 comparison. Without
 `field_types`, the filter falls back to string comparison or is skipped.
+
+/// tip
+
+Partial schemas work too — declare the columns you know and the engine
+automatically appends unknown columns in parallel streaming. This is useful
+when the format has optional fields that appear only in some rows.
+
+///
 
 ## Common patterns { #common-patterns }
 
@@ -289,6 +297,14 @@ order, forcing sequential merge (~4,497 MB/s). With `schema_order`, identical
 column order enables parallel export (~4,980 MB/s, +11%). With `schema_order`
 + projection, the scanner skips unwanted fields via `row_satisfied` byte-jump
 (~7,630 MB/s, +80%).
+
+/// warning
+
+Without `field_types`, string-to-number filters compare lexicographically
+(`"9" > "10"` is `true`). Always set `field_types` on columns used in
+numeric filters to get native comparison.
+
+///
 
 ## Troubleshooting { #troubleshooting }
 

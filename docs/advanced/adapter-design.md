@@ -1,8 +1,8 @@
-# Adapter design
+# Adapter design { #adapter-design }
 
 A high-performance adapter does as little work as possible per record. This page covers the `Splitter` and `RecordParser` design patterns that keep rypipe fast.
 
-## `Splitter` design
+## `Splitter` design { #splitter-design }
 
 The splitter finds safe chunk boundaries for parallel parsing.
 
@@ -25,7 +25,7 @@ Rules:
 
 A good splitter is cheap. It scans for boundaries with byte searches rather than parsing the whole chunk. For line-oriented formats, `memchr::memchr` finds newlines. For XML, `memchr::memmem` finds row tags.
 
-## Complete Splitter example: newline-delimited log format
+## Complete Splitter example: newline-delimited log format { #complete-splitter-example-newline-delimited-log-format }
 
 Here is a complete, annotated `Splitter` implementation for a newline-delimited format:
 
@@ -65,7 +65,7 @@ Key points:
 - `estimate_bytes_per_row` is called once on a sample. Simple newline-counting suffices for most formats.
 - Do **not** override `find_split_points` unless you have a measured reason. The default handles everything including the 2 MiB chunk floor that prevents sub-MB collapse.
 
-## `RecordParser` design
+## `RecordParser` design { #recordparser-design }
 
 The record parser turns byte chunks into field/value events fed to a `ColumnarSink`.
 
@@ -78,7 +78,7 @@ pub trait RecordParser: Send + Sync {
 }
 ```
 
-### `validate`
+### `validate` { #validate }
 
 Called once per chunk before parsing. Use it for upfront checks:
 
@@ -91,7 +91,7 @@ fn validate(&self, bytes: &[u8]) -> Result<()> {
 
 This is cheap (SIMD-accelerated) and catches malformed input early.
 
-### `parse_chunk`
+### `parse_chunk` { #parse_chunk }
 
 The main parsing loop. For each record: call `sink.begin_row()`, emit fields with `sink.put_field()`, then `sink.end_row()`.
 
@@ -113,7 +113,7 @@ fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
 }
 ```
 
-### `parse_chunk_generic`
+### `parse_chunk_generic` { #parse_chunk_generic }
 
 Override for devirtualized sink calls. When the engine knows the concrete sink type, it calls this instead, enabling inlining of `begin_row`/`put_field`/`end_row`:
 
@@ -126,7 +126,7 @@ fn parse_chunk_generic<S: ColumnarSink>(&self, bytes: &[u8], sink: &mut S) -> Re
 
 Override this for a measurable speedup on hot paths.
 
-### Push method hierarchy (cost model)
+### Push method hierarchy (cost model) { #push-method-hierarchy }
 
 | Method | Cost | When to use |
 |--------|------|-------------|
@@ -137,9 +137,9 @@ Override this for a measurable speedup on hot paths.
 
 Use the fastest method your context allows.
 
-## Error handling
+## Error handling { #error-handling }
 
-### Malformed input
+### Malformed input { #malformed-input }
 
 Return `Err` from `parse_chunk` to abort parsing. The engine propagates the error to the caller:
 
@@ -161,7 +161,7 @@ Common error types:
 
 **Do not panic** in `parse_chunk`. Panics are caught by `catch_unwind` in the parallel executor, but they abort the entire parse and produce a hard-to-debug `MergeError`.
 
-### Partial trailing rows
+### Partial trailing rows { #partial-trailing-rows }
 
 Chunks can start or end inside a row. If your parser reaches the end of the chunk mid-record, just return. The engine discards partial trailing rows automatically during `normalize()`:
 
@@ -180,11 +180,11 @@ fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
 }
 ```
 
-### Recovery from bad chunks
+### Recovery from bad chunks { #recovery-from-bad-chunks }
 
 In parallel mode, if one chunk fails, the entire parse fails. There is no per-chunk recovery. If you need partial results, use the bounded/streaming path and handle errors per-batch in the consumer.
 
-## Borrowing strings
+## Borrowing strings { #borrowing-strings }
 
 If the input chunk is valid UTF-8, hand borrowed `&str` slices to the engine:
 
@@ -199,7 +199,7 @@ for line in text.lines() {
 
 The engine copies the string into its arena only when necessary. Borrowing avoids per-field allocations in the parser.
 
-## Sparse rows
+## Sparse rows { #sparse-rows }
 
 If a field is missing, skip it entirely:
 
@@ -211,7 +211,7 @@ if let Some(value) = maybe_value {
 
 Do not emit `Value::Null` for every missing field. The engine null-fills missing columns at `end_row()`; emitting explicit nulls wastes work.
 
-## Respecting `sink.wants`
+## Respecting `sink.wants` { #respecting-sinkwants }
 
 `ColumnarSink::wants` lets the parser skip fields that will be dropped:
 
@@ -223,11 +223,11 @@ if sink.wants("internal_id") {
 
 For expensive extractions (deep XML paths, regex captures), this is a major win. Always check `wants` before doing work that the engine will discard.
 
-## `parse_tail` fallback
+## `parse_tail` fallback { #parse_tail-fallback }
 
 Chunks can start or end inside a row. A robust adapter has a fallback path that rescans from the nearest safe row start. crxml uses `parse_tail` to handle orphan close-tags at chunk boundaries without a serial pre-pass.
 
-## Summary
+## Summary { #summary }
 
 - Split cheaply with `memchr`; defer full decoding.
 - Skip comments, CDATA, quotes, and strings to avoid false boundaries.

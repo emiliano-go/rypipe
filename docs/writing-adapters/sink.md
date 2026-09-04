@@ -1,4 +1,4 @@
-# The ColumnarSink Trait
+# The ColumnarSink Trait { #the-columnarsink-trait }
 
 `ColumnarSink` is the bridge between your parser and the engine. The parser
 calls `begin_row`/`put_field`/`end_row` for each record; the sink accumulates
@@ -7,9 +7,9 @@ values into typed Arrow columns.
 See [Decoder API](../architecture/decoder.md) for how the
 engine implements this trait internally.
 
-## Method reference (21 methods)
+## Method reference (21 methods) { #method-reference }
 
-### Required (4)
+### Required (4) { #required }
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
@@ -18,7 +18,7 @@ engine implements this trait internally.
 | `end_row` | `fn end_row(&mut self)` | End the row. Null-fills missing columns, evaluates filter. |
 | `finish` | `fn finish(&mut self) -> Result<RecordBatch>` | Finalize into Arrow. Called once after all rows. |
 
-### Field resolution (4)
+### Field resolution (4) { #field-resolution }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
@@ -27,7 +27,7 @@ engine implements this trait internally.
 | `put_field_resolved` | delegates to `put_field` | Push with pre-resolved name (skips rename lookup). |
 | `resolve_and_put` | resolve then put_field_resolved | Combined resolve + push (single hash probe). |
 
-### Tier control (3)
+### Tier control (3) { #tier-control }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
@@ -35,7 +35,7 @@ engine implements this trait internally.
 | `needs_resolve` | `true` | `false` = traverse-only mode (skip resolve). |
 | `row_rejected` | `false` | `true` = filter rejected this row; scanner byte-jumps to row close. |
 
-### Projection (3)
+### Projection (3) { #projection }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
@@ -43,7 +43,7 @@ engine implements this trait internally.
 | `wanted_mask` | `0` | Bitmask of wanted columns. `(mask >> slot) & 1` replaces per-field `wants()`. |
 | `reset_child_ordinal` | no-op | Reset ordinal counter after row-tag attributes. |
 
-### Layout prediction (4)
+### Layout prediction (4) { #layout-prediction }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
@@ -52,17 +52,17 @@ engine implements this trait internally.
 | `record_slot` | no-op | Cache slot resolution for subsequent rows. |
 | `layout_broken` | no-op | Invalidate cached layout on mismatch. |
 
-### Batch (1)
+### Batch (1) { #batch }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
 | `put_row` | iterates `put_field` | Push a complete row in one call. |
 
-## Fast paths in order
+## Fast paths in order { #fast-paths-in-order }
 
 The engine provides four push methods, from fastest to slowest:
 
-### 1. `put_field_at(slot, value)`: fastest
+### 1. `put_field_at(slot, value)`: fastest { #1-put_field_at-fastest }
 
 Direct slot push. No name resolution, no hash lookup. Used by the
 `expect_slot` path after the layout is learned.
@@ -74,7 +74,7 @@ expect_slot(ordinal) → Some((slot, expected))
 
 **Cost:** ~5 ns per field (column write + dirty bit set).
 
-### 2. `put_field_resolved(name, value)`: fast
+### 2. `put_field_resolved(name, value)`: fast { #2-put_field_resolved-fast }
 
 Skips the rename lookup. Used when you've already called `resolve()`.
 
@@ -85,7 +85,7 @@ resolve(name) → Some(resolved)
 
 **Cost:** ~10 ns per field (single HashMap lookup + column write).
 
-### 3. `resolve_and_put(name, value)`: medium
+### 3. `resolve_and_put(name, value)`: medium { #3-resolve_and_put-medium }
 
 Single resolve + push. Default implementation.
 
@@ -96,14 +96,14 @@ resolve(name) → Some(resolved)
 
 **Cost:** ~15 ns per field (HashMap lookup + column write).
 
-### 4. `put_field(name, value)`: slowest
+### 4. `put_field(name, value)`: slowest { #4-put_field-slowest }
 
 Full resolve + push. The engine calls `resolve_field(name)` which checks
 rename map, then drop set, then returns the output name.
 
 **Cost:** ~20 ns per field (two HashMap lookups + column write).
 
-## The projection fast path
+## The projection fast path { #the-projection-fast-path }
 
 When a projection selects 3 of 11 columns and all 3 arrive by field 4, the
 scanner can byte-jump to the row close tag, skipping fields 5-11.
@@ -144,7 +144,7 @@ fn wanted_mask(&self) -> u64 {
 The adapter checks `(mask >> slot) & 1 == 1` instead of calling `wants()`
 per field.
 
-## The layout prediction fast path
+## The layout prediction fast path { #the-layout-prediction-fast-path }
 
 After the first row, the engine knows which slot each ordinal maps to.
 `expect_slot(ordinal)` returns `(slot, raw_name_bytes)`. The adapter compares
@@ -168,7 +168,7 @@ skip the expensive resolution.
 **When it doesn't help:** Formats where field order changes between rows, or
 where field names contain entities that need decoding before comparison.
 
-## The predicate-first fast path
+## The predicate-first fast path { #the-predicate-first-fast-path }
 
 When a filter is active, the engine buffers fields until the predicate resolves.
 If the predicate passes mid-row, the engine switches to direct mode and drains
@@ -197,7 +197,7 @@ if sink.row_rejected() {
 **Adaptive strategy:** If the predicate column appears late (> 4/5 of columns),
 buffering is a net loss. The engine switches to direct push + pop-on-reject.
 
-## Example: minimal sink
+## Example: minimal sink { #example-minimal-sink }
 
 ```rust
 struct CountingSink {
@@ -215,7 +215,7 @@ impl ColumnarSink for CountingSink {
 }
 ```
 
-## Example: profiling sink (locate-only)
+## Example: profiling sink (locate-only) { #example-profiling-sink }
 
 ```rust
 struct LocateOnlySink {
@@ -243,8 +243,24 @@ impl ColumnarSink for LocateOnlySink {
 }
 ```
 
-## Thread safety
+## Thread safety { #thread-safety }
 
 `ColumnarSink` is `Send` but not `Sync`. Each chunk gets its own sink
 instance via `begin_row`/`end_row` lifecycle. The engine creates one
 `TableBuilder` per chunk and merges them after all chunks complete.
+
+/// note
+
+The `begin_row`/`end_row` lifecycle means you can safely use non-atomic
+mutable state in your sink (e.g., counters, buffers). The engine never
+shares a sink instance across threads — it clones or creates per-chunk.
+
+///
+
+/// warning
+
+If you implement a custom `ColumnarSink` and share it across threads via
+`&dyn ColumnarSink`, you will hit data races. Always let the engine manage
+sink instances — one per chunk, never shared.
+
+///

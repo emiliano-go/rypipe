@@ -1,10 +1,10 @@
-# Advanced rypipe
+# Advanced rypipe { #advanced-rypipe }
 
 This section is for adapter authors and power users who want to understand why rypipe is fast and how to keep it fast. It assumes you have read the Python API, Rust API, and Architecture pages.
 
 Each page takes one optimization topic and explains the mechanism, the tuning knobs, and the trade-offs.
 
-## Roadmap
+## Roadmap { #roadmap }
 
 | Page | What you will learn |
 |------|---------------------|
@@ -20,7 +20,7 @@ Each page takes one optimization topic and explains the mechanism, the tuning kn
 | [Anti-patterns](./anti-patterns.md) | Common mistakes that silently remove fusion, increase memory, or waste CPU. |
 | [Case study: crxml](./case-study-crxml.md) | How crxml reaches ~4.2 GB/s by combining the techniques from the other pages. |
 
-## Quick checklist
+## Quick checklist { #quick-checklist }
 
 - [ ] Provide `schema_order` and `field_types` when the schema is known.
 - [ ] Use `dictionary_columns` for low-cardinality strings; be careful with `auto_dict` in parallel mode.

@@ -1,10 +1,10 @@
-# Storage and export
+# Storage and export { #storage-and-export }
 
 This page covers Arrow type mapping, null handling, the string arena,
 numeric/temporal parsing, dictionary encoding, unification, and the finish
 path. See [Columnar storage](./columnar.md) for the storage types themselves.
 
-## Arrow types produced
+## Arrow types produced { #arrow-types-produced }
 
 | ColumnBuilder variant | Arrow DataType | Array type |
 |----------------------|---------------|------------|
@@ -19,34 +19,34 @@ path. See [Columnar storage](./columnar.md) for the storage types themselves.
 `arrow_datatype()` maps each variant to its Arrow type. `to_arrow_array()`
 builds the native array via zero-copy `std::mem::take` on internal buffers.
 
-## Null handling
+## Null handling { #null-handling }
 
-### StrColumn
+### StrColumn { #strcolumn }
 
 `ValidityBitmap` stores one bit per row. `to_arrow` builds `NullBuffer`
 only if some validity is false; otherwise `None` (all valid). Offsets
 advance by 0 for null entries so `offsets[i] == offsets[i+1]`. The null
 string occupies zero bytes in the data arena.
 
-### PrimColumn<T>
+### PrimColumn<T> { #primcolumnt }
 
 `ValidityBitmap` + `Vec<T>`. `to_arrow()` preserves nulls via `NullBuffer`.
 The boolean specialization `to_arrow_bool()` packs `Vec<bool>` into
 `BooleanBuffer` via `ScalarBuffer<u8>`.
 
-### Missing columns
+### Missing columns { #missing-columns }
 
 In `engines_to_record_batches`, columns present in some chunks but missing
 in others become `null_array(&types[name], e.row_count)`: a `NullArray`
 of the unified type. This is a block fill, not per-cell.
 
-### Value::Null and unparseable strings
+### Value::Null and unparseable strings { #valuenull-and-unparseable-strings }
 
 Both become `None` in the column builder. `push_str` returns `None` for
 unparseable strings (e.g., "abc" into Int64 column). `Value::Null` is
 explicitly null.
 
-## String arena
+## String arena { #string-arena }
 
 `StrColumn` stores strings in a contiguous byte arena with offset indexing:
 
@@ -55,30 +55,30 @@ data:    [h][e][l][l][o][w][o][r][l][d]     ← two strings
 offsets: [0,     5,          10]             ← byte boundaries
 ```
 
-### push
+### push { #push }
 
 `push(Some("hello"))` appends 5 bytes to `data`, pushes `data.len()` (=5)
 to `offsets`, pushes `true` to validity. `push(None)` pushes 0 to offsets
 and `false` to validity. No per-cell allocation beyond arena growth.
 
-### pop
+### pop { #pop }
 
 Pops validity, pops offsets, truncates `data` to `offsets.last()`. Used
 for last-write-wins (duplicate field in same row) and row rejection.
 
-### append
+### append { #append }
 
 Merges another column by base-shifting offsets: `base = self.data.len()`.
 Then extends `self.offsets` with `other.offsets[1..].map(|o| o + base)`.
 O(n) in offsets, not in bytes.
 
-### Capacity
+### Capacity { #capacity }
 
 `with_capacity(cap)` reserves `cap+1` offsets and `cap*16` data bytes.
 `Pipeline` passes `cap = (bytes.len() / est).max(64)` where
 `est = estimate_bytes_per_row(sample).max(512)`.
 
-## Numeric and temporal parsing
+## Numeric and temporal parsing { #numeric-and-temporal-parsing }
 
 When a `Value::Str` is pushed to a typed column, the string is parsed:
 
@@ -93,7 +93,7 @@ Unparseable strings become `None`. Cross-type `Value::Int64` into `Float64`
 widens; into `String` stringifies; into `Dictionary` encodes. Other
 cross-type cases become `None`.
 
-## Dictionary
+## Dictionary { #dictionary }
 
 ```rust
 Dictionary {
@@ -113,7 +113,7 @@ Dictionary {
   missing, append to left's data. Then translate right's codes.
 - **`try_upgrade_to_dict`**: see [Columnar](./columnar.md).
 
-## Unification and promotion
+## Unification and promotion { #unification-and-promotion }
 
 When merging chunks with different storage types:
 
@@ -126,7 +126,7 @@ maps each element to `f64`, produces a new `PrimColumn<f64>`.
 
 Used in `merge::extend` and `engines_to_record_batches`.
 
-## Finish path
+## Finish path { #finish-path }
 
 `TableBuilder::finish()` does:
 
@@ -146,7 +146,7 @@ No borrowed bytes outlive `finish`. `StrColumn` owns its data and numeric
 Vecs are owned. The `to_arrow_array` methods use `std::mem::take` to move
 internal buffers into Arrow arrays (zero-copy export).
 
-## Compare filter reapplication
+## Compare filter reapplication { #compare-filter-reapplication }
 
 `apply_compare_filter` in `arrow_export.rs` re-applies pure `Compare` and
 `And` trees using Arrow compute kernels. Other trees (`Or`, `Not`, `Equal`,
@@ -159,7 +159,7 @@ after merging chunks). It is not the per-row filter. Per-row
 reapplies pure Compare/And via `compare_columns` (casts to Float64 or Utf8,
 then `gt`/`lt`/`eq`/`neq`/`and`) and `filter_record_batch`.
 
-## Memory layout
+## Memory layout { #memory-layout }
 
 For a 533 MB XML file with 480K rows and 10 columns:
 

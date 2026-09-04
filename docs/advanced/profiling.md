@@ -1,8 +1,8 @@
-# Profiling
+# Profiling { #profiling }
 
 Optimization without measurement is guessing. This page describes how to profile rypipe pipelines and interpret the results.
 
-## The `bench_throughput` example
+## The `bench_throughput` example { #the-bench_throughput-example }
 
 `crates/rypipe-core/examples/bench_throughput.rs` is a self-contained benchmark. It uses a tiny inline TSV-like adapter so the result measures the engine, not an external parser.
 
@@ -20,7 +20,7 @@ python benchmarks/bench_throughput.py --output .benchmarks/rypipe.json
 
 The output reports rows, time, rows per second, MB/s, and RSS. Use these to compare configurations.
 
-## Release builds
+## Release builds { #release-builds }
 
 Always profile a release build. Debug builds are 10-50x slower and the profile will be dominated by unrelated overhead.
 
@@ -34,7 +34,7 @@ For symbols without full debug overhead, use the `profiling` profile if it exist
 cargo build --profile profiling -p rypipe-core
 ```
 
-## Profiling with `perf`
+## Profiling with `perf` { #profiling-with-perf }
 
 On Linux:
 
@@ -51,7 +51,7 @@ Look for time spent in:
 - Arrow export or compute kernels: export is expensive.
 - Python GIL-related functions: Python boundary is the bottleneck.
 
-## Flamegraphs
+## Flamegraphs { #flamegraphs }
 
 `cargo flamegraph` produces an SVG flamegraph:
 
@@ -62,7 +62,7 @@ cargo flamegraph --release -p rypipe-core --example bench_throughput
 
 Open `flamegraph.svg` in a browser. Wide bars are hot functions. Look for unexpected wide bars such as JSON serialization, Python dict construction, or allocations.
 
-## Measuring RSS
+## Measuring RSS { #measuring-rss }
 
 Use `/usr/bin/time -v` on Linux:
 
@@ -85,7 +85,7 @@ while running:
 print(f"peak RSS: {peak / 1024 / 1024:.1f} MiB")
 ```
 
-## Separating Python and Rust time
+## Separating Python and Rust time { #separating-python-and-rust-time }
 
 If the pipeline includes Python stages, wrap the Rust parse in `py.allow_threads` (PyO3) so the GIL is released. Profile the Python side separately with `cProfile`:
 
@@ -96,7 +96,7 @@ python -c "import pstats; pstats.Stats('profile.stats').sort_stats('cumtime').pr
 
 If most time is in `_rypipe` native code, optimize Rust. If most time is in Python callables, move work into fused stages or Rust.
 
-## What to vary
+## What to vary { #what-to-vary }
 
 When benchmarking, change one variable at a time:
 
@@ -108,7 +108,7 @@ When benchmarking, change one variable at a time:
 
 Plot throughput vs RSS to find the Pareto frontier.
 
-## Summary
+## Summary { #summary }
 
 - Use `bench_throughput` as a baseline.
 - Profile release builds with `perf` or `cargo flamegraph`.

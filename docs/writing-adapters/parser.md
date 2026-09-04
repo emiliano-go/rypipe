@@ -1,4 +1,4 @@
-# The RecordParser Trait
+# The RecordParser Trait { #the-recordparser-trait }
 
 The `RecordParser` trait turns a byte chunk into field/value events fed to a
 `ColumnarSink`. This is where format-specific parsing lives.
@@ -6,7 +6,7 @@ The `RecordParser` trait turns a byte chunk into field/value events fed to a
 See [Architecture](../architecture/index.md) for how the engine calls
 the parser and how the sink accumulates values.
 
-## Trait definition
+## Trait definition { #trait-definition }
 
 ```rust
 pub trait RecordParser: Send + Sync {
@@ -23,7 +23,7 @@ pub trait RecordParser: Send + Sync {
 }
 ```
 
-## `validate`
+## `validate` { #validate }
 
 Called once per chunk before parsing. Use it for upfront checks like UTF-8
 validation. This is cheap (SIMD-accelerated) and catches malformed input early.
@@ -35,7 +35,7 @@ fn validate(&self, bytes: &[u8]) -> Result<()> {
 }
 ```
 
-## `parse_chunk`
+## `parse_chunk` { #parse_chunk }
 
 The main parsing loop. For each record in the chunk:
 
@@ -62,7 +62,7 @@ fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
 }
 ```
 
-## `parse_chunk_generic`
+## `parse_chunk_generic` { #parse_chunk_generic }
 
 The generic version allows the compiler to devirtualize `sink` calls (no vtable
 dispatch). When the engine knows the concrete sink type (e.g., `TableBuilder`),
@@ -79,9 +79,9 @@ Override this method for a measurable speedup on hot paths. The compiler can
 then inline `sink.begin_row()`, `sink.put_field()`, and `sink.end_row()` into
 the parsing loop, eliminating vtable dispatch overhead.
 
-## Performance tips
+## Performance tips { #performance-tips }
 
-### 1. Use `Cow::Borrowed` for non-entity text
+### 1. Use `Cow::Borrowed` for non-entity text { #1-use-cowborrowed-for-non-entity-text }
 
 Borrow from the input buffer when possible:
 
@@ -93,7 +93,15 @@ The buffered filter path may hold values past the end of your parse function,
 so a borrow of a temporary would dangle. `Cow::Borrowed` is safe because it
 borrows from the chunk's byte slice, which lives long enough.
 
-### 2. Check `wants()` before expensive extraction
+/// note
+
+The chunk's byte slice outlives `parse_chunk` — the engine holds the buffer
+while it merges results. Your `Cow::Borrowed` references are valid through
+the entire merge pass, not just during parsing.
+
+///
+
+### 2. Check `wants()` before expensive extraction { #2-check-wants-before-expensive-extraction }
 
 Skip dropped fields entirely:
 
@@ -107,7 +115,7 @@ if sink.wants(col) {
 When `wants()` returns `false`, the engine will drop the column. Checking
 before extraction saves the cost of parsing, decoding, and allocating.
 
-### 3. Use `resolve` + `put_field_resolved` for expensive extraction
+### 3. Use `resolve` + `put_field_resolved` for expensive extraction { #3-use-resolve-put_field_resolved-for-expensive-extraction }
 
 When extraction is costly (entity unescaping, base64 decode, date parsing),
 resolve once and push with the resolved name to avoid a second hash probe:
@@ -123,7 +131,7 @@ This pays the `rename→drop` hash lookup once instead of twice (once in
 `resolve_and_put`'s internal `resolve`, once in `put_field`'s internal
 `ensure_column_idx`).
 
-### 4. Emit typed `Value` variants when possible
+### 4. Emit typed `Value` variants when possible { #4-emit-typed-value-variants-when-possible }
 
 ```rust
 // Instead of:
@@ -136,12 +144,20 @@ sink.put_field("amount", Value::Float64(123.45));
 Typed variants skip the string-to-number conversion in the engine. The engine
 still stores the value correctly and exports it as the right Arrow type.
 
-### 5. Do not call `end_row()` for partial trailing rows
+### 5. Do not call `end_row()` for partial trailing rows { #5-do-not-call-end_row-for-partial-trailing-rows }
 
 If your parser reaches the end of the chunk mid-record, just return. The engine
 discards partial trailing rows automatically during `normalize()`.
 
-### 6. Consider `parse_chunk_generic` for hot paths
+/// warning
+
+If your parser calls `end_row()` on a partial trailing row, the engine will
+keep it — null-filling the missing fields. This produces wrong results
+silently. Always let the engine handle incomplete records at chunk boundaries.
+
+///
+
+### 6. Consider `parse_chunk_generic` for hot paths { #6-consider-parse_chunk_generic-for-hot-paths }
 
 If your parser is called millions of times (e.g., small files, streaming),
 override `parse_chunk_generic` to get devirtualized sink calls:
@@ -164,7 +180,7 @@ fn parse_chunk_generic<S: ColumnarSink>(&self, bytes: &[u8], sink: &mut S) -> Re
 }
 ```
 
-## The parsing lifecycle
+## The parsing lifecycle { #the-parsing-lifecycle }
 
 ```
 validate(bytes)                    ← called once per chunk
@@ -187,7 +203,7 @@ sink.finish()                      ← called once after all chunks
 Arrow RecordBatch                  ← zero-copy export
 ```
 
-## Error handling
+## Error handling { #error-handling }
 
 Return `Err` from `parse_chunk` to abort parsing. The engine will propagate
 the error to the caller. Common error types:

@@ -1,12 +1,12 @@
-# rypipe examples
+# rypipe examples { #rypipe-examples }
 
 This page shows common patterns in Python and Rust. All Python examples assume a registered adapter is installed (for example `pip install crxml` for XML). `rypipe` itself does not ship format parsers.
 
 Legend: `(ADAPTER BOUND)` is code you write in your adapter crate (format specific). `(CORE)` is code in `rypipe` crates (reused). The split is the same as in [Architecture](./architecture/).
 
-## Python API examples
+## Python API examples { #python-api-examples }
 
-### Read a file through a registered adapter
+### Read a file through a registered adapter { #read-a-file-through-a-registered-adapter }
 
 ```python
 import rypipe
@@ -15,7 +15,7 @@ table = rypipe.read("data.xml", format="crxml", row_tag="Row")
 print(table.num_rows, table.num_columns)
 ```
 
-### Chain a pipeline
+### Chain a pipeline { #chain-a-pipeline }
 
 ```python
 from crxml import CrystalXMLSource
@@ -30,7 +30,7 @@ df = (
 ).to_dataframe()
 ```
 
-### Build an adapter subclass
+### Build an adapter subclass { #build-an-adapter-subclass }
 
 ```python
 import rypipe
@@ -44,41 +44,41 @@ class DummyAdapter(rypipe.Adapter):
             "name": ["alice", "bob", "carol"],
         })
 
-# Register once per session
+# Register once per session { #register-once-per-session }
 rypipe.register_adapter("dummy", DummyAdapter, extensions=[".dummy"])
 
 table = rypipe.read("example.dummy")
 ```
 
-### Work with a Source object directly
+### Work with a Source object directly { #work-with-a-source-object-directly }
 
 ```python
 from crxml import CrystalXMLSource
 
 source = CrystalXMLSource("report.xml", row_tag="Row")
 
-# Iterate rows without loading the whole table
+# Iterate rows without loading the whole table { #iterate-rows-without-loading-the-whole-table }
 for row in source:
     print(row["id"])
 
-# Or export to Arrow and reuse it
+# Or export to Arrow and reuse it { #or-export-to-arrow-and-reuse-it }
 arrow = source.to_arrow()
 df = source.to_dataframe()
 source.to_parquet("report.parquet")
 ```
 
-### Memory-bounded stream
+### Memory-bounded stream { #memory-bounded-stream }
 
 ```python
 import rypipe
 
-# Adapter decides how to honor the memory budget.
+# Adapter decides how to honor the memory budget. { #adapter-decides-how-to-honor-the-memory-budget }
 stream = rypipe.read_stream("huge.xml", format="crxml", memory="256MiB")
 for batch in stream.to_batches(max_chunksize=4096):
     process(batch.to_pylist())
 ```
 
-### Parallel parse
+### Parallel parse { #parallel-parse }
 
 ```python
 import rypipe
@@ -86,7 +86,7 @@ import rypipe
 table = rypipe.read_par("large.xml", format="crxml", chunks=16)
 ```
 
-### Sink to Parquet
+### Sink to Parquet { #sink-to-parquet }
 
 ```python
 from crxml import CrystalXMLSource
@@ -99,11 +99,11 @@ pipeline = (
 to_parquet(pipeline, "active.parquet")
 ```
 
-## Rust API examples
+## Rust API examples { #rust-api-examples }
 
 All Rust examples use the `rypipe-core` crate. `(ADAPTER BOUND)` parts are the `Splitter` and `RecordParser` you implement; `(CORE)` parts are the engine.
 
-### Define a custom Splitter and RecordParser  (ADAPTER BOUND)
+### Define a custom Splitter and RecordParser  (ADAPTER BOUND) { #define-a-custom-splitter-and-recordparser }
 
 ```rust
 use rypipe_core::{Splitter, RecordParser, ColumnarSink, Value, Result};
@@ -148,7 +148,7 @@ impl RecordParser for LogParser { // (ADAPTER BOUND)
 }
 ```
 
-### Run single-threaded, parallel, and bounded  (CORE) drivers
+### Run single-threaded, parallel, and bounded  (CORE) drivers { #run-single-threaded-parallel-and-bounded-drivers }
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline, MemoryBudget}; // (CORE)
@@ -170,7 +170,7 @@ let batches = pipeline.read_path_stream(Path::new("huge.log"), MemoryBudget::new
 let batches = pipeline.read_bytes_stream(data_bytes, MemoryBudget::new(64 * 1024 * 1024))?; // (CORE) no file IO, slicing
 ```
 
-### Low level direct TableBuilder  (CORE)
+### Low level direct TableBuilder  (CORE) { #low-level-direct-tablebuilder }
 
 ```rust
 use std::sync::Arc;
@@ -185,7 +185,7 @@ LogParser.parse_chunk(input.as_slice(), &mut builder)?; // (ADAPTER BOUND) -> (C
 let batch = builder.finish()?; // (CORE) normalize, auto_dict, sort, to_arrow
 ```
 
-### Export a RecordBatch to PyArrow  (CORE) helper plus (ADAPTER BOUND) registration
+### Export a RecordBatch to PyArrow  (CORE) helper plus (ADAPTER BOUND) registration { #export-a-recordbatch-to-pyarrow-helper-plus-registration }
 
 ```rust
 use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table}; // (CORE) helper
@@ -202,7 +202,7 @@ fn read_log(py: Python, path: &str, field_mapping: Option<std::collections::Hash
 }
 ```
 
-## Adapter package layout
+## Adapter package layout { #adapter-package-layout }
 
 A minimal adapter package looks like this:
 

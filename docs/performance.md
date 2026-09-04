@@ -1,4 +1,4 @@
-# Performance
+# Performance { #performance }
 
 `rypipe` is designed to keep parsing fast: arena string storage, SIMD UTF-8
 validation, zero-copy event parsing, GIL-free Rust work, parallel chunking, and
@@ -6,7 +6,7 @@ a bounded-memory streaming path. This page is a summary reference; see the
 [Architecture](./architecture/) and [Advanced](./advanced/) sections for
 detailed explanations.
 
-## Measured throughput
+## Measured throughput { #measured-throughput }
 
 The numbers below come from the built-in `bench_throughput` example. It uses a
 tiny inline TSV-like adapter so the result measures the engine, not an external
@@ -33,7 +33,7 @@ higher CPU utilization and scales better with heavier parsers. The bounded
 streaming path keeps intermediate batches near the 64 MiB budget but has higher
 peak RSS because of the Arrow export buffer.
 
-## Quick tuning reference
+## Quick tuning reference { #quick-tuning-reference }
 
 | Knob | Recommended | See also |
 |------|-------------|----------|
@@ -44,7 +44,7 @@ peak RSS because of the Arrow export buffer.
 | `field_types` | Declare known numeric columns | [Schema and types](./advanced/schema-and-types.md) |
 | `schema_order` | Provide when column order matters | [Schema and types](./advanced/schema-and-types.md) |
 
-## Fast path vs merge path
+## Fast path vs merge path { #fast-path-vs-merge-path }
 
 `ParallelExecutor` has two internal paths:
 
@@ -61,7 +61,7 @@ already handles it (Compare is applied post-export). For `auto_dict` with
 Compare, the incremental dict path preserves the fast path when schemas
 are consistent.
 
-## Example: `crxml` adapter
+## Example: `crxml` adapter { #example-crxml-adapter }
 
 `crxml` (Crystal Reports XML, at `docs/crxml-adapter.md`) is the reference
 for what a good adapter looks like: hand-rolled `memchr` scanner, shared
@@ -70,13 +70,13 @@ parallel fast path. On a Ryzen 5800X: **~950 MB/s single, ~4.2 GB/s
 parallel** (par128), with streaming at **723 MB/s** (single-thread, 1 MB
 budget).
 
-## Future work
+## Future work { #future-work }
 
 - A generic streaming `RecordParser` could support chunked async input.
 - Dictionary encoding could be made incremental across chunks to recover the
   fast path for `auto_dict=True`.
 
-## See also
+## See also { #see-also }
 
 - [Architecture](./architecture/): engine design and fast/merge paths.
 - [Execution modes](./advanced/execution-modes.md): when to use each mode.

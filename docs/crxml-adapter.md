@@ -1,14 +1,14 @@
-# Real-world adapter: crxml
+# Real-world adapter: crxml { #real-world-adapter-crxml }
 
 `crxml` is a high-throughput adapter for Crystal Reports XML exports. It is a good example of what a production `rypipe` adapter looks like: a small Rust crate that implements `rypipe-core`'s `Splitter` and `RecordParser` traits, plus a thin Python layer that registers the adapter with `rypipe`.
 
-## What it does
+## What it does { #what-it-does }
 
 Crystal Reports exports tabular data inside XML elements like `<Field Name="X"><Value>123</Value></Field>` and `<Text Name="Y"><TextValue>abc</TextValue></Text>`. `crxml` reads these exports and turns them into Arrow tables or DataFrames.
 
 On the same workstation used for the rypipe engine benchmarks (AMD Ryzen 5800X, 8C/16T), `crxml` parses Crystal Reports XML at **~4.2 GB/s parallel** (533 MB, par128) and **~950 MB/s single** (533 MB columnar). Streaming (single-threaded, bounded) is **723 MB/s** at 1 MB budget. Parallel streaming with explicit `schema=[...]` reaches **4980 MB/s** (533 MB, +11% vs par128) while staying bounded at 88 MB RSS. The 1 GB `drop_all` pushdown reaches **4183 MB/s** parallel (CPU-bound, not I/O). The `rypipe-core` engine (`Vec<ColumnBuilder>`+`field_index` `engine/table_builder.rs:44`, `row_dirty` `engine/table_builder.rs:54`) keeps up without being the bottleneck. See `crxml` `docs/performance.md` for full benchmarks.
 
-## How it fits into rypipe
+## How it fits into rypipe { #how-it-fits-into-rypipe }
 
 Legend: `(ADAPTER BOUND)` lives in the adapter crate (`crxml`); `(CORE)` lives in `rypipe`.
 
@@ -30,9 +30,9 @@ pyarrow.Table / pandas.DataFrame  [PYTHON CORE] via rypipe-python C Data Interfa
 
 The Rust side lives in `crxml-core`. The Python side is a small `CrystalXMLAdapter` that calls the Rust core and registers itself with `rypipe`.
 
-## Rust implementation
+## Rust implementation { #rust-implementation }
 
-### Splitter
+### Splitter { #splitter }
 
 `crxml` implements `rypipe_core::Splitter` in `src/xml/splitter.rs` (also shared with the scanner via `find_special_regions` `splitter.rs:61` and `next_row_start` `splitter.rs:107`). Its job is to find safe chunk boundaries for parallel parsing.
 
@@ -67,7 +67,7 @@ impl Splitter for CrystalXmlSplitter {
 
 The default `find_split_points` implementation uses `next_record_start` to find split points.
 
-### Record parser
+### Record parser { #record-parser }
 
 `CrystalXmlDecoder` implements `rypipe_core::RecordParser` in `src/xml/decoder.rs`. Since `crxml 1.2` it uses a hand-rolled `memchr`/`memmem` scanner `src/xml/scanner.rs` (not `quick_xml`): the same scanner backs both the columnar and the super-optimized streaming path (`lib.rs:534` `RowParser`+`RowSink`+`scan_one_row` `scanner.rs:81`).
 
@@ -108,7 +108,7 @@ crate::xml::scanner::scan_one_row(bytes, self.pos, &row_tag, &regions, &mut sink
 
 The scanner is `wants`-driven and region-aware, so chunked and streaming stay correct without a serial pre-pass.
 
-## Python adapter registration
+## Python adapter registration { #python-adapter-registration }
 
 `crxml` exposes a `CrystalXMLAdapter` that wraps `CrystalXMLSource` and registers it with `rypipe`:
 
@@ -133,7 +133,7 @@ table = rypipe.read("report.xml", format="crxml", row_tag="Row")
 
 The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from `CrystalXMLSource` are passed through, so users get the full engine feature set through the generic `rypipe` API.
 
-## Why it is fast
+## Why it is fast { #why-it-is-fast }
 
 | technique | benefit |
 |-----------|---------|
@@ -144,7 +144,7 @@ The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from
 | `InputBuffer` `mmap` `lib.rs:25` `auto_mmap` >50 MB + `cap` via `estimate_bytes_per_row` `splitter.rs:41` | Avoids `fs::read` `rep_movs` 3% + over-reserve `Vec` 2× |
 | Parallel fast path `parallel.rs:82` + streaming `RowSink` `lib.rs:564` | `auto_dict`/`Compare` off → per-chunk `RecordBatch` export in parallel; streaming reuses same scanner row-by-row via `scan_one_row` `scanner.rs:81` without `TableBuilder` |
 
-## Lessons for adapter authors (from `crxml` super-optimization)
+## Lessons for adapter authors (from `crxml` super-optimization) { #lessons-for-adapter-authors }
 
 1. **Specialize the parser**: generic line splitting is fine, but real throughput comes from a format-aware `memchr` scanner (crxml achieves 723 MB/s streaming, ~950 MB/s columnar single, ~4.2 GB/s parallel).
 2. **Find split points cheaply**: one `memmem` `splitter.rs:27` + `find_special_regions` `splitter.rs:61` with `is_empty` fast path beats byte-by-byte; `estimate_bytes_per_row` `splitter.rs:41` sizes `TableBuilder` `lib.rs:275`.
@@ -155,7 +155,7 @@ The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from
 7. **Measure first**: `perf` `scan_open_tag` 8.3% + `field_element` 8.6% + `push_field_resolved` 2.76% vs `rep_movs` 3% tells you `mmap` is 3% but scanner is 35%: focus there. `benchmarks/bench_extended.py` (104 benchmarks/file) covers all engines×sinks×pushdowns×chunk/bounded/batch/pipeline.
 8. **Register with `rypipe`**: thin `CrystalXMLAdapter` keeps `rypipe.read(format="crxml")` while Rust stays fast.
 
-## Source
+## Source { #source }
 
 The full implementation is in the [crxml repository](https://github.com/emiliano-go/crxml), especially:
 

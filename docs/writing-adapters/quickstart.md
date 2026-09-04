@@ -171,7 +171,7 @@ stages.
 ```python
 import importlib
 
-# Side-effect import: registers the adapter with rypipe on import
+# Side-effect import: registers the adapter with rypipe on import { #side-effect-import-registers-the-adapter-with-rypipe-on-import }
 from . import rypipe_adapter  # noqa: F401
 
 __all__ = [
@@ -251,6 +251,15 @@ def _register() -> None:
 _register()
 ```
 
+/// tip
+
+Pass `schema=["id", "name", "active"]` and `field_types={"active": "bool"}`
+when constructing `LogSource` to skip column discovery and emit typed Arrow
+arrays directly. This alone can boost throughput by +80% on projection
+workloads.
+
+///
+
 For the full stage implementations (`CastTypes`, `FilterRows`, etc.), see
 [Python Wiring](./python-wiring.md).
 
@@ -269,21 +278,21 @@ maturin develop --release
 import rypipe
 import rypipe_log  # registers the adapter
 
-# Create a test file
+# Create a test file { #create-a-test-file }
 with open("test.log", "w") as f:
     f.write("name=Alice,age=30,active=true\n")
     f.write("name=Bob,age=25,active=false\n")
 
-# Pattern 1: one-liner via rypipe (extension auto-detected)
+# Pattern 1: one-liner via rypipe (extension auto-detected) { #pattern-1-one-liner-via-rypipe }
 table = rypipe.read("test.log")
 print(table)
-# pyarrow.Table<name: string, age: string, active: string>
+# pyarrow.Table<name: string, age: string, active: string> { #pyarrowtablename-string-age-string-active-string }
 # ----
-# name: ["Alice", "Bob"]
-# age: ["30", "25"]
-# active: ["true", "false"]
+# name: ["Alice", "Bob"] { #name-alice-bob }
+# age: ["30", "25"] { #age-30-25 }
+# active: ["true", "false"] { #active-true-false }
 
-# Pattern 2: pipeline via LogSource + repacked stages
+# Pattern 2: pipeline via LogSource + repacked stages { #pattern-2-pipeline-via-logsource-repacked-stages }
 from rypipe_log import LogSource, CastTypes, FilterRows
 
 src = LogSource("test.log")
@@ -293,11 +302,11 @@ result = (
     | FilterRows(field="active", op="==", value="true")
 ).to_arrow()
 print(result)
-# pyarrow.Table<name: string, age: int64, active: string>
+# pyarrow.Table<name: string, age: int64, active: string> { #pyarrowtablename-string-age-int64-active-string }
 # ----
-# name: ["Alice"]
-# age: [30]
-# active: ["true"]
+# name: ["Alice"] { #name-alice }
+# age: [30] { #age-30 }
+# active: ["true"] { #active-true }
 ```
 
 ## What just happened { #what-just-happened }
@@ -317,6 +326,14 @@ print(result)
 * [Schema](./schema.md) — declare columns for maximum performance
 * [Techniques](./techniques.md) — performance optimizations
 * [Examples](./examples.md) — worked CSV, JSONL, and TSV adapters
+
+/// warning
+
+The `LogSource._read_arrow` method **must** forward `plan_overrides` to the
+Rust reader. If you ignore them, fused pipeline stages silently fall back
+to Python execution — 10–50× slower than the Rust path.
+
+///
 
 ## Recap { #recap }
 

@@ -1,8 +1,8 @@
-# Why Python, not pure Rust?
+# Why Python, not pure Rust? { #why-python-not-pure-rust }
 
 `rypipe` is *Rust where it counts, Python where it ships*. The core is pure Rust for speed and memory safety; the surface is Python for reach and productivity. This page explains why that split is intentional, not a compromise.
 
-## TL;DR
+## TL;DR { #tldr }
 
 * **Data work lives in Python.** Notebooks, ETL glue, and the modern lakehouse are Python-first.
 * **Rust wins the hot path, Python wins composition.** Parsing 100 M fields at ~950 MB/s needs Rust; chaining `RenameFields | FilterRows | CastTypes -> .to_pandas()` needs Python.
@@ -13,7 +13,7 @@ If you need Rust-only, `rypipe-core` is still there (see [Rust API](./rust-api.m
 
 ---
 
-## 1. Data is Python-first, by every measure
+## 1. Data is Python-first, by every measure { #1-data-is-python-first-by-every-measure }
 
 | Signal | What it says |
 |--------|--------------|
@@ -25,7 +25,7 @@ If you need Rust-only, `rypipe-core` is still there (see [Rust API](./rust-api.m
 
 The takeaway is not that Rust is bad, it is excellent for the engine, but that the *consumer* of an ingestion engine is almost always a Python program.
 
-## 2. ETL is glue, and Python is the best glue
+## 2. ETL is glue, and Python is the best glue { #2-etl-is-glue-and-python-is-the-best-glue }
 
 Real ETL is rarely “parse one file as fast as possible.” It is:
 
@@ -43,7 +43,7 @@ S3 / API / FTP
 
 A pure-Rust `rypipe` would need users to learn `cargo`, `tokio`, lifetimes, and Arrow’s Rust API to do what today is one `pip install` and five lines.
 
-## 3. The ecosystem gravity is Arrow + Python
+## 3. The ecosystem gravity is Arrow + Python { #3-the-ecosystem-gravity-is-arrow-python }
 
 Arrow’s design assumes language boundaries are crossed at the `RecordBatch` level:
 
@@ -59,7 +59,7 @@ Rust parser (rypipe-core) ──► Data Interface ──► pyarrow.Table
 
 A pure-Rust engine would still need to export Arrow, and then every downstream step would re-wrap it in Python anyway. Putting the binding in the engine removes that friction once.
 
-## 4. Performance: Rust hot loop, Python orchestration
+## 4. Performance: Rust hot loop, Python orchestration { #4-performance-rust-hot-loop-python-orchestration }
 
 `rypipe`'s single-thread XML throughput on a 533 MB file is ~950 MB/s (95% in `parse`, 3% in `split`, 2% in `finish`). Parallel x16 (par128) is ~4,200 MB/s. The profile for a real Crystal Reports export shows:
 
@@ -71,7 +71,7 @@ Python time is **orchestration only**: `ExecutionPlan` construction, `Pipeline` 
 
 In other words: *you pay Rust for the hot loop, Python for the composition*. A pure-Rust pipeline would move the same composition code into Rust and save ~0.1 ms, while losing the ability to `df.plot()`, `df.to_sql()`, or `requests.get()` next line.
 
-## 5. What pure Rust would cost you
+## 5. What pure Rust would cost you { #5-what-pure-rust-would-cost-you }
 
 | Dimension | Hybrid (rypipe today) | Pure Rust alternative |
 |-----------|----------------------|----------------------|
@@ -83,7 +83,7 @@ In other words: *you pay Rust for the hot loop, Python for the composition*. A p
 | **Arrow interop** | `pyarrow`, `pandas`, `Polars` zero-copy out of the box | Must go through FFI or JSON/CSV round-trip to reach Python consumers anyway |
 | **Adapter distribution** | Separate pip packages (`rypipe-csv`, `rypipe-json`), `pip install` discovers them | Separate crates, `cargo add` per project, no central registry for data users |
 
-## 6. When Rust-only *does* make sense, and rypipe still supports it
+## 6. When Rust-only *does* make sense, and rypipe still supports it { #6-when-rust-only-does-make-sense-and-rypipe-still-supports-it }
 
 There are legitimate reasons to stay in Rust:
 
@@ -108,7 +108,7 @@ let batch = Pipeline::new(MySplitter, MyDecoder::new())
 
 `rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python, you can publish a Rust-only adapter and depend on `rypipe-core = "2.0"` alone.
 
-## 7. Design principle: data-driven development
+## 7. Design principle: data-driven development { #7-design-principle-data-driven-development }
 
 Modern data work is **data-driven development**: the shape of the output dictates the shape of the code, not the other way around.
 
@@ -121,7 +121,7 @@ Steps 1-2 demand a REPL. Step 4 demands Rust speed. rypipe gives both from the s
 
 > **Analogy:** `polars` didn’t win by being “pure Rust.” It won by putting a Rust engine behind `pl.DataFrame`, a Python/Rust hybrid that feels like pandas but runs at Rust speed. `rypipe` does the same for ingestion.
 
-## 8. FAQ
+## 8. FAQ { #8-faq }
 
 **“Why not just use `csv` + `pandas.read_csv` / `polars.read_csv`?”**
 For CSV alone you can. rypipe’s value is the *same* engine for XML, JSON, HTML, and other row-oriented formats where no fast Arrow-native reader exists, with parallel and memory-bounded execution, pushdown, and the same `source | ... | .to_polars()` surface.

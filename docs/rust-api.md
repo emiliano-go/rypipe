@@ -1,19 +1,19 @@
-# Rust API
+# Rust API { #rust-api }
 
 `rypipe-core` is a pure-Rust crate. This guide shows how to use it directly and
 how its pieces compose. Format-specific adapters (for XML, CSV, JSON, etc.) are
 separate crates that implement `Splitter` and `RecordParser`.
 
-## Dependencies
+## Dependencies { #dependencies }
 
 ```toml
 [dependencies]
 rypipe-core = { path = "../rypipe/crates/rypipe-core" }
-# adapter crate of your choice, e.g.:
-# my-csv-adapter = "0.1"
+# adapter crate of your choice, e.g.: { #adapter-crate-of-your-choice-eg }
+# my-csv-adapter = "0.1" { #my-csv-adapter-01 }
 ```
 
-## Recommended entry point: `Pipeline`
+## Recommended entry point: `Pipeline` { #recommended-entry-point-pipeline }
 
 `Pipeline` wires a `Splitter` and `RecordParser` together and removes the
 boilerplate of opening files and choosing an execution mode.
@@ -64,7 +64,7 @@ fn main() -> rypipe_core::Result<()> {
 }
 ```
 
-## A minimal example (low level)
+## A minimal example (low level) { #a-minimal-example }
 
 If you prefer to control every step, use `TableBuilder` directly:
 
@@ -90,7 +90,7 @@ fn main() -> rypipe_core::Result<()> {
 }
 ```
 
-## `ExecutionPlan`
+## `ExecutionPlan` { #executionplan }
 
 The builder API is the recommended way to construct a plan:
 
@@ -139,7 +139,7 @@ plan.schema_order = vec!["id".into(), "status".into(), "amount".into()];
 plan.auto_dict = true;
 ```
 
-## `Value`
+## `Value` { #value }
 
 Decoders emit `Value<'a>`:
 
@@ -155,7 +155,7 @@ sink.put_field("missing", Value::Null);
 For stringly formats everything is a string, but JSON or CSV adapters can emit
 native typed values and skip string parsing.
 
-## Parallel parse (low level)
+## Parallel parse (low level) { #parallel-parse }
 
 ```rust
 use rypipe_core::{parallel::ParallelExecutor, ExecutionPlan};
@@ -176,7 +176,7 @@ batch per chunk with a unified schema; the merge path returns a single merged
 batch when `auto_dict` is enabled or chunks disagree irreconcilably on column
 types.
 
-## Bounded parse (low level)
+## Bounded parse (low level) { #bounded-parse }
 
 ```rust
 use rypipe_core::{
@@ -200,7 +200,7 @@ let batches = BoundedExecutor::new(MemoryBudget::new(500_000_000))
     .run_bytes(&bytes, &splitter, decoder, ExecutionPlan::new())?;
 ```
 
-## Transparent compressed-file decoding
+## Transparent compressed-file decoding { #transparent-compressed-file-decoding }
 
 File inputs are auto-detected by magic bytes and transparently decompressed
 when the corresponding Cargo feature is enabled:
@@ -214,7 +214,7 @@ Supported magics: gzip `1f 8b`, zstd `28 b5 2f fd`, lz4 frame `04 22 4d 18`.
 Detection happens in `InputBuffer::open`; decompressed bytes are served from
 memory (`InputBuffer::Owned`) across all execution modes.
 
-## Apply a Compare filter to an existing batch
+## Apply a Compare filter to an existing batch { #apply-a-compare-filter-to-an-existing-batch }
 
 Pure column-comparison filters (``Compare`` and ``And`` of ``Compare``) are
 normally evaluated per-row during parsing but can also be applied to an
@@ -235,7 +235,7 @@ let predicate = FilterPredicate::Compare {
 let filtered = apply_compare_filter(batch, &predicate)?;
 ```
 
-## Export helpers
+## Export helpers { #export-helpers }
 
 `rypipe-python` provides Rust helper functions for adapter crates:
 
@@ -255,7 +255,7 @@ let batch_list = record_batches_to_pyarrow_batches(py, &batches)?;
 For a pure-Rust program you do not need this; `arrow::record_batch::RecordBatch`
 is already sufficient.
 
-## Writing a custom sink
+## Writing a custom sink { #writing-a-custom-sink }
 
 You can implement `ColumnarSink` yourself for specialized behavior. Most users
 should use `TableBuilder`.
@@ -278,7 +278,7 @@ impl ColumnarSink for RowCounter {
 }
 ```
 
-## See also
+## See also { #see-also }
 
 - [Writing a format adapter](./writing-adapters/index.md): implement `Splitter` and `RecordParser` in a separate package.
 - [Architecture](./architecture/): how the pieces fit together.

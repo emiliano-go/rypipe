@@ -42,7 +42,7 @@ pure allocation overhead.
 **The mistake:** Letting the engine discover column names at runtime.
 
 ```python
-# Bad: engine must scan the file to find column names
+# Bad: engine must scan the file to find column names { #bad-engine-must-scan-the-file-to-find-column-names }
 src = MySource("data.log")
 table = src.to_arrow()
 ```
@@ -58,7 +58,7 @@ Discovery pass doubles I/O and all values land as strings.
 **The mistake:** Not forwarding fused plan kwargs in `_read_arrow`.
 
 ```python
-# Bad: fused stages fall back to Python
+# Bad: fused stages fall back to Python { #bad-fused-stages-fall-back-to-python }
 class MySource(Source):
     def _read_arrow(self, **kwargs):
         return my_rust_read(str(self._path))  # ignores kwargs!
@@ -173,6 +173,22 @@ Values from multiple logical rows accumulate into one physical row,
 producing wrong results silently.
 
 **The fix:** Always pair `begin_row()` / `end_row()`.
+
+/// warning
+
+Forgetting `end_row` produces wrong results silently — no error, no crash,
+just rows accumulating values from multiple logical records. This is the
+hardest bug to track down in an adapter.
+
+///
+
+/// tip
+
+Use the [Performance Checklist](./techniques.md#performance-checklist) as a
+review gate before publishing your adapter. Every item on the list corresponds
+to a measurable throughput regression when omitted.
+
+///
 
 ## Summary { #summary }
 
