@@ -24,7 +24,6 @@ format-specific parsing. You install the adapter you need:
 | Format | Adapter package | Extension |
 |--------|----------------|-----------|
 | Crystal Reports XML | `crxml` | `.xml` |
-| Newline-delimited key=value logs | `rypipe-log` | `.log` |
 | Your custom format | Write your own | Any |
 
 ## Installation { #installation }

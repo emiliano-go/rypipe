@@ -38,11 +38,11 @@ import crxml  # registers the crxml adapter
 table = rypipe.read("report.xml", row_tag="Details")
 
 # Format specified explicitly
-table = rypipe.read("data.txt", format="log")
+table = rypipe.read("data.txt", format="crxml")
 
 # Adapter passed directly
-from rypipe_log import LogAdapter
-table = rypipe.read("app.log", adapter=LogAdapter())
+from crxml import CrystalXMLAdapter
+table = rypipe.read("report.xml", adapter=CrystalXMLAdapter(), row_tag="Details")
 ```
 
 ## rypipe.read_par() { #rypipe-read-par }

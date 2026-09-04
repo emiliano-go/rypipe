@@ -48,6 +48,8 @@ separate packages. Install the engine plus the adapters you need.
 
 ## Quick start { #quick-start }
 
+[Download sample report.xml](examples/report.xml)
+
 ### From Python { #from-python }
 
 ```bash

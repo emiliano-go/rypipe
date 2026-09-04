@@ -30,9 +30,9 @@ table = rypipe.read("report.xml", format="crxml", row_tag="Details")
 You can also pass an adapter object directly:
 
 ```python
-from rypipe_log import LogAdapter
+from crxml import CrystalXMLAdapter
 
-table = rypipe.read("app.log", adapter=LogAdapter())
+table = rypipe.read("report.xml", adapter=CrystalXMLAdapter(), row_tag="Details")
 ```
 
 !!! tip
@@ -43,24 +43,20 @@ table = rypipe.read("app.log", adapter=LogAdapter())
 
 ## Passing adapter kwargs { #passing-adapter-kwargs }
 
-Any keyword argument you pass to `rypipe.read()` is forwarded to the adapter.
-This means you do not need to learn a separate **rypipe** API: just learn
+Any keyword argument you pass to the Source is forwarded to the adapter.
+This means you do not need to learn a separate API: just learn
 your adapter's options:
 
 ```python
-# crxml options
-table = rypipe.read(
+from crxml import CrystalXMLSource
+
+source = CrystalXMLSource(
     "report.xml",
     row_tag="Details",           # which XML element is a row
     field_types={"Amount": "float64"},  # type hints for the engine
     drop_fields=["InternalId"],  # skip this column entirely
 )
-
-# rypipe-log options
-table = rypipe.read(
-    "app.log",
-    schema=["name", "age", "active"],  # declare column order
-)
+```
 ```
 
 ## Schema hints { #schema-hints }
