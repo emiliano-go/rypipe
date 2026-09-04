@@ -43,78 +43,94 @@ separate packages. Install the engine plus the adapters you need.
 - **Not a data warehouse.** It ingests data into Arrow; it does not store it,
   index it, or serve queries over it.
 - **Not pure Python.** Adapters are written in Rust for performance. Python
-  users consume data through `rypipe.read()` and the pipeline API; they do not
-  need to write Rust unless creating a new adapter.
+  users consume data through adapter APIs; they do not need to write Rust
+  unless creating a new adapter.
 
 ## Quick start { #quick-start }
+
+### Generate sample data { #generate-sample-data }
+
+```python
+# generate_data.py: create a sample XML file for testing
+from pathlib import Path
+
+xml = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<Report>
+{chr(10).join(f'  <Row><Name>{name}</Name><Amount>{amt}</Amount><Status>{status}</Status></Row>' for name, amt, status in [
+    ("Alice", 150.0, "active"), ("Bob", 75.0, "inactive"),
+    ("Carol", 200.0, "active"), ("Dave", 50.0, "active"),
+])}
+</Report>
+"""
+
+Path("report.xml").write_text(xml)
+print(f"Generated report.xml with 4 rows")
+```
+
+```bash
+python generate_data.py
+```
 
 ### From Python { #from-python }
 
 ```bash
-pip install rypipe my-adapter
+pip install rypipe crxml
 ```
 
 ```python
-import rypipe
-import my_adapter  # side-effect: registers the adapter with rypipe
+from crxml import CrystalXMLSource
 
-# Format is inferred from the extension; mode defaults to parallel.
-table = rypipe.read(
-    "data.myfmt",
-    field_types={"amount": "float64"},
-    filter={"field": "status", "op": "==", "value": "active"},
-)
+# Read the XML file into a pyarrow.Table
+source = CrystalXMLSource("report.xml", row_tag="Row")
+table = source.to_arrow()
+
 print(table.num_rows, table.num_columns)
+# 4 3
 ```
-
-!!! note
-
-    `import my_adapter` triggers `rypipe.register_adapter(...)` inside the
-    adapter package. This must happen before `rypipe.read()` is called.
 
 ### Pipeline API { #pipeline-api }
 
-Adapters that expose a `rypipe.Adapter` subclass give you a chainable pipeline
-with automatic fusion of rename, drop, cast, and filter stages into the Rust
-parse loop. Users import everything from the adapter, never from **rypipe**:
-
 ```python
-from my_adapter import MySource, CastTypes, FilterRows, RenameFields, DropFields
+from crxml import CrystalXMLSource, CastTypes, FilterRows
 
-source = MySource("data.myfmt")
+src = CrystalXMLSource("report.xml", row_tag="Row")
 
 df = (
-    source
-    | RenameFields({"old_name": "new_name"})
-    | DropFields(["internal_id"])
-    | CastTypes({"amount": float, "qty": int})
-    | FilterRows(field="status", op="==", value="active")
+    src
+    | CastTypes({"Amount": float})
+    | FilterRows(field="Status", op="==", value="active")
 ).to_dataframe()
+
+print(df)
+#     Name  Amount  Status
+# 0  Alice   150.0  active
+# 1  Carol   200.0  active
+# 2   Dave    50.0  active
 ```
 
 ### From Rust { #from-rust }
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-use my_adapter::{MySplitter, MyDecoder}; // separate adapter crate
+use crxml_core::{CrystalXmlSplitter, CrystalXmlParser}; // adapter crate
 
-let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
+let batch = Pipeline::new(CrystalXmlSplitter, CrystalXmlParser)
     .with_plan(
         ExecutionPlan::new()
-            .type_as("amount", FieldType::Float64)
-            .filter_eq("status", "active"),
+            .type_as("Amount", FieldType::Float64)
+            .filter_eq("Status", "active"),
     )
-    .read_path("data.myfmt", false, false)?;
+    .read_path("report.xml", false, false)?;
 ```
 
 ## Guides { #guides }
 
-- [Architecture](./architecture/): how the pieces fit together (start with [Overview](./architecture/index.md), then [Engine](./architecture/engine.md), [Columnar](./architecture/columnar.md), [Plan](./architecture/plan.md), [Execution](./architecture/execution.md), [Data flow](./architecture/data-flow.md), [Storage](./architecture/storage.md), [Optimizations](./architecture/optimizations.md)).
-- [Why Python?](./why-python.md): why rypipe is Rust core plus Python surface, not pure Rust, the data driven case for the hybrid.
-- [Python API](./reference/python-api.md): the `rypipe` package and `_rypipe` helpers.
-- [Rust API](./reference/rust-api.md): using `rypipe-core` and writing custom adapters.
-- [Writing a format adapter](./writing-adapters/): adding CSV, JSON, etc.
-- [Performance](./performance.md): benchmarks and tuning knobs.
+- [Tutorial](./tutorial/): install, first read, pipeline, stages, sinks, streaming.
+- [Writing Adapters](./writing-adapters/): add a new format (Splitter, RecordParser, Source, registration).
+- [Architecture](./architecture/): how the engine works internally.
+- [Advanced](./advanced/): fusion, execution modes, memory, parallelism, profiling.
+- [Reference](./reference/): Python API and Rust API.
 
 ## Repository layout { #repository-layout }
 

@@ -5,16 +5,16 @@ data in bounded chunks.
 
 ## The problem { #the-problem }
 
-By default, `rypipe.read()` and `.to_arrow()` parse the entire file into
-memory at once. This works for files up to several GB on a machine with
-enough RAM, but fails for larger files:
+By default, `.to_arrow()` parses the entire file into memory at once.
+This works for files up to several GB on a machine with enough RAM,
+but fails for larger files:
 
 ```python
-import rypipe
-import crxml
+from crxml import CrystalXMLSource
 
 # This loads the entire file into memory
-table = rypipe.read("huge_report.xml", row_tag="Details")  # may OOM
+source = CrystalXMLSource("huge_report.xml", row_tag="Details")
+table = source.to_arrow()  # may OOM
 ```
 
 ## Streaming with iter_record_batches { #streaming-with-iter-record-batches }
@@ -133,21 +133,15 @@ for batch in pipeline.iter_record_batches(memory="64MiB"):
 writer.close()
 ```
 
-## Streaming from rypipe.read() { #streaming-from-rypipe-read}
+## Streaming from a Source { #streaming-from-a-source}
 
-The module-level `rypipe.iter_record_batches()` function also supports
-streaming:
+You can also stream directly from any Source:
 
 ```python
-import rypipe
-import crxml  # registers the adapter
+from crxml import CrystalXMLSource
 
-for batch in rypipe.iter_record_batches(
-    "huge_report.xml",
-    format="crxml",
-    memory="64MiB",
-    row_tag="Details",
-):
+src = CrystalXMLSource("huge_report.xml", row_tag="Details")
+for batch in src.iter_record_batches(memory="64MiB"):
     process(batch)
 ```
 

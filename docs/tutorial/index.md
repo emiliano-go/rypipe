@@ -45,11 +45,11 @@ adapter). For other formats, install the corresponding adapter.
 ## Your first read { #your-first-read }
 
 ```python
-import rypipe
-import crxml  # registers the crxml adapter
+from crxml import CrystalXMLSource
 
 # Read a Crystal Reports XML file into a PyArrow table
-table = rypipe.read("report.xml", row_tag="Details")
+source = CrystalXMLSource("report.xml", row_tag="Details")
+table = source.to_arrow()
 
 print(table.schema)
 # name: string
@@ -60,8 +60,8 @@ print(table.num_rows)
 # 1247
 ```
 
-That's it. **rypipe** detected the `.xml` extension, selected the **crxml**
-adapter, parsed the file in parallel, and returned a `pyarrow.Table`.
+That's it. The adapter parsed the file in parallel and returned a
+`pyarrow.Table`.
 
 ### What **rypipe** does automatically { #what-rypipe-does }
 
@@ -79,11 +79,11 @@ The table is already a `pyarrow.Table`, but you can convert it to pandas or
 Polars with one call:
 
 ```python
-import rypipe
-import crxml
+from crxml import CrystalXMLSource
 
 # Read into a PyArrow table
-table = rypipe.read("report.xml", row_tag="Details")
+source = CrystalXMLSource("report.xml", row_tag="Details")
+table = source.to_arrow()
 
 # Convert to pandas
 df = table.to_pandas()

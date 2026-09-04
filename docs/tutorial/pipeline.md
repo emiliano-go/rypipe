@@ -234,9 +234,9 @@ for row in pipeline:
 ## Collecting to a list { #collecting-to-a-list }
 
 ```python
-import rypipe
+from crxml import collect
 
-rows = rypipe.collect(src | FilterRows(field="status", op="==", value="active"))
+rows = collect(src | FilterRows(field="status", op="==", value="active"))
 print(rows)
 # [{"name": "Alice", "amount": 150.0, "status": "active"}, ...]
 ```
