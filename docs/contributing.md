@@ -81,12 +81,12 @@ build an adapter package.
 
 ### Improving documentation { #improving-documentation }
 
-Documentation lives in `docs/`. We use MkDocs with the Material theme. To
+Documentation lives in `docs/`. We use zensical for the docs site. To
 preview locally:
 
 ```bash
-pip install mkdocs-material
-mkdocs serve
+pip install zensical
+zensical serve
 ```
 
 Then open `http://127.0.0.1:8000` in your browser.
