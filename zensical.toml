@@ -56,10 +56,15 @@ name = "rypipe on PyPI"
 "Home" = "index.md"
 
 [[project.nav]]
-"Python API" = "python-api.md"
-
-[[project.nav]]
-"Rust Core" = "rust-api.md"
+"Tutorial" = [
+    "tutorial/index.md",
+    { "First Steps" = "tutorial/first-steps.md" },
+    { "Pipeline" = "tutorial/pipeline.md" },
+    { "Stages" = "tutorial/stages.md" },
+    { "Sinks" = "tutorial/sinks.md" },
+    { "Streaming" = "tutorial/streaming.md" },
+    { "Configuration" = "tutorial/configuration.md" },
+]
 
 [[project.nav]]
 "Writing Adapters" = [
@@ -80,9 +85,6 @@ name = "rypipe on PyPI"
 ]
 
 [[project.nav]]
-"Examples" = "examples.md"
-
-[[project.nav]]
 "Advanced" = [
     "advanced/index.md",
     { "Pushdown fusion" = "advanced/fusion.md" },
@@ -99,9 +101,6 @@ name = "rypipe on PyPI"
 ]
 
 [[project.nav]]
-"crxml Adapter" = "crxml-adapter.md"
-
-[[project.nav]]
 "Architecture" = [
     "architecture/index.md",
     { "Engine" = "architecture/engine.md" },
@@ -116,10 +115,25 @@ name = "rypipe on PyPI"
 ]
 
 [[project.nav]]
+"Reference" = [
+    { "Python API" = "reference/python-api.md" },
+    { "Rust API" = "reference/rust-api.md" },
+]
+
+[[project.nav]]
+"Examples" = "examples.md"
+
+[[project.nav]]
+"crxml Adapter" = "crxml-adapter.md"
+
+[[project.nav]]
 "Why Python?" = "why-python.md"
 
 [[project.nav]]
 "Performance" = "performance.md"
+
+[[project.nav]]
+"Contributing" = "contributing.md"
 
 [project.markdown_extensions]
 "seoslug.contrib.zensical" = {
