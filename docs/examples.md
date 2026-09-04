@@ -228,4 +228,4 @@ class FooAdapter(rypipe.Adapter):
 rypipe.register_adapter("foo", FooAdapter, extensions=[".foo"])
 ```
 
-See [Writing adapters](writing-adapters.md) for the full trait reference.
+See [Writing adapters](writing-adapters/index.md) for the full trait reference.

@@ -499,11 +499,8 @@ impl Splitter for XmlSplitter {
         (sample_end / tag_count).max(1)
     }
 
-    fn skip_regions(&self) -> Option<&[SkipRegion]> {
-        Some(&[
-            SkipRegion::new(b"<!--", b"-->"),
-            SkipRegion::new(b"<![CDATA[", b"]]>"),
-        ])
+    fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
+        Some(&XmlSkipRegions)
     }
 }
 
