@@ -51,8 +51,9 @@ The engine provides `TableBuilder` as the production
 
     Adapters **repack the API**: they include their own copies of the pipeline
     stage classes (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) and
-    sink functions (`collect`, `to_dataframe`, `to_csv`) so users never import
-    from **rypipe** directly. This makes the adapter self-contained.
+    sink functions (`collect`, `to_arrow`, `to_pandas`, `to_polars`,
+    `to_parquet`, `to_dataframe`, `to_csv`) so users never import from
+    **rypipe** directly. This makes the adapter self-contained.
 
 
 ## Adapter API contract { #adapter-api-contract }
@@ -89,7 +90,11 @@ Repack or reimplement these stage classes:
 Repack or reimplement these sink functions:
 
 - `collect(pipeline)` — collect to list of dicts
-- `to_dataframe(pipeline)` — convert to pandas DataFrame
+- `to_arrow(pipeline)` — materialize to pyarrow.Table
+- `to_pandas(pipeline)` — convert to pandas DataFrame
+- `to_polars(pipeline)` — convert to Polars DataFrame
+- `to_parquet(pipeline, path)` — write to Parquet
+- `to_dataframe(pipeline)` — alias for to_pandas
 - `to_csv(pipeline, path)` — write to CSV
 
 ### Registration (required) { #registration }
@@ -226,7 +231,7 @@ For a 533 MB file on a Ryzen 5800X:
 ## Recap { #recap }
 
 * An adapter is a Rust crate (**Splitter** + **RecordParser**) and a Python
-  package (**Source** + **Adapter** + **stages**).
+  package (**Source** + **stages** + **sinks**).
 * The engine handles parallel execution, memory management, and Arrow export.
 * Your parser's job is to make `parse_chunk` fast.
 * Follow the **crxml** formula for a consistent user experience.
