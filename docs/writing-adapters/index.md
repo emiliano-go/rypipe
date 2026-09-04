@@ -3,12 +3,11 @@
 This guide teaches you how to write a **rypipe** adapter, a package that
 lets **rypipe** read your custom format.
 
-/// tip
+!!! tip
 
-If you just want to **use** an existing adapter, see the
-[Tutorial](../tutorial/index.md) instead. This guide is for adapter authors.
+    If you just want to **use** an existing adapter, see the
+    [Tutorial](../tutorial/index.md) instead. This guide is for adapter authors.
 
-///
 
 ## What you will build { #what-you-will-build }
 
@@ -49,17 +48,16 @@ The engine provides `TableBuilder` as the production
 | **`my_adapter.stages/`** | Own copies of `CastTypes`, `FilterRows`, `RenameFields`, `DropFields` |
 | **Registration** | Adapter registered at import time via side-effect import |
 
-/// note
+!!! note
 
-Adapters **repack the API**: they include their own copies of the pipeline
-stage classes (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) and
-sink functions (`collect`, `to_dataframe`, `to_csv`) so users never import
-from **rypipe** directly. This makes the adapter self-contained.
+    Adapters **repack the API**: they include their own copies of the pipeline
+    stage classes (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) and
+    sink functions (`collect`, `to_dataframe`, `to_csv`) so users never import
+    from **rypipe** directly. This makes the adapter self-contained.
 
-The only exception is `rypipe.read()`: users call it directly for
-one-liner reads via the adapter registry.
+    The only exception is `rypipe.read()`: users call it directly for
+    one-liner reads via the adapter registry.
 
-///
 
 ## User API { #user-api }
 

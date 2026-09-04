@@ -168,13 +168,12 @@ rypipe.to_parquet(pipeline, "output.parquet")
 | Write to CSV | `rypipe.to_csv(pipeline, path)` |
 | Get a list of dicts | `rypipe.collect(pipeline)` |
 
-/// tip
+!!! tip
 
-When you have a Source, prefer the Source methods (`.to_pandas()`, etc.)
-over the standalone functions. Source methods reuse the cached table and
-avoid re-parsing.
+    When you have a Source, prefer the Source methods (`.to_pandas()`, etc.)
+    over the standalone functions. Source methods reuse the cached table and
+    avoid re-parsing.
 
-///
 
 ## Recap { #recap }
 

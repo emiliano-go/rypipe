@@ -125,23 +125,21 @@ The engine guarantees:
 - Skip-region rejection adds O(window × num_openers) per candidate
 - Total split time is < 1% of single-threaded parse time on 500 MB
 
-/// warning
+!!! warning
 
-Do not override `find_split_points` unless you have a measured reason. The
-default implementation applies the chunk-size floor (`MIN_CHUNK_BYTES = 2 MiB`)
-that prevents sub-1 MB chunk collapse, handles skip-region rejection, and
-deduplicates split points. Hand-rolled versions almost always get this wrong.
+    Do not override `find_split_points` unless you have a measured reason. The
+    default implementation applies the chunk-size floor (`MIN_CHUNK_BYTES = 2 MiB`)
+    that prevents sub-1 MB chunk collapse, handles skip-region rejection, and
+    deduplicates split points. Hand-rolled versions almost always get this wrong.
 
-///
 
-/// tip
+!!! tip
 
-For most newline-delimited formats, `memchr::memchr(b'\n', ...)` is the
-optimal `next_record_start` implementation. The `memchr` crate uses AVX2 on
-x86_64 and NEON on ARM, scanning 16-32 bytes per cycle. Do not hand-roll
-byte iteration for single-delimiter searches.
+    For most newline-delimited formats, `memchr::memchr(b'\n', ...)` is the
+    optimal `next_record_start` implementation. The `memchr` crate uses AVX2 on
+    x86_64 and NEON on ARM, scanning 16-32 bytes per cycle. Do not hand-roll
+    byte iteration for single-delimiter searches.
 
-///
 
 ## Common mistakes { #common-mistakes }
 

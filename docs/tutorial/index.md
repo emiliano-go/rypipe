@@ -4,13 +4,12 @@ This tutorial teaches you how to use **rypipe** to read files into Arrow tables
 and DataFrames. You do not need to write Rust or build anything; just install
 **rypipe** and an adapter package, and start reading data.
 
-/// tip
+!!! tip
 
-If you are in a hurry, jump to [First Steps](first-steps.md#first-steps) for a 5-minute
-quickstart. If you want to write your own format adapter, see the
-[Writing Adapters](../writing-adapters/index.md) guide instead.
+    If you are in a hurry, jump to [First Steps](first-steps.md#first-steps) for a 5-minute
+    quickstart. If you want to write your own format adapter, see the
+    [Writing Adapters](../writing-adapters/index.md) guide instead.
 
-///
 
 ## What is **rypipe**? { #what-is-rypipe }
 
@@ -37,12 +36,11 @@ pip install rypipe crxml
 This installs **rypipe** (the engine) and **crxml** (the Crystal Reports XML
 adapter). For other formats, install the corresponding adapter.
 
-/// note
+!!! note
 
-**rypipe** requires Python 3.10 or later. The engine is written in Rust and
-ships as a compiled extension: no Rust toolchain needed for installation.
+    **rypipe** requires Python 3.10 or later. The engine is written in Rust and
+    ships as a compiled extension: no Rust toolchain needed for installation.
 
-///
 
 ## Your first read { #your-first-read }
 

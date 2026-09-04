@@ -249,18 +249,16 @@ impl ColumnarSink for LocateOnlySink {
 instance via `begin_row`/`end_row` lifecycle. The engine creates one
 `TableBuilder` per chunk and merges them after all chunks complete.
 
-/// note
+!!! note
 
-The `begin_row`/`end_row` lifecycle means you can safely use non-atomic
-mutable state in your sink (e.g., counters, buffers). The engine never
-shares a sink instance across threads: it clones or creates per-chunk.
+    The `begin_row`/`end_row` lifecycle means you can safely use non-atomic
+    mutable state in your sink (e.g., counters, buffers). The engine never
+    shares a sink instance across threads: it clones or creates per-chunk.
 
-///
 
-/// warning
+!!! warning
 
-If you implement a custom `ColumnarSink` and share it across threads via
-`&dyn ColumnarSink`, you will hit data races. Always let the engine manage
-sink instances: one per chunk, never shared.
+    If you implement a custom `ColumnarSink` and share it across threads via
+    `&dyn ColumnarSink`, you will hit data races. Always let the engine manage
+    sink instances: one per chunk, never shared.
 
-///

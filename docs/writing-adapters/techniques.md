@@ -196,14 +196,13 @@ fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut impl ColumnarSink) -> Res
 
 **Performance gain:** 5-10% on the hot path.
 
-/// note
+!!! note
 
-`parse_chunk_generic` only helps when the engine knows the concrete sink
-type at call time. For adapter-internal sinks (custom `ColumnarSink`
-implementations), you must override it explicitly: the default falls back
-to the trait-object version.
+    `parse_chunk_generic` only helps when the engine knows the concrete sink
+    type at call time. For adapter-internal sinks (custom `ColumnarSink`
+    implementations), you must override it explicitly: the default falls back
+    to the trait-object version.
 
-///
 
 ## Technique 8: Implement `skip_regions` { #technique-8-skip-regions }
 
@@ -272,13 +271,12 @@ fn find_field_end(&self, bytes: &[u8]) -> usize {
 beneficial for formats like XML or JSON where you search for closing
 tags across large field values.
 
-/// warning
+!!! warning
 
-`estimate_bytes_per_row` is called once on the first 64 KB of the file.
-Returning a fixed value regardless of data creates unbalanced chunks and
-hurts parallel efficiency. Always count delimiters in the sample.
+    `estimate_bytes_per_row` is called once on the first 64 KB of the file.
+    Returning a fixed value regardless of data creates unbalanced chunks and
+    hurts parallel efficiency. Always count delimiters in the sample.
 
-///
 
 ## Benchmarking { #benchmarking }
 
@@ -308,14 +306,13 @@ criterion_group!(benches, bench_adapter);
 criterion_main!(benches);
 ```
 
-/// tip
+!!! tip
 
-Benchmark on representative data, not synthetic strings. The `Cow::Borrowed`
-path is faster when the input is already in memory; real files have I/O
-overhead, encoding noise, and variable-length fields that change the
-cost profile.
+    Benchmark on representative data, not synthetic strings. The `Cow::Borrowed`
+    path is faster when the input is already in memory; real files have I/O
+    overhead, encoding noise, and variable-length fields that change the
+    cost profile.
 
-///
 
 Profile with `perf` to find hotspots, then re-run the benchmark to verify
 improvement. Focus on the top 3-5 hotspots: those are where the real

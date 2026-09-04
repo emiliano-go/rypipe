@@ -174,21 +174,19 @@ producing wrong results silently.
 
 **The fix:** Always pair `begin_row()` / `end_row()`.
 
-/// warning
+!!! warning
 
-Forgetting `end_row` produces wrong results silently: no error, no crash,
-just rows accumulating values from multiple logical records. This is the
-hardest bug to track down in an adapter.
+    Forgetting `end_row` produces wrong results silently: no error, no crash,
+    just rows accumulating values from multiple logical records. This is the
+    hardest bug to track down in an adapter.
 
-///
 
-/// tip
+!!! tip
 
-Use the [Performance Checklist](./techniques.md#performance-checklist) as a
-review gate before publishing your adapter. Every item on the list corresponds
-to a measurable throughput regression when omitted.
+    Use the [Performance Checklist](./techniques.md#performance-checklist) as a
+    review gate before publishing your adapter. Every item on the list corresponds
+    to a measurable throughput regression when omitted.
 
-///
 
 ## Summary { #summary }
 
