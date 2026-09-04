@@ -56,7 +56,7 @@ pip install rypipe my-adapter
 
 ```python
 import rypipe
-import my_adapter  # registers the adapter with rypipe
+import my_adapter  # side-effect: registers the adapter with rypipe
 
 # Format is inferred from the extension; mode defaults to parallel.
 table = rypipe.read(
@@ -69,14 +69,14 @@ print(table.num_rows, table.num_columns)
 
 !!! note
 
-    `import my_adapter` is only needed once to register the adapter.
-    After that, `rypipe.read("data.myfmt")` auto-detects the format.
+    `import my_adapter` triggers `rypipe.register_adapter(...)` inside the
+    adapter package. This must happen before `rypipe.read()` is called.
 
 ### Pipeline API { #pipeline-api }
 
 Adapters that expose a `rypipe.Adapter` subclass give you a chainable pipeline
 with automatic fusion of rename, drop, cast, and filter stages into the Rust
-parse loop. Users import everything from the adapter — never from **rypipe**:
+parse loop. Users import everything from the adapter, never from **rypipe**:
 
 ```python
 from my_adapter import MySource, CastTypes, FilterRows, RenameFields, DropFields
