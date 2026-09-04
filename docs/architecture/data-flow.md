@@ -1,4 +1,4 @@
-# Data flow
+# Data flow { #data-flow }
 
 This page shows how bytes move through the system in each execution mode.
 All modes share the same `Splitter` + `RecordParser` + `ExecutionPlan`;
@@ -6,7 +6,7 @@ only the driver differs.
 
 See [Execution](./execution.md) for implementation details of each mode.
 
-## Single thread
+## Single thread { #single-thread }
 
 ```
 Pipeline::read_bytes(bytes)
@@ -23,7 +23,7 @@ Pipeline::read_bytes(bytes)
 One `RecordBatch` returned. `InputBuffer::Owned` holds bytes for the
 duration. `ExecutionPlan` applied per row in `finish_row` (`filter.check`).
 
-## Parallel
+## Parallel { #parallel }
 
 ```
 Pipeline::read_bytes_par(bytes, num_chunks)
@@ -46,7 +46,7 @@ Pipeline::read_bytes_par(bytes, num_chunks)
 Fast path: one batch per chunk, unified schema, parallel array build.
 Merge path: single merged batch, sequential extend with promotion.
 
-## Bounded memory
+## Bounded memory { #bounded-memory }
 
 ```
 Pipeline::read_bytes_stream(bytes, budget)
@@ -72,7 +72,7 @@ Pipeline::read_bytes_stream(bytes, budget)
 Constant RSS regardless of file size. Mmap path: drop mapping after
 plan_chunks, reopen for seek+read per chunk.
 
-## Column lifecycle inside a row
+## Column lifecycle inside a row { #column-lifecycle-inside-a-row }
 
 ```
 begin_row (no op, row tracked by row_count + row_dirty)
@@ -98,16 +98,16 @@ end_row → finish_row:
   row_count += 1
 ```
 
-## Memory management across modes
+## Memory management across modes { #memory-management-across-modes }
 
-### Single thread
+### Single thread { #single-thread }
 
 - InputBuffer holds the entire file (Owned or Mmap)
 - One TableBuilder accumulates all rows
 - Peak memory: O(file_size + rows × cols)
 - No inter-thread communication
 
-### Parallel
+### Parallel { #parallel }
 
 - InputBuffer holds the entire file (shared read-only)
 - N TableBuilders (one per chunk) accumulate in parallel
@@ -115,7 +115,7 @@ end_row → finish_row:
 - Peak memory: O(file_size + N × chunk_rows × cols)
 - Thread pool: rayon with work-stealing
 
-### Bounded memory
+### Bounded memory { #bounded-memory }
 
 - InputBuffer holds the entire file (or mmap)
 - One TableBuilder accumulates, flushed periodically
@@ -123,7 +123,7 @@ end_row → finish_row:
 - Peak memory: O(budget + per_chunk_overhead)
 - RSS stays constant regardless of file size
 
-### Key difference: parallel vs bounded
+### Key difference: parallel vs bounded { #key-difference-parallel-vs-bounded }
 
 Parallel maximizes throughput by parsing all chunks simultaneously.
 Bounded maximizes memory efficiency by processing one batch at a time.
@@ -132,7 +132,7 @@ The choice depends on file size vs available RAM:
 - File > RAM: use bounded (constant RSS)
 - File ≈ RAM: use parallel with smaller budget
 
-## Adapter interaction points
+## Adapter interaction points { #adapter-interaction-points }
 
 The adapter interacts with the engine at these specific points:
 
@@ -151,16 +151,16 @@ All other work (parallelism, memory management, Arrow export, filtering)
 is handled by the engine. The adapter never touches `TableBuilder`
 internals, `InputBuffer`, or `ExecutionPlan`.
 
-## Performance characteristics
+## Performance characteristics { #performance-characteristics }
 
-### Single thread
+### Single thread { #single-thread }
 
 - Parse time: O(bytes / row_size) × cost_per_field
 - Memory: O(bytes) for InputBuffer + O(rows × cols) for TableBuilder
 - No threading overhead, no synchronization
 - Best for: small files (< 100 MB), streaming with backpressure
 
-### Parallel
+### Parallel { #parallel }
 
 - Parse time: O(bytes / (row_size × threads)) × cost_per_field
 - Memory: O(bytes / chunks × cols) per thread + O(rows × cols) for merge
@@ -168,7 +168,7 @@ internals, `InputBuffer`, or `ExecutionPlan`.
 - Best for: large files (>= 100 MB), full-RAM mode
 - Scaling: typically 3-5× on 8 cores (limited by parse cost, not I/O)
 
-### Bounded memory
+### Bounded memory { #bounded-memory }
 
 - Parse time: O(bytes / row_size) × cost_per_field (same as single)
 - Memory: bounded by `budget.bytes()` regardless of file size
@@ -176,7 +176,7 @@ internals, `InputBuffer`, or `ExecutionPlan`.
 - Best for: files larger than available RAM, streaming pipelines
 - Trade-off: sequential processing, no parallelism within a batch
 
-## Row-level event timeline
+## Row-level event timeline { #row-level-event-timeline }
 
 For a row with fields A, B, C (A missing):
 
@@ -192,7 +192,7 @@ end_row → finish_row:
   row_count += 1
 ```
 
-## Cross-chunk merge timeline
+## Cross-chunk merge timeline { #cross-chunk-merge-timeline }
 
 For parallel parse with 4 chunks:
 

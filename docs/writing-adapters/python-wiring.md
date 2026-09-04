@@ -9,7 +9,7 @@ The reference adapter (**crxml**) defines the standard pattern. Every adapter
 follows this structure:
 
 ```python
-# Users import everything from the adapter package
+# Users import everything from the adapter package { #users-import-everything-from-the-adapter-package }
 from my_adapter import MySource, CastTypes, FilterRows
 ```
 
@@ -34,7 +34,7 @@ The Source subclass is the pipeline-capable entry point. It implements
 `_read_arrow()` and forwards plan kwargs from fused stages:
 
 ```python
-# my_adapter/source.py
+# my_adapter/source.py { #my_adaptersourcepy }
 from __future__ import annotations
 from typing import Any
 
@@ -76,13 +76,21 @@ You must merge these with your construction kwargs and pass them to your
 Rust reader. If you ignore `plan_overrides`, fused stages silently fall back
 to Python execution — 10–50× slower.
 
+/// warning
+
+Never ignore `plan_overrides`. Fused stages silently fall back to Python
+execution over a full table when plan kwargs are not forwarded, turning a
+microsecond Rust path into a millisecond Python loop.
+
+///
+
 ## Adapter class { #adapter-class }
 
 The adapter is a thin, stateless wrapper. It delegates to the Source for
 actual parsing:
 
 ```python
-# my_adapter/rypipe_adapter.py
+# my_adapter/rypipe_adapter.py { #my_adapterrypipe_adapterpy }
 from __future__ import annotations
 from typing import Any
 
@@ -120,7 +128,7 @@ Register the adapter at import time. Users get the adapter by importing
 your package:
 
 ```python
-# my_adapter/rypipe_adapter.py (continued)
+# my_adapter/rypipe_adapter.py (continued) { #my_adapterrypipe_adapterpy }
 
 def _register() -> None:
     try:
@@ -138,10 +146,10 @@ _register()  # runs on import
 The `__init__.py` triggers registration and lazily loads public names:
 
 ```python
-# my_adapter/__init__.py
+# my_adapter/__init__.py { #my_adapter__init__py }
 import importlib
 
-# Side-effect import: registers the adapter with rypipe on import
+# Side-effect import: registers the adapter with rypipe on import { #side-effect-import-registers-the-adapter-with-rypipe-on-import }
 from . import rypipe_adapter  # noqa: F401
 
 __all__ = [
@@ -281,6 +289,14 @@ class FilterRows:
         return {"filter": self._filter_spec} if self._filter_spec else None
 ```
 
+/// tip
+
+If your format is text-only and has no numeric fields, the `str` cast is a
+no-op — `_plan_kwargs` returns `None` and the engine skips fusing it. No
+harm done, but you can skip the `CastTypes` stage entirely.
+
+///
+
 ### RenameFields and DropFields { #rename-and-drop }
 
 ```python
@@ -319,6 +335,14 @@ class DropFields:
     def _plan_kwargs(self) -> dict | None:
         return {"drop_fields": sorted(self._fields_set)}
 ```
+
+/// warning
+
+`DropFields` expects a `list[str]`, not a bare string. Passing a string
+raises a `TypeError` with a helpful message — but this is a common mistake
+when migrating from other libraries.
+
+///
 
 ## Streaming { #streaming }
 

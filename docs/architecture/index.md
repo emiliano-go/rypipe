@@ -1,4 +1,4 @@
-# Architecture Overview
+# Architecture Overview { #architecture-overview }
 
 `rypipe` is built around one idea: **separate the parts of parsing that depend
 on a file format from the parts that do not.** The format-specific side answers
@@ -9,7 +9,7 @@ Arrow.
 This directory documents the architecture in depth. Read this page first; then
 dive into the subpages for the component you care about.
 
-## Pages
+## Pages { #pages }
 
 | Page | Lines | Focus |
 |------|-------|-------|
@@ -22,7 +22,7 @@ dive into the subpages for the component you care about.
 | [Optimizations](./optimizations.md) | Every optimization and why it matters |
 | [Storage and export](./storage.md) | Arrow export, null handling, compare filter |
 
-## Design philosophy
+## Design philosophy { #design-philosophy }
 
 The engine was extracted from a single format (Crystal Reports XML) and
 generalized so that the same hot path serves every adapter. The split is
@@ -42,7 +42,7 @@ any file format.
 Adapters live in separate packages. `rypipe` ships zero parsers. The boundary
 is a trait, not a stringly convention.
 
-## High-level flow
+## High-level flow { #high-level-flow }
 
 ```
 input bytes
@@ -82,9 +82,9 @@ resolves names via `ExecutionPlan::resolve_field` and chooses storage via
 `ExecutionPlan::column_type`. This keeps adapters tiny and keeps all pushdown,
 typing, and Arrow logic in one place.
 
-## Crate overview
+## Crate overview { #crate-overview }
 
-### rypipe-core (pure Rust, no pyo3)
+### rypipe-core (pure Rust, no pyo3) { #rypipe-core }
 
 | Module | Responsibility |
 |--------|---------------|
@@ -111,7 +111,7 @@ See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `consumer` | BatchConsumer, CollectingConsumer, DiscardingConsumer |
 | `error` | Error enum (Utf8, Io, Plan, Merge, Arrow), Result type alias |
 
-### rypipe-python (PyO3 bindings)
+### rypipe-python (PyO3 bindings) { #rypipe-python }
 
 | Module | Responsibility |
 |--------|---------------|
@@ -119,7 +119,7 @@ See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `plan_kwargs.rs` | Python kwargs to ExecutionPlan conversion |
 | `export.rs` | Arrow to PyArrow via C Data Interface |
 
-## State and ownership
+## State and ownership { #state-and-ownership }
 
 `TableBuilder` owns three parallel structures:
 - `columns: Vec<ColumnBuilder>` (dense storage)
@@ -132,7 +132,7 @@ in sync via `ensure_column_idx`, `take_column`, and `extend`.
 `Pipeline<S,P>` is `Clone` where `S: Splitter + Clone` and `P: RecordParser + Clone`,
 so the same pipeline can be reused across files and execution modes.
 
-## Testing strategy
+## Testing strategy { #testing-strategy }
 
 Every optimization has a test that verifies correctness:
 - Splitter tests: monotonic points, coverage, comment/CDATA rejection
@@ -140,7 +140,7 @@ Every optimization has a test that verifies correctness:
 - Columnar tests: push/pop, split_off, arrow export, dictionary upgrade
 - Integration tests: whole-file parse == N-chunk parse for N in {1, 2, 7, 64}
 
-## Next steps
+## Next steps { #next-steps }
 
 - [Engine](./engine.md) for the hot path (row handling, dirty tracking, predicate-first)
 - [Columnar](./columnar.md) for storage internals (StrColumn, ColumnBuilder, dictionary)
@@ -151,7 +151,7 @@ Every optimization has a test that verifies correctness:
 - [Storage and export](./storage.md) for Arrow type mapping and null handling
 - [Execution plan](./plan.md) for pushdown plans and filter predicates
 
-## Key invariants
+## Key invariants { #key-invariants }
 
 1. **Adapter never sees ExecutionPlan.** The boundary is a trait. Adapters
    emit plain names and `Value` events; the engine resolves names and
@@ -176,16 +176,16 @@ Every optimization has a test that verifies correctness:
 6. **Layout prediction.** After the first row, `expect_slot` enables
    memcmp-based field resolution, skipping attribute scan + hash lookup.
 
-## Design decisions
+## Design decisions { #design-decisions }
 
-### Why not HashMap<String, ColumnBuilder>?
+### Why not HashMap<String, ColumnBuilder>? { #why-not-hashmapstring-columnbuilder }
 
 The original design used a HashMap for column storage. This required two
 hash probes per field: one to check if the column exists, one to get a
 mutable reference. With dense Vec storage, the second probe becomes a
 bounds-checked array access. This saves ~100 ns per row for 10 fields.
 
-### Why a bitmask for null-fill?
+### Why a bitmask for null-fill? { #why-a-bitmask-for-null-fill }
 
 The naive approach pushes `None` for every missing column. With 10 columns
 where 8 are present, this wastes 80% of pushes. The bitmask tracks which
@@ -193,7 +193,7 @@ columns were touched, so `finish_row` only pushes `None` for the 2 missing
 columns. The bitmask test is a single word load + bit test, cheaper than
 a `Vec` push per column.
 
-### Why predicate-first?
+### Why predicate-first? { #why-predicate-first }
 
 For selective filters (e.g., 10% pass rate), most rows are rejected early.
 Without predicate-first, the engine pushes all fields into columns, then
@@ -202,7 +202,7 @@ until the predicate column arrives, evaluates, and either discards the
 buffer (Fail) or drains it to columns (Pass). This eliminates 90% of
 push/pop cycles for selective filters.
 
-### Why not override find_split_points?
+### Why not override find_split_points? { #why-not-override-find_split_points }
 
 The default implementation applies the measured 2 MiB chunk floor that
 prevents sub-MB chunk collapse. Two adapters got this wrong: TSV collected

@@ -25,9 +25,9 @@ This is the single largest performance lever. When the column set is known,
 declare it with `schema_order` and `field_types`:
 
 ```python
-# Python — tell the engine exactly which columns exist and their types.
-# This skips column discovery, stabilizes column order, and enables
-# typed Arrow arrays (no intermediate strings).
+# Python — tell the engine exactly which columns exist and their types. { #python-tell-the-engine-exactly-which-columns-exist-and-their-types }
+# This skips column discovery, stabilizes column order, and enables { #this-skips-column-discovery-stabilizes-column-order-and-enables }
+# typed Arrow arrays (no intermediate strings). { #typed-arrow-arrays }
 src = MySource("data.log", schema=["id", "name", "amount"],
                field_types={"id": "int64", "amount": "float64"})
 ```
@@ -196,6 +196,15 @@ fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut impl ColumnarSink) -> Res
 
 **Performance gain:** 5-10% on the hot path.
 
+/// note
+
+`parse_chunk_generic` only helps when the engine knows the concrete sink
+type at call time. For adapter-internal sinks (custom `ColumnarSink`
+implementations), you must override it explicitly — the default falls back
+to the trait-object version.
+
+///
+
 ## Technique 8: Implement `skip_regions` { #technique-8-skip-regions }
 
 If your format has comments, CDATA sections, or quoted strings that may
@@ -263,6 +272,14 @@ fn find_field_end(&self, bytes: &[u8]) -> usize {
 beneficial for formats like XML or JSON where you search for closing
 tags across large field values.
 
+/// warning
+
+`estimate_bytes_per_row` is called once on the first 64 KB of the file.
+Returning a fixed value regardless of data creates unbalanced chunks and
+hurts parallel efficiency. Always count delimiters in the sample.
+
+///
+
 ## Benchmarking { #benchmarking }
 
 Use criterion to benchmark your pipeline end-to-end:
@@ -290,6 +307,15 @@ fn bench_adapter(c: &mut Criterion) {
 criterion_group!(benches, bench_adapter);
 criterion_main!(benches);
 ```
+
+/// tip
+
+Benchmark on representative data, not synthetic strings. The `Cow::Borrowed`
+path is faster when the input is already in memory; real files have I/O
+overhead, encoding noise, and variable-length fields that change the
+cost profile.
+
+///
 
 Profile with `perf` to find hotspots, then re-run the benchmark to verify
 improvement. Focus on the top 3-5 hotspots — those are where the real

@@ -1,8 +1,8 @@
-# Case study: crxml
+# Case study: crxml { #case-study-crxml }
 
 `crxml` is a high-throughput adapter for Crystal Reports XML exports. It is a concrete example of how the techniques from the other advanced pages combine to reach ~4.2 GB/s on a single workstation.
 
-## What it parses
+## What it parses { #what-it-parses }
 
 Crystal Reports exports tabular data inside XML elements such as:
 
@@ -13,7 +13,7 @@ Crystal Reports exports tabular data inside XML elements such as:
 
 `crxml` reads these exports and turns them into Arrow tables or DataFrames. The speed is parser-bound; the `rypipe-core` engine keeps up without being the bottleneck.
 
-## Architecture
+## Architecture { #architecture }
 
 ```text
 Crystal Reports XML file
@@ -33,7 +33,7 @@ pyarrow.Table / pandas.DataFrame
 
 The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapter` that calls the Rust core and registers itself with `rypipe`.
 
-## Techniques from this section
+## Techniques from this section { #techniques-from-this-section }
 
 | Page | Technique used in crxml |
 |------|-------------------------|
@@ -45,11 +45,11 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 | [Execution modes](./execution-modes.md) | `columnar`, `parallel`, and `stream` modes exposed through `rypipe`. |
 | [I/O tuning](./io-tuning.md) | `mmap` with `prefault` for cached files; bounded streaming for huge files. |
 
-## The splitter
+## The splitter { #the-splitter }
 
 `CrystalXmlSplitter` uses `memchr::memmem` to scan for the row tag. It is SIMD-accelerated on most platforms. It skips `<!-- ... -->` and `<![CDATA[ ... ]]>` regions so a `<Row` string inside them is not mistaken for a real row start. It also validates that a candidate tag is followed by whitespace, `>`, or `/` to avoid prefix collisions such as `<RowItem`.
 
-## The decoder
+## The decoder { #the-decoder }
 
 `CrystalXmlDecoder` uses the hand-rolled `memchr`/`memmem` scanner in `scanner.rs`. Events reference the input bytes directly instead of copying into a scratch buffer. For each row element it:
 
@@ -60,7 +60,7 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 
 The decoder also has a `parse_tail` fallback that rescans orphan close-tags at chunk boundaries, so chunked parsing stays correct without a serial pre-pass.
 
-## Why it is fast
+## Why it is fast { #why-it-is-fast }
 
 | Technique | Benefit |
 |-----------|---------|
@@ -71,7 +71,7 @@ The decoder also has a `parse_tail` fallback that rescans orphan close-tags at c
 | `rypipe-core` typed builders | Strings are copied into Arrow arrays only once, during parse. |
 | Parallel fast path | When `auto_dict` and compare filters are off, chunks export independently. |
 
-## Lessons for adapter authors
+## Lessons for adapter authors { #lessons-for-adapter-authors }
 
 1. Specialize the parser. Generic line splitting is fine for engine benchmarks, but real throughput comes from a format-aware parser.
 2. Find split points cheaply. A single `memmem` scan beats scanning byte-by-byte.
@@ -79,7 +79,7 @@ The decoder also has a `parse_tail` fallback that rescans orphan close-tags at c
 4. Borrow strings into the engine. Pass `Value::Str(Cow::Borrowed(&str))` slices whenever the input is valid UTF-8.
 5. Register with `rypipe`. A thin adapter class lets users call `rypipe.read()` while you keep the fast Rust core.
 
-## Source
+## Source { #source }
 
 The full implementation is in the [crxml repository](https://github.com/emiliano-go/crxml), especially:
 

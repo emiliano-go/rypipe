@@ -1,4 +1,4 @@
-# Schema and types
+# Schema and types { #schema-and-types }
 
 This is the single largest performance lever for adapters with known schemas.
 In the crxml reference adapter, declaring `schema=[...]` lifts throughput from
@@ -9,7 +9,7 @@ byte-jump reaches 11 GB/s on benchmarks.
 memory. Providing `schema_order` and `field_types` up front avoids those
 passes, stabilizes column order, and enables numeric compare filters.
 
-## Avoiding inference passes
+## Avoiding inference passes { #avoiding-inference-passes }
 
 Some formats need a discovery pass to infer column names. For example, an XML adapter may scan the file to find all field names before parsing. This doubles I/O work and delays the first row.
 
@@ -24,13 +24,13 @@ source = MyAdapter(
 
 With `schema_order`, the engine does not need to discover column names. It also sorts columns to this order at finish time, making output deterministic.
 
-## Stable column order across chunks
+## Stable column order across chunks { #stable-column-order-across-chunks }
 
 In parallel mode, each chunk may encounter columns in a different order. Without a shared `schema_order`, the engine must reconcile column order at merge time. This adds a small per-chunk cost and can produce unexpected ordering when chunks disagree.
 
 `schema_order` fixes the output order regardless of the order in which fields arrive.
 
-## Casting during parse
+## Casting during parse { #casting-during-parse }
 
 `field_types` tells the engine which storage type to build for each column:
 
@@ -74,7 +74,7 @@ let plan = ExecutionPlan::new()
     .type_as("quantity", FieldType::Int64);
 ```
 
-## Numeric compare filters
+## Numeric compare filters { #numeric-compare-filters }
 
 Casting during parse is especially important for filters. When both sides of a
 column-to-column comparison (`Compare`) are stored as `Int64` or `Float64`, the
@@ -86,7 +86,7 @@ If the columns are left as strings, the comparison falls back to string
 ordering, which is rarely what you want for numbers. Declare the types
 explicitly to keep numeric comparisons native.
 
-## Combining schema hints with fusion
+## Combining schema hints with fusion { #combining-schema-hints-with-fusion }
 
 `schema_order` and `field_types` are part of the `ExecutionPlan`. They merge cleanly with `RenameFields`, `DropFields`, and `FilterRows`:
 
@@ -100,7 +100,7 @@ result = (
 
 The filter runs on the renamed, typed column. Without `field_types`, the filter would fall back to Python or be skipped.
 
-## Summary
+## Summary { #summary }
 
 - Provide `schema_order` to skip inference and stabilize output columns.
 - Provide `field_types` to cast during parse and enable numeric Arrow filters.

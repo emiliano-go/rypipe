@@ -1,10 +1,10 @@
-# Skip Regions
+# Skip Regions { #skip-regions }
 
 When splitting input into chunks, some byte ranges must not be split on.
 Comments, CDATA sections, quoted fields, and string literals all contain
 bytes that look like record boundaries but aren't.
 
-## The `SkipRegionFinder` trait
+## The `SkipRegionFinder` trait { #the-skipregionfinder-trait }
 
 ```rust
 pub trait SkipRegionFinder: Send + Sync {
@@ -19,7 +19,7 @@ pub trait SkipRegionFinder: Send + Sync {
 }
 ```
 
-## How it works
+## How it works { #how-it-works }
 
 The engine calls `in_skip_region(bytes, at, finder)` for each candidate split
 point. The function does a bounded backward scan from `at` (capped at
@@ -27,7 +27,7 @@ point. The function does a bounded backward scan from `at` (capped at
 
 If `openers()` is empty, the function returns `false` immediately (O(1)).
 
-## Implementation example: XML comments + CDATA
+## Implementation example: XML comments + CDATA { #implementation-example-xml-comments-cdata }
 
 ```rust
 struct XmlSkipRegions;
@@ -51,7 +51,7 @@ impl Splitter for MyXmlSplitter {
 }
 ```
 
-## Implementation example: CSV quoted fields
+## Implementation example: CSV quoted fields { #implementation-example-csv-quoted-fields }
 
 ```rust
 struct CsvSkipRegions;
@@ -67,7 +67,7 @@ impl SkipRegionFinder for CsvSkipRegions {
 }
 ```
 
-## Performance
+## Performance { #performance }
 
 The backward scan is bounded by `window()` (default 64 KiB). For formats with
 no skip regions, `openers()` returns an empty slice and `in_skip_region`

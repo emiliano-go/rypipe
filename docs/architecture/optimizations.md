@@ -1,9 +1,9 @@
-# Optimizations
+# Optimizations { #optimizations }
 
 Every optimization in `rypipe-core`, why it matters, and what it replaces.
 These changes are not format-specific; they benefit every adapter equally.
 
-## 1. Dense column storage (2C-S1)
+## 1. Dense column storage (2C-S1) { #1-dense-column-storage }
 
 **Before:** `HashMap<String, ColumnBuilder>` required two hash probes per
 field: one in `ensure_column` (create if missing), one in `get_mut` (push
@@ -18,7 +18,7 @@ one hash, one bit set, one conditional pop, and one push_value.
 per row at ~10 ns per hash, this saves ~100 ns per row. On a 533 MB file
 with ~480K rows, that's ~48 ms saved.
 
-## 2. Dirty bitmask null-fill (2C-S2)
+## 2. Dirty bitmask null-fill (2C-S2) { #2-dirty-bitmask-null-fill }
 
 **Before:** For each row, loop over all columns:
 ```rust
@@ -45,7 +45,7 @@ self.row_dirty.fill(0);  // Clear all bits for next row
 The bitmask word load plus bit test is cheaper than a `Vec` push per column.
 Measured: 34% reduction in `finish_row` cost.
 
-## 3. Predicate-first deferred materialization
+## 3. Predicate-first deferred materialization { #3-predicate-first-deferred-materialization }
 
 **Before:** Parse all fields into columns, then evaluate filter. If rejected,
 pop all columns (expensive for wide tables with many fields).
@@ -59,7 +59,7 @@ of column push/pop cycles. The adaptive strategy disables buffering when
 the predicate column is late (> 4/5 of columns), falling back to direct
 push + pop-on-reject.
 
-## 4. resolve + put_field_resolved (single hash)
+## 4. resolve + put_field_resolved (single hash) { #4-resolve-put_field_resolved }
 
 **Before:** `wants(name)` + `put_field(name, v)` = two hash probes (one
 in `wants` via `resolve_field`, one in `put_field` via `ensure_column_idx`).
@@ -71,7 +71,7 @@ the column lookup with the already-resolved name.
 **Impact:** Saves one HashMap lookup per field. For 10 fields per row,
 saves ~100 ns per row.
 
-## 5. expect_slot layout prediction
+## 5. expect_slot layout prediction { #5-expect_slot-layout-prediction }
 
 **Before:** Every field: `find_attr_value` (memchr scan) + `decode_attr`
 (UTF-8 + entity unescape) + `resolve` (HashMap lookup) + `put_field`.
@@ -84,7 +84,7 @@ then `put_field_at(slot, value)`.
 per field. ~17% on the hot path. Works for formats with stable field order
 (CSV, XML, JSONL).
 
-## 6. row_satisfied projection short-circuit
+## 6. row_satisfied projection short-circuit { #6-row_satisfied-projection-short-circuit }
 
 **Before:** Scan all fields even when only 3 of 11 are wanted.
 
@@ -94,7 +94,7 @@ values. Scanner byte-jumps to row close via `find_row_close`.
 **Impact:** For projections, skips scanning 60-80% of fields. Measured:
 +123% on drop_half parallel (533 MB: 3,394 → 7,571 MB/s).
 
-## 7. wanted_mask bitmask projection
+## 7. wanted_mask bitmask projection { #7-wanted_mask-bitmask-projection }
 
 **Before:** `sink.wants(name)` virtual call per field (vtable dispatch).
 
@@ -103,7 +103,7 @@ values. Scanner byte-jumps to row close via `find_row_close`.
 **Impact:** Eliminates virtual dispatch overhead in the hot inner loop.
 Combined with row_satisfied, enables full projection optimization.
 
-## 8. Ordinal threading
+## 8. Ordinal threading { #8-ordinal-threading }
 
 **Before:** `parse_row` doesn't track field ordinals.
 
@@ -114,7 +114,7 @@ Combined with row_satisfied, enables full projection optimization.
 **Impact:** Enables optimizations 5 and 6. ~3% overhead for the counter
 increment, but the savings from 5 and 6 far outweigh it.
 
-## 9. Precomputed close finder (F1)
+## 9. Precomputed close finder (F1) { #9-precomputed-close-finder }
 
 **Before:** `find_row_close` allocates `Vec<u8>` + `memmem::Finder` per
 rejected or satisfied row. With `row_satisfied`, this ran on every row
@@ -127,7 +127,7 @@ reference. Zero allocation per row.
 Vec allocations + Finder constructions. Measured: +10% single-thread,
 +9% parallel.
 
-## 10. Scan primitives (S5)
+## 10. Scan primitives (S5) { #10-scan-primitives }
 
 **Before:** Raw `memchr` calls without fast path.
 
@@ -138,7 +138,7 @@ same fast path.
 **Impact:** 15% on the `next_lt` hot path (byte-at-position check avoids
 AVX2 prologue on 2/3 of calls).
 
-## 11. Engine-provided Splitter default (S1)
+## 11. Engine-provided Splitter default (S1) { #11-engine-provided-splitter-default }
 
 **Before:** Adapters implement `find_split_points` from scratch. Two adapters
 got it wrong: TSV collected first K newlines (negative scaling), crxml
@@ -149,7 +149,7 @@ skip-region rejection + dedup + chunk floor (2 MiB minimum).
 
 **Impact:** Eliminates the bug class. +13-32% on projection workloads.
 
-## 12. Incremental dictionary unification
+## 12. Incremental dictionary unification { #12-incremental-dictionary-unification }
 
 **Before:** `auto_dict=True` forces serial merge path (no fast path).
 All chunks must be merged before dict upgrade.
@@ -159,7 +159,7 @@ All chunks must be merged before dict upgrade.
 
 **Impact:** auto_dict parallel gap: 45% → 16%.
 
-## Summary table
+## Summary table { #summary-table }
 
 | # | Optimization | Measured gain | Where |
 |---|-------------|---------------|-------|

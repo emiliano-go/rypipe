@@ -1,12 +1,12 @@
-# Python API
+# Python API { #python-api }
 
 `rypipe` provides the engine; adapters are separate packages. End users
 **import the adapter** (e.g. `crxml`), not `rypipe`. Adapter creators
 import `rypipe` to subclass `Source`/`Adapter` and register with the engine.
 
-## End users
+## End users { #end-users }
 
-### Import the adapter, not rypipe
+### Import the adapter, not rypipe { #import-the-adapter-not-rypipe }
 
 ```python
 from crxml import CrystalXMLSource
@@ -18,7 +18,7 @@ df = src.to_dataframe()
 Each adapter exports its own `Source` class and pipeline stages. You do not
 need to import `rypipe` directly.
 
-### Two APIs: Source class vs rypipe.read
+### Two APIs: Source class vs rypipe.read { #two-apis-source-class-vs-rypiperead }
 
 **Source class (recommended):** Direct access to the adapter's parser, with
 full pipeline support:
@@ -49,7 +49,7 @@ table = rypipe.read("report.xml", format="crxml", row_tag="Details")
 Most users should prefer the Source class API. `rypipe.read` is useful for
 generic ETL scripts that handle multiple formats.
 
-### Pipeline stages
+### Pipeline stages { #pipeline-stages }
 
 | Stage | Effect |
 |-------|--------|
@@ -63,7 +63,7 @@ generic ETL scripts that handle multiple formats.
 Stages are fused into the Rust parse loop when the adapter supports plan
 kwargs. Without fusion, they fall back to Python execution over a full table.
 
-### Sinks
+### Sinks { #sinks }
 
 Sinks convert pipeline results to various output formats. Source methods
 (`to_arrow`, `to_pandas`, etc.) materialize the full result set. Pipeline
@@ -73,19 +73,19 @@ directly and try the fused Arrow path first, falling back to dict iteration.
 ```python
 from crxml import to_dataframe, to_csv, collect
 
-# Source methods: materialize the full result
+# Source methods: materialize the full result { #source-methods-materialize-the-full-result }
 table = src.to_arrow()
 df = src.to_pandas()
 df = src.to_polars()
 src.to_parquet("out.parquet")
 
-# Pipeline sinks: work on pipeline objects
+# Pipeline sinks: work on pipeline objects { #pipeline-sinks-work-on-pipeline-objects }
 df = to_dataframe(pipeline)
 to_csv(pipeline, "out.csv")
 rows = collect(pipeline)
 ```
 
-### Streaming batches
+### Streaming batches { #streaming-batches }
 
 For files larger than available RAM, use `iter_record_batches` with a memory
 budget. The engine parses chunks sequentially, keeping only the current chunk
@@ -100,7 +100,7 @@ for batch in src.iter_record_batches(memory="256MiB"):
 Yields `pyarrow.RecordBatch` objects one at a time. The `memory` parameter
 accepts an int (bytes) or a human-readable string like `"64MB"` or `"500MiB"`.
 
-### Plan kwargs
+### Plan kwargs { #plan-kwargs }
 
 These kwargs control how the engine parses and transforms data. They are
 passed to the adapter's `read` method. When the adapter supports fusion,
@@ -116,7 +116,7 @@ these kwargs are pushed into the Rust parse loop for maximum performance.
 | `use_mmap` | `bool` | Memory-map the input file |
 | `prefault` | `bool` | `MADV_WILLNEED` when mmap is enabled |
 
-### Filters
+### Filters { #filters }
 
 Filters are evaluated per-row during parsing. Rows that fail the filter are
 discarded before any Python objects are created. Use constant filters for
@@ -146,7 +146,7 @@ FilterRowsAny(
 )
 ```
 
-### Exceptions
+### Exceptions { #exceptions }
 
 These exceptions are raised by the adapter and can be caught with
 `try/except`:
@@ -157,7 +157,7 @@ These exceptions are raised by the adapter and can be caught with
 | `crxml.PlanError` | Invalid pushdown plan |
 | `crxml.MergeError` | Chunk-merge conflict |
 
-### Schema performance
+### Schema performance { #schema-performance }
 
 When the column set is known, pass `schema=` to skip discovery and hit the
 fast path. This is the single largest performance lever:
@@ -182,13 +182,13 @@ for f in files:
 
 See [Schema](./advanced/schema-and-types.md) for details.
 
-## Adapter authors
+## Adapter authors { #adapter-authors }
 
 Adapter authors implement the Rust `Splitter` and `RecordParser` traits for
 a new format, then expose a Python class that registers with `rypipe`. See
 [Writing a format adapter](./writing-adapters/) for the full guide.
 
-### `rypipe.Source`
+### `rypipe.Source` { #rypipesource }
 
 Abstract base class for adapters. Implement `_read_arrow` to get pipelines,
 stages, and sinks for free:
@@ -205,7 +205,7 @@ class MySource(Source):
         return my_rust_read(str(self._path), **plan)
 ```
 
-### `rypipe.Adapter`
+### `rypipe.Adapter` { #rypipeadapter }
 
 Simpler alternative. Implement only `read(path, **kwargs)`:
 
@@ -217,7 +217,7 @@ class CsvAdapter(Adapter):
         return _rypipe_csv.read_csv(path, **kwargs)
 ```
 
-### Registration
+### Registration { #registration }
 
 Register your adapter so `rypipe.read()` can find it:
 
@@ -227,7 +227,7 @@ import rypipe
 rypipe.register_adapter("csv", CsvAdapter(), extensions=[".csv"])
 ```
 
-### Pure-Python adapters
+### Pure-Python adapters { #pure-python-adapters }
 
 You can write an adapter entirely in Python without Rust:
 
@@ -249,7 +249,7 @@ rypipe.register_adapter("json", JSONAdapter(), extensions=[".json"])
 > zero-copy export. Pure Python is typically 10-50x slower. Use it for
 > correctness and prototyping; use Rust for throughput.
 
-## See also
+## See also { #see-also }
 
 - [Rust API](./rust-api.md): the Rust engine and `Pipeline` API
 - [Writing a format adapter](./writing-adapters/): adding formats as separate packages

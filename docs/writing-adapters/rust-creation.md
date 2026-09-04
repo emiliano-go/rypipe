@@ -111,6 +111,15 @@ dropped fields saves significant CPU. For maximum performance, implement
 `parse_chunk_generic` which takes a monomorphized sink instead of a trait
 object (5-10% improvement by eliminating vtable dispatch).
 
+/// tip
+
+For maximum performance, implement `parse_chunk_generic` which takes a
+monomorphized sink instead of a trait object. The compiler can then inline
+every `begin_row`/`put_field`/`end_row` call, eliminating vtable dispatch
+(5-10% improvement on the hot path).
+
+///
+
 ## Value types { #value-types }
 
 `Value` variants: `Str(Cow<str>)` (default for text), `Int64(i64)`,
@@ -120,6 +129,14 @@ object (5-10% improvement by eliminating vtable dispatch).
 Always prefer `Cow::Borrowed` when the value is a slice of the input.
 Only use `Cow::Owned` when you must modify the value (e.g., unescape HTML
 entities or normalize encoding).
+
+/// note
+
+`Cow::Borrowed` is safe because the engine copies bytes into Arrow arrays
+before your parse function returns. The borrowed reference never outlives
+the chunk's byte slice — no lifetime issues.
+
+///
 
 ## The ColumnarSink interface { #columnsink-interface }
 
@@ -324,6 +341,14 @@ def test_csv_adapter(tmp_path):
     assert table.num_rows == 2
     assert table.column("name").to_pylist() == ["Alice", "Bob"]
 ```
+
+/// warning
+
+Do not allocate `String` objects in the hot path. Every `Cow::Owned`
+allocation costs ~100 ns. For 10 million fields, that's 1 second of pure
+allocation overhead — easily avoidable with `Cow::Borrowed`.
+
+///
 
 ## Error handling { #error-handling }
 

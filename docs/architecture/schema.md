@@ -1,4 +1,4 @@
-# Schema Architecture
+# Schema Architecture { #schema-architecture }
 
 This page documents the internal architecture of schema handling in rypipe.
 It covers `FrozenSchema`, `DiscoveryOpts`, the schema cache, `ensure_schema`,
@@ -6,7 +6,7 @@ and the fast/merge export paths.
 
 For the adapter-author guide, see [Schema](../writing-adapters/schema.md).
 
-## Overview
+## Overview { #overview }
 
 Schema in rypipe answers three questions:
 
@@ -18,7 +18,7 @@ The engine resolves these questions before parsing starts, builds an immutable
 `FrozenSchema`, and shares it across all workers. This guarantees that every
 batch has identical columns, types, and order.
 
-## Data flow
+## Data flow { #data-flow }
 
 ```
 User provides schema_order + field_types
@@ -40,12 +40,12 @@ ExecutionPlan (compiled, shared via Arc)
                                                     RecordBatch export
 ```
 
-## FrozenSchema
+## FrozenSchema { #frozenschema }
 
 `FrozenSchema` is the engine's immutable representation of the output column
 layout. It is defined in `crates/rypipe-core/src/schema.rs`.
 
-### Structure
+### Structure { #structure }
 
 ```rust
 pub struct FrozenSchema {
@@ -72,7 +72,7 @@ Key design decisions:
 - **`types` is parallel to `names`**: type for column `i` is `types[i]`
 - **`exact` tracks discovery method**: affects error messages and cache behavior
 
-### Construction: explicit schema
+### Construction: explicit schema { #construction-explicit-schema }
 
 When `schema_order` is provided, `FrozenSchema::from_plan` builds the schema
 directly from the declared names:
@@ -104,7 +104,7 @@ Properties:
 - **Exact**: all columns are known, no sampling uncertainty
 - **`exact = true`**: enables the "unknown field is an error" behavior
 
-### Construction: discovered schema
+### Construction: discovered schema { #construction-discovered-schema }
 
 When `schema_order` is empty, the engine discovers column names from the file.
 `FrozenSchema::from_discovered` applies the plan's renames and drops:
@@ -151,7 +151,7 @@ Properties:
 - **`exact = false`**: sampled discovery may miss rare columns
 - **Order**: follows discovery order (file order, then document order)
 
-### Resolution: the hot path
+### Resolution: the hot path { #resolution-the-hot-path }
 
 `FrozenSchema::resolve` maps a raw field name to its output slot:
 
@@ -170,12 +170,12 @@ The `Option<u32>` return value:
 - `Some(slot)`: field maps to output column `slot`
 - `None`: field is dropped (parser should skip it)
 
-## DiscoveryOpts
+## DiscoveryOpts { #discoveryopts }
 
 `DiscoveryOpts` controls how schema discovery works for files without explicit
 schema.
 
-### Structure
+### Structure { #structure }
 
 ```rust
 pub struct DiscoveryOpts {
@@ -190,7 +190,7 @@ pub struct DiscoveryOpts {
 }
 ```
 
-### Default values
+### Default values { #default-values }
 
 ```rust
 impl Default for DiscoveryOpts {
@@ -204,7 +204,7 @@ impl Default for DiscoveryOpts {
 }
 ```
 
-### Discovery strategy
+### Discovery strategy { #discovery-strategy }
 
 **Small files (<=128 MiB)**:
 
@@ -219,7 +219,7 @@ impl Default for DiscoveryOpts {
 - Columns found in any window are included
 - Cost: ~5.3 ms on 16 threads (parallel sampling)
 
-### Accuracy
+### Accuracy { #accuracy }
 
 Sampled discovery captures columns that appear in at least one window. For
 typical CR XML exports:
@@ -237,12 +237,12 @@ unknown field "LateColumn" not in frozen schema (10 columns, exact=false);
 pass schema=[...] with full column list or use full-scan discovery
 ```
 
-## Schema cache
+## Schema cache { #schema-cache }
 
 For batch workloads (many files with the same layout), the engine caches
 discovered schemas to avoid redundant discovery.
 
-### Cache structure
+### Cache structure { #cache-structure }
 
 ```rust
 pub static SCHEMA_CACHE: LazyLock<RwLock<FxHashMap<SchemaCacheKey, SchemaCacheValue>>>
@@ -252,7 +252,7 @@ type SchemaCacheKey = (u64, u64);   // (file_len, sample_hash)
 type SchemaCacheValue = Arc<Vec<String>>;  // discovered column names
 ```
 
-### Layout signature
+### Layout signature { #layout-signature }
 
 `layout_signature` computes a cheap key for caching:
 
@@ -281,7 +281,7 @@ Properties:
 - **Collision-resistant**: 4-window hash for large files
 - **Stable**: same layout always produces the same key
 
-### Cache operations
+### Cache operations { #cache-operations }
 
 **Insert** (`insert_schema_cache`):
 
@@ -313,7 +313,7 @@ pub fn clear_schema_cache() {
 }
 ```
 
-### Cache statistics
+### Cache statistics { #cache-statistics }
 
 ```rust
 pub static SCHEMA_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
@@ -333,12 +333,12 @@ For 1,000 files with the same layout:
 - Files 2-1000: hit (cache lookup ~1 us each)
 - Total: 5.3 ms + 1 ms = 6.3 ms (vs 5.3 s without cache)
 
-## ensure_schema
+## ensure_schema { #ensure_schema }
 
 `ensure_schema` is called by each worker before parsing a chunk. It guarantees
 that all columns from the `FrozenSchema` exist in the `TableBuilder`.
 
-### Algorithm
+### Algorithm { #algorithm }
 
 ```rust
 pub fn ensure_schema(&mut self, schema: &FrozenSchema) -> Result<()> {
@@ -360,7 +360,7 @@ Steps:
    b. Pre-fill with nulls up to the current row count
 3. After this call, the builder has all declared columns
 
-### Why pre-fill with nulls?
+### Why pre-fill with nulls? { #why-pre-fill-with-nulls }
 
 Consider a file where column "D" appears only in rows 500-1000. Without
 `ensure_schema`:
@@ -375,17 +375,17 @@ With `ensure_schema`:
 - Chunk 2: column "D" has values
 - At export time: batches have identical schemas
 
-### Performance
+### Performance { #performance }
 
 `ensure_schema` is called once per chunk, not per row. For 16 chunks, it
 adds ~0.1 ms total (negligible vs parse time).
 
-## sort_columns
+## sort_columns { #sort_columns }
 
 `sort_columns` reorders the internal column list to match `schema_order`.
 It is called at finish time when `schema_order` is non-empty.
 
-### Algorithm
+### Algorithm { #algorithm }
 
 ```rust
 pub fn sort_columns(&mut self) {
@@ -413,7 +413,7 @@ Properties:
 - **O(n log n)** where n = number of columns (typically <100)
 - **Called once**: at finish time, not per row
 
-### Example
+### Example { #example }
 
 Given columns `["D", "A", "C", "B"]` and `schema_order = ["A", "B", "C"]`:
 
@@ -424,12 +424,12 @@ Given columns `["D", "A", "C", "B"]` and `schema_order = ["A", "B", "C"]`:
    - "B" at position 1 -> key = 1
 2. Sorted: `["A", "B", "C", "D"]`
 
-## Fast path vs merge path
+## Fast path vs merge path { #fast-path-vs-merge-path }
 
 The engine has two export paths. The choice depends on whether all batches
 have identical schemas.
 
-### Fast path (parallel export)
+### Fast path (parallel export) { #fast-path }
 
 Conditions:
 
@@ -444,7 +444,7 @@ Behavior:
 - No merge step needed
 - Throughput: ~4,980 MB/s on 533 MB
 
-### Merge path (sequential export)
+### Merge path (sequential export) { #merge-path }
 
 Conditions:
 
@@ -458,7 +458,7 @@ Behavior:
 - `promote_to_variant` handles type mismatches
 - Throughput: ~4,497 MB/s on 533 MB (-10%)
 
-### Path selection
+### Path selection { #path-selection }
 
 ```rust
 fn select_export_path(
@@ -476,7 +476,7 @@ fn select_export_path(
 `schemas_consistent` checks that all engines agree on column variant keys.
 This is guaranteed when `schema_order` is set.
 
-## Column type resolution
+## Column type resolution { #column-type-resolution }
 
 `ExecutionPlan::column_type` resolves the storage type for a column:
 
@@ -505,7 +505,7 @@ Priority:
 
 This is called during `ensure_schema` to create the correct column builder.
 
-## UnknownFieldPolicy
+## UnknownFieldPolicy { #unknownfieldpolicy }
 
 When a field appears in the file but not in the schema, the engine needs to
 know what to do.
@@ -519,7 +519,7 @@ pub enum UnknownFieldPolicy {
 }
 ```
 
-### Error behavior (default)
+### Error behavior (default) { #error-behavior }
 
 With explicit schema (`exact = true`), unknown fields cause a hard error:
 
@@ -530,7 +530,7 @@ pass schema=[...] with full column list or use full-scan discovery
 
 This is the safe default: it prevents silent data loss.
 
-### Skip behavior
+### Skip behavior { #skip-behavior }
 
 With `UnknownFieldPolicy::Skip`, unknown fields are ignored. The engine
 counts occurrences and reports at the end:
@@ -542,9 +542,9 @@ Warning: 3 unknown fields skipped (field_99, field_100, field_101)
 Use this when the file may contain fields not in the schema and you want
 to process only the known fields.
 
-## Integration with the pipeline
+## Integration with the pipeline { #integration-with-the-pipeline }
 
-### How schema flows through the engine
+### How schema flows through the engine { #how-schema-flows-through-the-engine }
 
 ```
 ExecutionPlan
@@ -582,7 +582,7 @@ ExecutionPlan
               +---> column_type(name) -> typed builder
 ```
 
-### How schema interacts with projection
+### How schema interacts with projection { #how-schema-interacts-with-projection }
 
 When `DropFields` is used, the plan's `drop_fields` set is populated.
 During schema construction:
@@ -599,7 +599,7 @@ At export time:
 
 - Dropped fields are not in the output (they were never built)
 
-### How schema interacts with rename
+### How schema interacts with rename { #how-schema-interacts-with-rename }
 
 When `RenameFields` is used, the plan's `field_map` is populated. During
 schema construction:
@@ -613,7 +613,7 @@ During parsing:
 - `put_field("raw_name", ...)` is resolved via `field_map` to the output name
 - The value goes into the renamed column
 
-### How schema interacts with filter
+### How schema interacts with filter { #how-schema-interacts-with-filter }
 
 When `FilterRows` is used, the plan's `filter` is populated. During parsing:
 
@@ -622,7 +622,7 @@ When `FilterRows` is used, the plan's `filter` is populated. During parsing:
 - If `field_types` is set, the predicate uses native comparison
 - If `field_types` is not set, the predicate falls back to string comparison
 
-## Performance budget
+## Performance budget { #performance-budget }
 
 For a 533 MB file on a Ryzen 5800X:
 
@@ -647,7 +647,7 @@ Without explicit schema:
 
 Explicit schema saves ~5.3 ms per file. For 1,000 files, that is 5.3 seconds.
 
-## Thread safety
+## Thread safety { #thread-safety }
 
 `FrozenSchema` is `Clone + Send + Sync`. It is built once and shared via
 `Arc<FrozenSchema>` across all workers. No locks are needed after construction.

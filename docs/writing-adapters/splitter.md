@@ -1,4 +1,4 @@
-# The Splitter Trait
+# The Splitter Trait { #the-splitter-trait }
 
 The `Splitter` trait decides where it is safe to divide an input byte stream
 into independent chunks. The engine calls `find_split_points` to get byte
@@ -7,7 +7,7 @@ offsets, then parses each chunk concurrently via rayon.
 See [Architecture](../architecture/index.md) for how the engine
 uses split points internally.
 
-## Trait definition
+## Trait definition { #trait-definition }
 
 ```rust
 pub trait Splitter: Send + Sync {
@@ -27,7 +27,7 @@ pub trait Splitter: Send + Sync {
 }
 ```
 
-## Required: `next_record_start`
+## Required: `next_record_start` { #required-next_record_start }
 
 This is the only method you must implement. Given a byte position, return the
 position where the next record starts at or after that position.
@@ -52,7 +52,7 @@ fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
 just needs to answer "where does the next record start from here?" The engine
 handles deduplication, sorting, and chunk planning.
 
-## Required: `estimate_bytes_per_row`
+## Required: `estimate_bytes_per_row` { #required-estimate_bytes_per_row }
 
 Called once on a sample of the input (first 64 KB) to estimate row size. The
 bounded executor uses this to plan chunk sizes. Simple newline-counting
@@ -65,7 +65,7 @@ fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
 }
 ```
 
-## Optional: `skip_regions`
+## Optional: `skip_regions` { #optional-skip_regions }
 
 If your format has regions where a candidate delimiter must be ignored (comments,
 CDATA, quoted fields, string literals), implement `skip_regions()`:
@@ -79,7 +79,7 @@ fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
 See [Skip regions](./skip-regions.md) for the full `SkipRegionFinder` interface
 and implementation examples.
 
-## Default: `find_split_points`
+## Default: `find_split_points` { #default-find_split_points }
 
 **Do not override this method** unless you have a measured reason. The default
 implementation provides:
@@ -105,7 +105,7 @@ The default is strictly better than hand-rolled splitting because it applies
 the measured chunk-size floor (`MIN_CHUNK_BYTES = 2 MiB`) that prevents the
 sub-1 MB chunk collapse. See [Chunk planning](./chunk-planning.md).
 
-## What the engine does with split points
+## What the engine does with split points { #what-the-engine-does-with-split-points }
 
 1. `find_split_points` returns `vec![0, 13, 26, 39, ..., bytes.len()]`
 2. The engine converts these to ranges: `[0..13, 13..26, 26..39, ...]`
@@ -117,7 +117,7 @@ The engine guarantees:
 - Empty chunks are discarded
 - Chunks are parsed in parallel with no shared mutable state
 
-## Performance characteristics
+## Performance characteristics { #performance-characteristics }
 
 - `next_record_start` is called once per nominal offset (typically 100-200 times)
 - Each call scans forward from the nominal to find the next record boundary
@@ -125,7 +125,25 @@ The engine guarantees:
 - Skip-region rejection adds O(window × num_openers) per candidate
 - Total split time is < 1% of single-threaded parse time on 500 MB
 
-## Common mistakes
+/// warning
+
+Do not override `find_split_points` unless you have a measured reason. The
+default implementation applies the chunk-size floor (`MIN_CHUNK_BYTES = 2 MiB`)
+that prevents sub-1 MB chunk collapse, handles skip-region rejection, and
+deduplicates split points. Hand-rolled versions almost always get this wrong.
+
+///
+
+/// tip
+
+For most newline-delimited formats, `memchr::memchr(b'\n', ...)` is the
+optimal `next_record_start` implementation. The `memchr` crate uses AVX2 on
+x86_64 and NEON on ARM, scanning 16-32 bytes per cycle. Do not hand-roll
+byte iteration for single-delimiter searches.
+
+///
+
+## Common mistakes { #common-mistakes }
 
 1. **Overriding `find_split_points`**: Bypasses the chunk floor and skip-region
    rejection. The default is almost always better.

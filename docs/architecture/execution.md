@@ -1,4 +1,4 @@
-# Execution: Pipeline, Parallel, Bounded, Input
+# Execution: Pipeline, Parallel, Bounded, Input { #execution-pipeline-parallel-bounded-input }
 
 This page covers how bytes become batches. The same `Splitter` plus
 `RecordParser` plus `ExecutionPlan` are shared across all modes; only the
@@ -6,7 +6,7 @@ driver differs.
 
 See [Data flow](./data-flow.md) for diagrams of each mode.
 
-## Pipeline
+## Pipeline { #pipeline }
 
 ```rust
 pub struct Pipeline<S, P> {
@@ -19,7 +19,7 @@ pub struct Pipeline<S, P> {
 `S: Splitter + Clone` and `P: RecordParser + Clone` so the pipeline can be
 reused across files and modes.
 
-### Methods
+### Methods { #methods }
 
 - `new(splitter, parser)`: Creates with default plan.
 - `with_plan(plan)`: Replaces the plan (builder pattern).
@@ -33,7 +33,7 @@ reused across files and modes.
 All six methods share the same splitter, parser, and plan. The adapter
 implements `Splitter` and `RecordParser` once; the engine handles the rest.
 
-## ParallelExecutor
+## ParallelExecutor { #parallelexecutor }
 
 ```rust
 pub fn parse<P>(
@@ -46,7 +46,7 @@ pub fn parse<P>(
 where P: RecordParser + Clone + Send + Sync
 ```
 
-### Steps
+### Steps { #steps }
 
 1. **Split**: `splitter.find_split_points(bytes, num_chunks)` → `split_points_to_ranges`
 2. **Parse in parallel**: `rayon::into_par_iter` over ranges, each creating a
@@ -57,7 +57,7 @@ where P: RecordParser + Clone + Send + Sync
 4. **Merge path** (auto_dict or inconsistent schemas):
    Sequential `extend` loop → single merged batch.
 
-### Fast path vs merge path
+### Fast path vs merge path { #fast-path-vs-merge-path }
 
 The fast path keeps one batch per chunk (chunked columns, no copy). It
 unifies schema via `unify_variants` and `promote_to_variant` so all batches
@@ -68,12 +68,12 @@ The merge path (`extend` loop) returns a single merged batch and handles
 `auto_dict` visibility (full cardinality) and irreconcilable type errors
 with `Error::Merge` naming the column.
 
-### schemas_consistent
+### schemas_consistent { #schemas_consistent }
 
 Checks that all engines agree on column variant keys. Mixed `int64`/`float64`
 or `string`/`dictionary` falls to merge path for promotion.
 
-## BoundedExecutor
+## BoundedExecutor { #boundedexecutor }
 
 ```rust
 pub struct BoundedExecutor {
@@ -81,7 +81,7 @@ pub struct BoundedExecutor {
 }
 ```
 
-### MemoryBudget
+### MemoryBudget { #memorybudget }
 
 ```rust
 pub struct MemoryBudget { bytes: usize }
@@ -91,7 +91,7 @@ impl MemoryBudget {
 }
 ```
 
-### plan_chunks
+### plan_chunks { #plan_chunks }
 
 Estimates chunk sizes from budget:
 
@@ -104,7 +104,7 @@ Estimates chunk sizes from budget:
 
 `MAX_SPLIT_CHUNKS = 100_000` caps split points to prevent pathological overhead.
 
-### run_bytes
+### run_bytes { #run_bytes }
 
 For each chunk:
 
@@ -114,7 +114,7 @@ For each chunk:
 4. `extend` into batch engine
 5. Flush when `rows_in_batch >= rows_per_batch`
 
-### run (file-based)
+### run (file-based) { #run }
 
 Opens `InputBuffer`. If `Mmap`:
 
@@ -128,7 +128,7 @@ buffer live at a time.
 
 If `Owned` (compressed or small file): delegates to `run_bytes`.
 
-## InputBuffer
+## InputBuffer { #inputbuffer }
 
 ```rust
 enum InputBuffer {
@@ -137,12 +137,12 @@ enum InputBuffer {
 }
 ```
 
-### MmapHandle
+### MmapHandle { #mmaphandle }
 
 Maps the file. On Unix, does `mmap.advise(WillNeed)` if prefault,
 else `Sequential`.
 
-### Compression detection
+### Compression detection { #compression-detection }
 
 Reads first 4 bytes, matches magic:
 - `1f 8b` → gzip (feature `gzip`)
@@ -152,7 +152,7 @@ Reads first 4 bytes, matches magic:
 If detected: `Owned(decompress(path, codec)?)` (read to end).
 Decompressed bytes are served from memory for all modes.
 
-### open
+### open { #open }
 
 ```
 open(path, use_mmap, prefault):
@@ -162,7 +162,7 @@ open(path, use_mmap, prefault):
   → None → Owned(fs::read)
 ```
 
-### Cargo features
+### Cargo features { #cargo-features }
 
 - `gzip = ["dep:flate2"]`
 - `zstd = ["dep:zstd"]`
@@ -170,9 +170,9 @@ open(path, use_mmap, prefault):
 - `compress-all = ["gzip", "zstd", "lz4"]`
 - `mmap = ["dep:memmap2"]`
 
-## Merge
+## Merge { #merge }
 
-### extend
+### extend { #extend }
 
 Merges another `TableBuilder` into self:
 
@@ -181,7 +181,7 @@ Merges another `TableBuilder` into self:
    (`int64` → `float64`, `string` → `dictionary`), then `extend_owned`
 3. Update `row_count`
 
-### engines_to_record_batches
+### engines_to_record_batches { #engines_to_record_batches }
 
 Exports per-chunk builders without serial merge:
 
@@ -190,7 +190,7 @@ Exports per-chunk builders without serial merge:
 3. `par_iter` over engines to build arrays per unified order
 4. Apply `apply_compare_filter` per batch if filter is present
 
-## Arrow export
+## Arrow export { #arrow-export }
 
 `apply_compare_filter` re-applies pure `Compare` and `And` trees using
 Arrow compute kernels. Other filter trees are returned unchanged because

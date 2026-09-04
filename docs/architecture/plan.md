@@ -1,10 +1,10 @@
-# Execution Plan
+# Execution Plan { #execution-plan }
 
 `plan.rs` defines the compiled execution plan that controls all pipeline
 operations. An `ExecutionPlan` is created once per parse and shared (via
 `Arc`) across all chunks.
 
-## Structure
+## Structure { #structure }
 
 ```rust
 pub struct ExecutionPlan {
@@ -20,7 +20,7 @@ pub struct ExecutionPlan {
 }
 ```
 
-### Fields
+### Fields { #fields }
 
 - **`field_map`**: Rename mapping: raw name → output name.
 - **`drop_fields`**: Fields to drop entirely (not stored).
@@ -32,7 +32,7 @@ pub struct ExecutionPlan {
 - **`dict_threshold`**: Max distinct ratio (default 0.05).
 - **`dict_max_size`**: Max dictionary entries (default 256).
 
-## Builder API
+## Builder API { #builder-api }
 
 ```rust
 ExecutionPlan::new()
@@ -44,7 +44,7 @@ ExecutionPlan::new()
     .schema_order(["quantity", "amount", "status"])
 ```
 
-## resolve_field
+## resolve_field { #resolve_field }
 
 The hot path for name resolution:
 
@@ -65,7 +65,7 @@ Application order: rename first, then drop, matching left-to-right pipeline
 semantics. Returns `None` for dropped fields. The adapter checks this before
 extraction.
 
-## column_type
+## column_type { #column_type }
 
 Determines storage variant for a field:
 
@@ -81,7 +81,7 @@ pub fn column_type(&self, name: &str) -> FieldType {
 }
 ```
 
-## FieldType enum
+## FieldType enum { #fieldtype-enum }
 
 ```rust
 pub enum FieldType {
@@ -95,7 +95,7 @@ pub enum FieldType {
 }
 ```
 
-## FilterPredicate
+## FilterPredicate { #filterpredicate }
 
 ```rust
 pub enum FilterPredicate {
@@ -108,14 +108,14 @@ pub enum FilterPredicate {
 }
 ```
 
-### Check method
+### Check method { #check-method }
 
 `check(&columns, &field_index, row_index, &plan)` evaluates the predicate
 against column values for a given row. Short-circuits on `And` (first false)
 and `Or` (first true). For `Compare`, it uses native-typed comparison with
 numeric promotion via `TypedValue`.
 
-### CompareOp
+### CompareOp { #compareop }
 
 ```rust
 pub enum CompareOp { Gt, Lt, Ge, Le, Eq, Ne }
@@ -123,7 +123,7 @@ pub enum CompareOp { Gt, Lt, Ge, Le, Eq, Ne }
 
 Compare uses native-typed comparison with numeric promotion (Int64↔Float64).
 
-## Plan from Python kwargs
+## Plan from Python kwargs { #plan-from-python-kwargs }
 
 `rypipe-python` converts Python kwargs to `ExecutionPlan` via
 `execution_plan_from_kwargs` in `plan_kwargs.rs`:
@@ -139,7 +139,7 @@ The conversion is done by `execution_plan_from_kwargs` in `plan_kwargs.rs`.
 It handles nested filter specs (`and`, `or`, `not`) and validates that
 compare filters have both fields typed or both untyped.
 
-## How plans flow through the system
+## How plans flow through the system { #how-plans-flow-through-the-system }
 
 1. **Adapter creation**: `Pipeline::new(splitter, parser).with_plan(plan)`
 2. **Plan sharing**: `Arc::clone(&self.plan)` for each chunk's `TableBuilder`
@@ -149,7 +149,7 @@ compare filters have both fields typed or both untyped.
 6. **Schema ordering**: `plan.schema_order` used in `sort_columns` and
    `schema_insert_index`
 
-## Filter predicate evaluation
+## Filter predicate evaluation { #filter-predicate-evaluation }
 
 `FilterPredicate::check` evaluates the tree against column values:
 
@@ -176,13 +176,13 @@ pub fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usi
 
 Short-circuiting: `And` stops on first `false`, `Or` stops on first `true`.
 
-## C2 reorder optimization
+## C2 reorder optimization { #c2-reorder-optimization }
 
 For `Compare` predicates, operands are reordered by document position so
 the predicate column is checked first. This enables earlier short-circuit
 in the `And` tree.
 
-## Plan construction from Python
+## Plan construction from Python { #plan-construction-from-python }
 
 ```python
 from rypipe import RenameFields, DropFields, FilterRows, CastTypes

@@ -1,4 +1,4 @@
-# Execution modes
+# Execution modes { #execution-modes }
 
 `rypipe` adapters can expose up to four execution strategies. Choosing the right one is the biggest single decision for memory and throughput.
 
@@ -11,7 +11,7 @@
 
 `auto` lets the adapter pick. A common heuristic is: files under ~8 MiB use columnar; larger files use parallel when memory allows and budget is large; otherwise bounded/parallel streaming. Adapters should document their own heuristic because format split boundaries affect chunk safety.
 
-## Stream mode
+## Stream mode { #stream-mode }
 
 Stream mode uses `BoundedExecutor`. It keeps a memory budget and parses the file in batches:
 
@@ -32,7 +32,7 @@ Use stream mode when:
 - latency per batch matters more than total throughput;
 - parallel merge overhead would dominate (very simple parsers).
 
-## Columnar mode
+## Columnar mode { #columnar-mode }
 
 Columnar mode parses the whole file in one thread and builds one `TableBuilder`. It is the simplest path and avoids all chunking and synchronization overhead. The full table stays in memory until export.
 
@@ -45,7 +45,7 @@ Use columnar mode when:
 
 Columnar mode is often fastest for small files because there is no per-chunk setup and no rayon scheduling.
 
-## Parallel mode
+## Parallel mode { #parallel-mode }
 
 Parallel mode uses `ParallelExecutor`:
 
@@ -62,7 +62,7 @@ Use parallel mode when:
 - you can tolerate higher peak memory for shorter wall-clock time;
 - `auto_dict` and compare filters are off, so the fast path applies.
 
-## Parallel streaming mode
+## Parallel streaming mode { #parallel-streaming-mode }
 
 Parallel streaming (`ParallelStreamingExecutor` `crates/rypipe-core/src/parallel_stream.rs`) parses chunks concurrently with bounded memory:
 
@@ -71,7 +71,7 @@ Parallel streaming (`ParallelStreamingExecutor` `crates/rypipe-core/src/parallel
 3. Worker pool (`std::thread` or `rayon` `ThreadPool`) pulls `Range` + `seq` from a queue, parses into `TableBuilder`, sends `(seq, Result<RecordBatch>)` via `sync_channel(max_in_flight)` (backpressure).
 4. Coordinator orders by `seq` via `BTreeMap` pending and delivers to `BatchConsumer` in file order.
 
-### In-flight management
+### In-flight management { #in-flight-management }
 
 The key to bounded memory is the **in-flight cap**: at most `threads × 2` chunks are being parsed concurrently. This works as follows:
 
@@ -113,7 +113,7 @@ for batch in rypipe.iter_record_batches_parallel("huge.xml", memory="256MB", thr
 
 Small budgets (`64KB`) are faster single-threaded; use `parallel streaming` for `≥256MB`.
 
-## Auto engine selection
+## Auto engine selection { #auto-engine-selection }
 
 The Python `Adapter` layer usually exposes `engine="auto"`. The heuristic is format-specific, but a common default is:
 
@@ -128,7 +128,7 @@ else:
 
 Adapters should expose the engine choice explicitly because the best default depends on split safety, row size variance, and downstream use. A format with expensive per-chunk setup (for example, one that must scan for a global header) may prefer columnar for much larger files than a simple newline-delimited format.
 
-## Trade-offs
+## Trade-offs { #trade-offs }
 
 | Concern | Prefer | Avoid | Why |
 |---------|--------|-------|-----|
@@ -139,13 +139,13 @@ Adapters should expose the engine choice explicitly because the best default dep
 | Deterministic column order | any with `schema_order` | inference | Chunk merges rely on a common schema. |
 | Low cardinality string compression | columnar or parallel with `dictionary_columns` | parallel with `auto_dict` | Auto-dict forces the merge path. |
 
-## GIL behavior
+## GIL behavior { #gil-behavior }
 
 All parse paths release the GIL during the heavy Rust work. The Arrow C Data Interface export re-acquires the GIL briefly. For `read_path_par`, the entire parallel parse runs outside the GIL.
 
 This means parallel mode can saturate CPU from Python without `multiprocessing`, provided the adapter is implemented in Rust and exports Arrow.
 
-## Summary
+## Summary { #summary }
 
 - Use `stream` for huge files or row consumers.
 - Use `columnar` for small-to-medium files and when merge is unavoidable.

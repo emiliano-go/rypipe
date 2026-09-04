@@ -1,4 +1,4 @@
-# rypipe documentation
+# rypipe documentation { #rypipe-documentation }
 
 `rypipe` is a format- and source-agnostic ingestion framework that provides a common
 execution runtime for turning arbitrary record-oriented data sources into typed
@@ -9,7 +9,7 @@ row-oriented format once you provide a small adapter.
 `rypipe` itself does **not** ship parsers for any format. Adapters live in
 separate packages. Install the engine plus the adapters you need.
 
-## What rypipe is
+## What rypipe is { #what-rypipe-is }
 
 - A Rust workspace with two crates:
   - [`rypipe-core`](./architecture/): the generic engine (see [Architecture overview](./architecture/) for crate map).
@@ -20,7 +20,7 @@ separate packages. Install the engine plus the adapters you need.
 - GIL-free parsing: all heavy work runs outside Python's GIL.
 - Memory-bounded and parallel by design.
 
-## Why rypipe
+## Why rypipe { #why-rypipe }
 
 - **One runtime, many formats.** XML, JSON, CSV, HTML, TSV, and any future
   format share the same parallel scheduler, memory-bounded executor, Arrow
@@ -33,7 +33,7 @@ separate packages. Install the engine plus the adapters you need.
   tests, and a tier-ladder profiler that decomposes every nanosecond of the hot
   path.
 
-## What rypipe is not
+## What rypipe is not { #what-rypipe-is-not }
 
 - **Not a query engine.** It handles projection, renaming, dropping, casting,
   filtering, and dictionary encoding. It does not do joins, aggregations, window
@@ -46,9 +46,9 @@ separate packages. Install the engine plus the adapters you need.
   users consume data through `rypipe.read()` and the pipeline API; they do not
   need to write Rust unless creating a new adapter.
 
-## Quick start
+## Quick start { #quick-start }
 
-### From Python
+### From Python { #from-python }
 
 ```bash
 pip install rypipe my-adapter
@@ -58,7 +58,7 @@ pip install rypipe my-adapter
 import rypipe
 import my_adapter
 
-# Format is inferred from the extension; mode defaults to parallel.
+# Format is inferred from the extension; mode defaults to parallel. { #format-is-inferred-from-the-extension-mode-defaults-to-parallel }
 table = rypipe.read(
     "data.myfmt",
     field_types={"amount": "float64"},
@@ -67,7 +67,7 @@ table = rypipe.read(
 print(table.num_rows, table.num_columns)
 ```
 
-### Pipeline API
+### Pipeline API { #pipeline-api }
 
 Adapters that expose a `rypipe.Adapter` subclass give you a chainable pipeline
 with automatic fusion of rename, drop, cast, and filter stages into the Rust
@@ -88,7 +88,7 @@ df = (
 ).to_dataframe()
 ```
 
-### From Rust
+### From Rust { #from-rust }
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
@@ -103,7 +103,7 @@ let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
     .read_path("data.myfmt", false, false)?;
 ```
 
-## Guides
+## Guides { #guides }
 
 - [Architecture](./architecture/): how the pieces fit together (start with [Overview](./architecture/index.md), then [Engine](./architecture/engine.md), [Columnar](./architecture/columnar.md), [Plan](./architecture/plan.md), [Execution](./architecture/execution.md), [Data flow](./architecture/data-flow.md), [Storage](./architecture/storage.md), [Optimizations](./architecture/optimizations.md)).
 - [Why Python?](./why-python.md): why rypipe is Rust core plus Python surface, not pure Rust, the data driven case for the hybrid.
@@ -112,7 +112,7 @@ let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
 - [Writing a format adapter](./writing-adapters/): adding CSV, JSON, etc.
 - [Performance](./performance.md): benchmarks and tuning knobs.
 
-## Repository layout
+## Repository layout { #repository-layout }
 
 ```
 rypipe/

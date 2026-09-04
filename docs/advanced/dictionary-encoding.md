@@ -1,8 +1,8 @@
-# Dictionary encoding
+# Dictionary encoding { #dictionary-encoding }
 
 Arrow dictionaries store string values as integer indices into a separate value table. In `rypipe`, this can reduce memory 5-20x for low-cardinality string columns such as status codes, country codes, or enums. This page explains how dictionaries work in the engine, when they help, and when they force the merge path and hurt throughput.
 
-## How Arrow dictionaries work in rypipe
+## How Arrow dictionaries work in rypipe { #how-arrow-dictionaries-work-in-rypipe }
 
 `rypipe-core` stores string columns in a `StrColumn`: a contiguous byte arena plus `i32` offsets and a validity bitmap. When a column is dictionary-encoded, the engine instead builds:
 
@@ -13,7 +13,7 @@ Arrow dictionaries store string values as integer indices into a separate value 
 
 On Arrow export, these become a `DictionaryArray` with `Int32` indices and a `StringArray` dictionary. The layout is exactly what Arrow compute kernels expect, so downstream filters and group-by operations can use the encoded form directly.
 
-## Explicit `dictionary_columns`
+## Explicit `dictionary_columns` { #explicit-dictionary_columns }
 
 The safest way to use dictionary encoding is to declare it explicitly:
 
@@ -35,7 +35,7 @@ let plan = ExecutionPlan::new()
     .dictionary("status");
 ```
 
-## `auto_dict` heuristics
+## `auto_dict` heuristics { #auto_dict-heuristics }
 
 `auto_dict=True` asks the engine to guess which string columns should be dictionary-encoded. The heuristic has a small runtime cost: it tracks the number of distinct values and the total row count for each string column. When the ratio of distinct values to rows falls below a threshold, the column is upgraded to dictionary encoding at finish time.
 
@@ -51,7 +51,7 @@ Use `auto_dict=False` when:
 - columns are high cardinality or already numeric;
 - you are running parallel mode (see below).
 
-## When dictionaries help memory
+## When dictionaries help memory { #when-dictionaries-help-memory }
 
 Dictionary encoding helps most when:
 
@@ -67,7 +67,7 @@ Examples:
 
 For very short strings (one or two characters), the memory savings are smaller because the string data is already small.
 
-## When dictionaries force the merge path
+## When dictionaries force the merge path { #when-dictionaries-force-the-merge-path }
 
 In parallel mode, dictionary encoding forces the merge path. Each chunk builds its own local dictionary. Before export, the engine must merge all chunk dictionaries into a single global dictionary and remap codes. This has two consequences:
 
@@ -80,7 +80,7 @@ If you need both dictionaries and maximum throughput, consider:
 - declaring `dictionary_columns` explicitly so only those columns pay the merge cost;
 - filtering after export instead of forcing a merge with compare filters.
 
-## Fast path vs merge path
+## Fast path vs merge path { #fast-path-vs-merge-path }
 
 `ParallelExecutor` has two internal paths:
 
@@ -89,7 +89,7 @@ If you need both dictionaries and maximum throughput, consider:
 
 If you need both a `Compare` filter and maximum throughput, consider filtering after export in Python/Arrow instead.
 
-## Summary
+## Summary { #summary }
 
 - Use `dictionary_columns` for known low-cardinality strings; it is predictable and avoids heuristic cost.
 - Use `auto_dict=True` only when cardinality is unknown and the file is small or not parallel.

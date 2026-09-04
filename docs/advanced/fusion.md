@@ -1,4 +1,4 @@
-# Pushdown fusion
+# Pushdown fusion { #pushdown-fusion }
 
 `rypipe` splits ingestion into two layers:
 
@@ -7,7 +7,7 @@
 
 Pushdown fusion is the process by which the Python `Pipeline` rewrites a chain of lightweight stages into a single `ExecutionPlan`. The engine then applies rename, drop, filter, and cast while it parses each row, instead of materializing a full table and running Python transforms afterward.
 
-## A fused pipeline
+## A fused pipeline { #a-fused-pipeline }
 
 ```python
 from rypipe import RenameFields, DropFields, FilterRows, CastTypes
@@ -31,7 +31,7 @@ When the pipeline reaches `to_arrow()`, the stage list is collapsed into one pla
 
 Rows that fail the filter are never materialized; dropped columns are never allocated; and casts happen once inside Rust instead of twice in Python and Rust.
 
-## Fusion pipeline flow
+## Fusion pipeline flow { #fusion-pipeline-flow }
 
 ```
 Python pipeline                         Rust engine
@@ -67,7 +67,7 @@ source | RenameFields | DropFields      ExecutionPlan
 
 Steps 1-4 happen once per row inside the Rust parse loop. No Python objects are created for fused stages.
 
-## The `ExecutionPlan` fields
+## The `ExecutionPlan` fields { #the-executionplan-fields }
 
 ```rust
 pub struct ExecutionPlan {
@@ -85,7 +85,7 @@ pub struct ExecutionPlan {
 
 The plan is built by `_build_plan_kwargs()` on the Python side and consumed by `TableBuilder` on the Rust side.
 
-## Field resolution order
+## Field resolution order { #field-resolution-order }
 
 Inside `TableBuilder`, every emitted field goes through this pipeline:
 
@@ -96,7 +96,7 @@ Inside `TableBuilder`, every emitted field goes through this pipeline:
 
 This order matters. A filter runs on the resolved name, so it must be written in post-rename terms. A cast type is attached to the resolved name as well.
 
-## What is fusable
+## What is fusable { #what-is-fusable }
 
 Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPlan`:
 
@@ -110,7 +110,7 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 
 `FilterRows` is fusable when it uses a constant predicate (`field`, `op`, `value`) with `==` or `!=`, or a column-to-column predicate (`field_a`, `op`, `field_b`). `FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable; they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
 
-## What is not fusable
+## What is not fusable { #what-is-not-fusable }
 
 Non-fusable stages still work, but they run over the Arrow table after the engine finishes:
 
@@ -121,7 +121,7 @@ Non-fusable stages still work, but they run over the Arrow table after the engin
 
 When a non-fusable stage is present, the pipeline automatically falls back to a row stream or table transform path. The fusable prefix still runs in Rust; only the suffix runs in Python.
 
-## Inspecting `plan_overrides` in an adapter
+## Inspecting `plan_overrides` in an adapter { #inspecting-plan_overrides-in-an-adapter }
 
 Adapters that subclass `rypipe.Source` receive fused plan kwargs through `_read_arrow`:
 
@@ -153,7 +153,7 @@ let plan = ExecutionPlan::new()
 
 If an adapter ignores `plan_overrides`, fused stages silently fall back to Python execution over a full table. That is one of the most expensive anti-patterns.
 
-## Order of operations across the pipeline
+## Order of operations across the pipeline { #order-of-operations-across-the-pipeline }
 
 Fusable stages commute in the plan, but the engine applies them in a fixed order:
 
@@ -183,13 +183,13 @@ Because drop happens before type selection, you cannot cast a dropped field.
 Because every filter, including column-to-column comparisons, runs before the
 row is committed, rejected rows consume no Arrow storage.
 
-## When fusion does not help
+## When fusion does not help { #when-fusion-does-not-help }
 
 Fusion is not free if the adapter cannot act on the plan. An adapter that always parses every field into Python objects and then builds Arrow will not benefit; the engine must receive fields through `put_field` and honor `wants()`. If the adapter is a thin wrapper around a library that returns full Python dicts, fusion only removes a small amount of Python overhead.
 
 Fusion also cannot help when the workload is dominated by I/O. If the file is on a slow network share, reducing CPU work may not change wall-clock time. Profile first.
 
-## Summary
+## Summary { #summary }
 
 - Fuse `RenameFields`, `DropFields`, `CastTypes`, and `FilterRows` predicates
   (constant and column-to-column) by implementing `_read_arrow(plan_overrides=...)`.

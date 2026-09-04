@@ -1,4 +1,4 @@
-# Engine: TableBuilder
+# Engine: TableBuilder { #engine-tablebuilder }
 
 `TableBuilder` (`engine/table_builder.rs`) is the central structure. It implements
 `ColumnarSink` and is the only production sink that most adapters need. Every
@@ -8,7 +8,7 @@ exported from it.
 See [Data flow](./data-flow.md) for how `TableBuilder` is created and called
 in each execution mode.
 
-## Structure
+## Structure { #structure }
 
 ```rust
 pub struct TableBuilder {
@@ -27,7 +27,7 @@ pub struct TableBuilder {
 }
 ```
 
-### Field explanations
+### Field explanations { #field-explanations }
 
 - **`columns: Vec<ColumnBuilder>`**: Dense column storage. Indexing
   `columns[idx]` is a bounds-checked array access, not a hash probe. This
@@ -66,7 +66,7 @@ pub struct TableBuilder {
 - **`current_ordinal: u32`**: Tracks which ordinal is being processed
   within the current row.
 
-## Constructors
+## Constructors { #constructors }
 
 - **`new()`**: Empty, default plan.
 - **`with_capacity(cap)`**: Pre-sizes column storage.
@@ -75,12 +75,12 @@ pub struct TableBuilder {
 
 All constructors initialize the three vectors and the map as empty.
 
-## Core row protocol
+## Core row protocol { #core-row-protocol }
 
 Adapters call `begin_row`, `put_field` (or `put_field_resolved`), `end_row`.
 The engine implements these as:
 
-### begin_row
+### begin_row { #begin_row }
 
 ```rust
 fn begin_row(&mut self) {
@@ -92,7 +92,7 @@ fn begin_row(&mut self) {
 No-op for the common case (no filter). Row boundaries are tracked by
 `row_count` and `row_dirty`.
 
-### push_field (called by put_field)
+### push_field (called by put_field) { #push_field }
 
 ```rust
 fn push_field(&mut self, name: &str, value: Value<'_>) {
@@ -130,7 +130,7 @@ fn push_field(&mut self, name: &str, value: Value<'_>) {
 }
 ```
 
-### push_field_resolved (the hot path)
+### push_field_resolved (the hot path) { #push_field_resolved }
 
 ```rust
 fn push_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
@@ -148,7 +148,7 @@ fn push_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
 }
 ```
 
-### ensure_column_idx
+### ensure_column_idx { #ensure_column_idx }
 
 ```rust
 fn ensure_column_idx(&mut self, name: &str) -> usize {
@@ -177,7 +177,7 @@ fn ensure_column_idx(&mut self, name: &str) -> usize {
 }
 ```
 
-### finish_row (the dirty optimization)
+### finish_row (the dirty optimization) { #finish_row }
 
 Instead of looping over all columns and pushing `None` for missing ones, the
 engine uses the `row_dirty` bitmask with a fast path for dense rows:
@@ -218,7 +218,7 @@ fn finish_row(&mut self) {
 For 10 columns where 8 are present each row, this saves 80% of null-fill
 pushes. The fast path skips the loop entirely for dense rows.
 
-### finish (Arrow export)
+### finish (Arrow export) { #finish }
 
 ```rust
 fn finish(&mut self) -> Result<RecordBatch> {
@@ -246,7 +246,7 @@ fn finish(&mut self) -> Result<RecordBatch> {
 }
 ```
 
-## Predicate-first evaluation
+## Predicate-first evaluation { #predicate-first-evaluation }
 
 When a filter is active, `RowBuffer` holds `(slot, Value<'static>)` pairs
 instead of pushing to columns. After each field, the predicate is evaluated
@@ -259,7 +259,7 @@ pop-on-reject.
 
 See [Optimizations](./optimizations.md) for the full predicate-first design.
 
-## Layout prediction (expect_slot)
+## Layout prediction (expect_slot) { #layout-prediction }
 
 After the first row, the engine caches `(slot, raw_name_bytes)` per ordinal.
 On subsequent rows, the adapter calls `expect_slot(ordinal)` and compares
@@ -267,14 +267,14 @@ raw bytes via memcmp. On match, `put_field_at(slot, value)` pushes directly.
 
 See [Decoder API](./decoder.md) for the adapter-side interface.
 
-## Invariants
+## Invariants { #invariants }
 
 - `columns.len() == field_index.len()` always
 - `row_dirty.len() == (columns.len() + 63) / 64` always
 - After `finish_row`: all dirty bits are clear
 - `take_column` keeps vectors in sync via swap_remove patching
 
-## Tests
+## Tests { #tests }
 
 Inside `engine::tests`: `LineParser` plus `LineSplitter` exercise the same
 `put_field` path used by real adapters. Tests cover `extend`, last-write-wins,

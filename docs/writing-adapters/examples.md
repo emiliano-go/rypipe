@@ -1,8 +1,8 @@
-# Worked Examples
+# Worked Examples { #worked-examples }
 
-## CSV Adapter
+## CSV Adapter { #csv-adapter }
 
-### Splitter
+### Splitter { #splitter }
 
 CSV splitting must respect quoted fields. A newline inside `"..."` is not a
 record boundary.
@@ -49,7 +49,7 @@ impl SkipRegionFinder for CsvSkipRegions {
 }
 ```
 
-### Parser
+### Parser { #parser }
 
 ```rust
 use std::borrow::Cow;
@@ -81,7 +81,7 @@ impl RecordParser for CsvParser {
 }
 ```
 
-### Usage
+### Usage { #usage }
 
 ```rust
 let pipeline = Pipeline::new(CsvSplitter, CsvParser {
@@ -92,9 +92,18 @@ let batch = pipeline.read_path("data.csv", false, false)?;
 
 ---
 
-## JSONL Adapter
+/// warning
 
-### Splitter
+CSV splitting must handle quoted fields. A newline inside `"..."` is not a
+record boundary — without `skip_regions`, the splitter will break rows
+mid-quote, producing corrupt chunks. Always implement `SkipRegionFinder`
+for CSV.
+
+///
+
+## JSONL Adapter { #jsonl-adapter }
+
+### Splitter { #splitter }
 
 JSONL is newline-delimited JSON. Each line is one record.
 
@@ -115,7 +124,7 @@ impl Splitter for JsonlSplitter {
 
 No skip regions needed (JSON strings don't contain bare newlines in JSONL).
 
-### Parser
+### Parser { #parser }
 
 ```rust
 struct JsonlParser;
@@ -163,9 +172,18 @@ impl RecordParser for JsonlParser {
 
 ---
 
-## TSV Adapter
+/// tip
 
-### Splitter
+JSON values are inherently typed — `serde_json::Number` maps cleanly to
+`Value::Int64` or `Value::Float64`. Avoid converting everything to strings
+when your format already has a typed representation. Emit typed values
+directly to skip post-parse casting.
+
+///
+
+## TSV Adapter { #tsv-adapter }
+
+### Splitter { #splitter }
 
 TSV is tab-delimited. Simple newline splitting.
 
@@ -184,7 +202,7 @@ impl Splitter for TsvSplitter {
 }
 ```
 
-### Parser
+### Parser { #parser }
 
 ```rust
 struct TsvParser { header: Vec<String> }
