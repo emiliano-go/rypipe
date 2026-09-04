@@ -223,17 +223,20 @@ fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
 }
 ```
 
-See [Sink](./sink.md) for the full method reference and fast paths.
+See [Schema](./schema.md) for schema performance and [Sink](./sink.md) for the
+full `ColumnarSink` method reference.
 
 ## How to squeeze performance
 
-1. **Use `scan::find` instead of raw `memchr`**: adds O(1) fast path
-2. **Borrow strings with `Cow::Borrowed`**: avoids allocation for non-entity text
-3. **Check `wants()` before expensive extraction**: skip dropped fields entirely
-4. **Use `resolve` + `put_field_resolved`**: single hash probe for expensive extraction
-5. **Emit typed `Value` variants**: `Int64`/`Float64` skip string-to-number conversion
-6. **Implement `skip_regions`**: let the engine reject false-positive split points
-7. **Implement `parse_chunk_generic`**: devirtualized sink calls for hot paths
+1. **Declare schema upfront**: `schema_order` + `field_types` skip discovery,
+   stabilize column order, and enable typed arrays (+80% with projection)
+2. **Use `scan::find` instead of raw `memchr`**: adds O(1) fast path
+3. **Borrow strings with `Cow::Borrowed`**: avoids allocation for non-entity text
+4. **Check `wants()` before expensive extraction**: skip dropped fields entirely
+5. **Use `resolve` + `put_field_resolved`**: single hash probe for expensive extraction
+6. **Emit typed `Value` variants**: `Int64`/`Float64` skip string-to-number conversion
+7. **Implement `skip_regions`**: let the engine reject false-positive split points
+8. **Implement `parse_chunk_generic`**: devirtualized sink calls for hot paths
 
 See [Scan primitives](./scan.md) for byte-searching, [Skip regions](./skip-regions.md)
 for comment/CDATA handling, and [Chunk planning](./chunk-planning.md) for the
