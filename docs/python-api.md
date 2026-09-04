@@ -65,15 +65,21 @@ kwargs. Without fusion, they fall back to Python execution over a full table.
 
 ### Sinks
 
+Sinks convert pipeline results to various output formats. Source methods
+(`to_arrow`, `to_pandas`, etc.) materialize the full result set. Pipeline
+sinks (`to_dataframe`, `to_csv`, `collect`) work on the pipeline object
+directly and try the fused Arrow path first, falling back to dict iteration.
+
 ```python
 from crxml import to_dataframe, to_csv, collect
 
+# Source methods: materialize the full result
 table = src.to_arrow()
 df = src.to_pandas()
 df = src.to_polars()
 src.to_parquet("out.parquet")
 
-# Or use pipeline sinks
+# Pipeline sinks: work on pipeline objects
 df = to_dataframe(pipeline)
 to_csv(pipeline, "out.csv")
 rows = collect(pipeline)
@@ -81,16 +87,24 @@ rows = collect(pipeline)
 
 ### Streaming batches
 
+For files larger than available RAM, use `iter_record_batches` with a memory
+budget. The engine parses chunks sequentially, keeping only the current chunk
+in memory. This is slower than the full-table path but allows processing
+files of any size.
+
 ```python
 for batch in src.iter_record_batches(memory="256MiB"):
     process(batch)
 ```
 
-Yields `pyarrow.RecordBatch` objects with bounded memory.
+Yields `pyarrow.RecordBatch` objects one at a time. The `memory` parameter
+accepts an int (bytes) or a human-readable string like `"64MB"` or `"500MiB"`.
 
 ### Plan kwargs
 
-All `Source` constructors accept pushdown kwargs:
+These kwargs control how the engine parses and transforms data. They are
+passed to the adapter's `read` method. When the adapter supports fusion,
+these kwargs are pushed into the Rust parse loop for maximum performance.
 
 | Kwarg | Type | Effect |
 |-------|------|--------|
@@ -103,6 +117,11 @@ All `Source` constructors accept pushdown kwargs:
 | `prefault` | `bool` | `MADV_WILLNEED` when mmap is enabled |
 
 ### Filters
+
+Filters are evaluated per-row during parsing. Rows that fail the filter are
+discarded before any Python objects are created. Use constant filters for
+simple equality checks, column-to-column comparisons for range queries, and
+boolean combinators for complex logic.
 
 Constant equality/inequality:
 
@@ -128,6 +147,9 @@ FilterRowsAny(
 ```
 
 ### Exceptions
+
+These exceptions are raised by the adapter and can be caught with
+`try/except`:
 
 | Exception | Meaning |
 |-----------|---------|
@@ -162,10 +184,14 @@ See [Schema](./advanced/schema-and-types.md) for details.
 
 ## Adapter authors
 
+Adapter authors implement the Rust `Splitter` and `RecordParser` traits for
+a new format, then expose a Python class that registers with `rypipe`. See
+[Writing a format adapter](./writing-adapters/) for the full guide.
+
 ### `rypipe.Source`
 
-Abstract base class. Implement `_read_arrow` to get pipelines, stages, and
-sinks for free:
+Abstract base class for adapters. Implement `_read_arrow` to get pipelines,
+stages, and sinks for free:
 
 ```python
 from rypipe import Source
@@ -175,6 +201,7 @@ class MySource(Source):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
+        # Pass merged plan to your Rust reader
         return my_rust_read(str(self._path), **plan)
 ```
 
@@ -192,6 +219,8 @@ class CsvAdapter(Adapter):
 
 ### Registration
 
+Register your adapter so `rypipe.read()` can find it:
+
 ```python
 import rypipe
 
@@ -199,6 +228,8 @@ rypipe.register_adapter("csv", CsvAdapter(), extensions=[".csv"])
 ```
 
 ### Pure-Python adapters
+
+You can write an adapter entirely in Python without Rust:
 
 ```python
 import rypipe, pyarrow as pa
@@ -215,7 +246,8 @@ rypipe.register_adapter("json", JSONAdapter(), extensions=[".json"])
 
 > **Performance warning:** Pure-Python adapters run at Python speed. The Rust
 > `Splitter`/`RecordParser` traits deliver 4+ GB/s via SIMD scanning and
-> zero-copy export. Pure Python is typically 10-50x slower.
+> zero-copy export. Pure Python is typically 10-50x slower. Use it for
+> correctness and prototyping; use Rust for throughput.
 
 ## See also
 
