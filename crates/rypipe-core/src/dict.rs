@@ -74,7 +74,7 @@ pub struct DictValues {
 
 /// Unify per-chunk dictionaries with the seed.
 ///
-/// Works with `ColumnBuilder::Dictionary { codes, dict, index }`.
+/// Works with `ColumnBuilder::Dictionary { codes, data, offsets, index }`.
 /// Seed codes are `0..seed.len()`, overflow are `seed.len()..`.
 pub(crate) fn unify_dictionaries(
     seed: &SeedDict,
@@ -91,12 +91,15 @@ pub(crate) fn unify_dictionaries(
 
     // Collect overflow values not in seed
     for col in locals {
-        if let ColumnBuilder::Dictionary { dict, .. } = col {
-            for s in dict.iter().skip(seed.len()) {
-                let k: Box<str> = s.clone().into_boxed_str();
+        if let ColumnBuilder::Dictionary { data, offsets, .. } = col {
+            for i in seed.len()..(offsets.len() - 1) {
+                let start = offsets[i] as usize;
+                let end = offsets[i + 1] as usize;
+                let val = std::str::from_utf8(&data[start..end]).unwrap_or("");
+                let k: Box<str> = val.into();
                 if !global_index.contains_key(&k) {
                     global_index.insert(k.clone(), next_code);
-                    global_data.extend_from_slice(s.as_bytes());
+                    global_data.extend_from_slice(val.as_bytes());
                     global_offsets.push(global_data.len() as i32);
                     next_code += 1;
                 }
@@ -112,12 +115,15 @@ pub(crate) fn unify_dictionaries(
     // Build remap tables: local code -> global code
     let mut remaps = Vec::with_capacity(locals.len());
     for col in locals {
-        if let ColumnBuilder::Dictionary { dict, index, .. } = col {
-            let local_len = dict.len();
+        if let ColumnBuilder::Dictionary { data, offsets, index, .. } = col {
+            let local_len = offsets.len() - 1;
             let mut map = Vec::with_capacity(local_len);
             let mut is_identity = true;
-            for s in dict {
-                let k: Box<str> = s.clone().into_boxed_str();
+            for i in 0..local_len {
+                let start = offsets[i] as usize;
+                let end = offsets[i + 1] as usize;
+                let val = std::str::from_utf8(&data[start..end]).unwrap_or("");
+                let k: Box<str> = val.into();
                 let g = *global_index.get(&k).unwrap();
                 let local = *index.get(k.as_ref()).unwrap();
                 if g != local {
@@ -126,9 +132,9 @@ pub(crate) fn unify_dictionaries(
                 map.push(g);
             }
             // If no overflow, it's essentially identity if dict == seed
-            if dict.len() == seed.len() && is_identity {
+            if local_len == seed.len() && is_identity {
                 // All seed, identity
-            } else if dict.len() > seed.len() {
+            } else if local_len > seed.len() {
                 is_identity = false;
             }
             remaps.push(RemapTable { map, is_identity });

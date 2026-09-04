@@ -712,3 +712,531 @@ fn direct_table_builder_extend_preserves_all_rows_and_columns() {
     assert!(c.is_null(0));
     assert_eq!(c.value(2), "5");
 }
+
+// ---------------------------------------------------------------------------
+// 11. Dictionary-specific: push, codes, Arrow export, round-trip
+
+#[test]
+fn dictionary_push_and_codes() {
+    let plan = ExecutionPlan::new().dictionary("X");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "X=alpha\nX=beta\nX=alpha\nX=gamma\nX=beta\n";
+    let batch = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(batch.num_rows(), 5);
+    let col = batch.column_by_name("X").unwrap();
+    let dict_arr = col.as_dictionary::<arrow::datatypes::Int32Type>();
+    let values = dict_arr.values().as_string::<i32>();
+    assert_eq!(values.len(), 3); // alpha, beta, gamma
+    // Check codes are valid (0..3)
+    let codes = dict_arr.keys();
+    for i in 0..5 {
+        let code = codes.value(i);
+        assert!(code < 3, "code {code} out of range");
+    }
+}
+
+#[test]
+fn dictionary_with_nulls() {
+    let plan = ExecutionPlan::new().dictionary("X");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "X=alpha\nX=beta\nX=alpha\n";
+    let batch = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(batch.num_rows(), 3);
+    let col = batch.column_by_name("X").unwrap();
+    assert_eq!(col.null_count(), 0);
+    let dict_arr = col.as_dictionary::<arrow::datatypes::Int32Type>();
+    let values = dict_arr.values().as_string::<i32>();
+    assert_eq!(values.len(), 2); // alpha, beta
+}
+
+#[test]
+fn dictionary_empty_column() {
+    let plan = ExecutionPlan::new().dictionary("X");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "Y=1\nY=2\n"; // X never appears
+    let batch = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(batch.num_rows(), 2);
+    let col = batch.column_by_name("X");
+    assert!(col.is_none()); // Column doesn't exist if never pushed
+}
+
+#[test]
+fn dictionary_single_value() {
+    let plan = ExecutionPlan::new().dictionary("X");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data: String = (0..100).map(|_| "X=same\n").collect();
+    let batch = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(batch.num_rows(), 100);
+    let col = batch.column_by_name("X").unwrap();
+    let dict_arr = col.as_dictionary::<arrow::datatypes::Int32Type>();
+    let values = dict_arr.values().as_string::<i32>();
+    assert_eq!(values.len(), 1); // only "same"
+    // All codes should be 0
+    let codes = dict_arr.keys();
+    for i in 0..100 {
+        assert_eq!(codes.value(i), 0);
+    }
+}
+
+#[test]
+fn dictionary_many_values() {
+    let plan = ExecutionPlan::new().dictionary("X");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data: String = (0..200).map(|i| format!("X=val{i}\n")).collect();
+    let batch = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(batch.num_rows(), 200);
+    let col = batch.column_by_name("X").unwrap();
+    let dict_arr = col.as_dictionary::<arrow::datatypes::Int32Type>();
+    let values = dict_arr.values().as_string::<i32>();
+    assert_eq!(values.len(), 200); // all unique
+}
+
+#[test]
+fn dictionary_across_all_modes() {
+    let plan = ExecutionPlan::new().dictionary("X");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data: String = (0..500)
+        .map(|i| format!("X={}\n", if i % 3 == 0 { "alpha" } else if i % 3 == 1 { "beta" } else { "gamma" }))
+        .collect();
+    let bytes = data.as_bytes();
+    let single = p.read_bytes(bytes).unwrap();
+    let par = p.read_bytes_par(bytes, 4).unwrap();
+    let stream = p.read_bytes_stream(bytes, MemoryBudget::new(1024)).unwrap();
+    assert_batches_equal(std::slice::from_ref(&single), &par);
+    assert_batches_equal(&[single.clone()], &stream);
+    // Verify dictionary encoding
+    let col = single.column_by_name("X").unwrap();
+    assert_eq!(col.data_type(), &arrow::datatypes::DataType::Dictionary(
+        Box::new(arrow::datatypes::DataType::Int32),
+        Box::new(arrow::datatypes::DataType::Utf8),
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// 12. Column-to-column compare filters
+
+#[test]
+fn plan_compare_filter_no_data_loss() {
+    let plan = ExecutionPlan::new()
+        .type_as("A", FieldType::Int64)
+        .type_as("B", FieldType::Int64)
+        .filter_compare("A", rypipe_core::CompareOp::Gt, "B");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "A=10 B=5\nA=3 B=7\nA=20 B=10\n";
+    let single = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(single.num_rows(), 2); // rows 1 and 3 (10>5, 20>10)
+    let a = single.column_by_name("A").unwrap()
+        .as_primitive::<arrow::datatypes::Int64Type>();
+    assert_eq!(a.value(0), 10);
+    assert_eq!(a.value(1), 20);
+    let par = p.read_bytes_par(data.as_bytes(), 2).unwrap();
+    let stream = p.read_bytes_stream(data.as_bytes(), MemoryBudget::new(128)).unwrap();
+    assert_batches_equal(std::slice::from_ref(&single), &par);
+    assert_batches_equal(&[single], &stream);
+}
+
+#[test]
+fn plan_compare_filter_with_typed_columns() {
+    let plan = ExecutionPlan::new()
+        .type_as("A", FieldType::Int64)
+        .type_as("B", FieldType::Int64)
+        .filter_compare("A", rypipe_core::CompareOp::Gt, "B");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "A=10 B=5\nA=3 B=7\nA=20 B=10\n";
+    let single = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(single.num_rows(), 2);
+    let a = single.column_by_name("A").unwrap()
+        .as_primitive::<arrow::datatypes::Int64Type>();
+    assert_eq!(a.value(0), 10);
+    assert_eq!(a.value(1), 20);
+}
+
+// ---------------------------------------------------------------------------
+// 13. Filter predicate trees (And, Or, Not) edge cases
+
+#[test]
+fn plan_filter_and_both_true() {
+    let plan = ExecutionPlan {
+        filter: Some(FilterPredicate::all(
+            FilterPredicate::Equal { field: "A".into(), value: "1".into() },
+            FilterPredicate::Equal { field: "B".into(), value: "2".into() },
+        )),
+        ..Default::default()
+    };
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "A=1 B=2\nA=1 B=9\nA=9 B=2\n";
+    let single = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(single.num_rows(), 1); // only first row
+}
+
+#[test]
+fn plan_filter_or_either_true() {
+    let plan = ExecutionPlan {
+        filter: Some(FilterPredicate::any(
+            FilterPredicate::Equal { field: "A".into(), value: "1".into() },
+            FilterPredicate::Equal { field: "B".into(), value: "2".into() },
+        )),
+        ..Default::default()
+    };
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "A=1 B=9\nA=9 B=2\nA=9 B=9\n";
+    let single = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(single.num_rows(), 2); // first two rows
+}
+
+#[test]
+fn plan_filter_not_equal() {
+    let plan = ExecutionPlan {
+        filter: Some(FilterPredicate::not(FilterPredicate::Equal {
+            field: "A".into(),
+            value: "drop".into(),
+        })),
+        ..Default::default()
+    };
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "A=keep\nA=drop\nA=keep\n";
+    let single = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(single.num_rows(), 2);
+    let a = single.column_by_name("A").unwrap().as_string::<i32>();
+    assert_eq!(a.value(0), "keep");
+    assert_eq!(a.value(1), "keep");
+}
+
+#[test]
+fn plan_filter_nested_and_or() {
+    // (A=1 AND B=2) OR (C=keep)
+    let plan = ExecutionPlan {
+        filter: Some(FilterPredicate::any(
+            FilterPredicate::all(
+                FilterPredicate::Equal { field: "A".into(), value: "1".into() },
+                FilterPredicate::Equal { field: "B".into(), value: "2".into() },
+            ),
+            FilterPredicate::Equal { field: "C".into(), value: "keep".into() },
+        )),
+        ..Default::default()
+    };
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "A=1 B=2 C=x\nA=9 B=9 C=keep\nA=9 B=9 C=x\n";
+    let single = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(single.num_rows(), 2); // row1 (A1&B2) and row2 (C=keep)
+}
+
+// ---------------------------------------------------------------------------
+// 14. Bounded executor with different budget sizes
+
+#[test]
+fn bounded_executor_small_budget() {
+    let p = pipeline();
+    let data: String = (0..100).map(|i| format!("A={i} B={}\n", i * 2)).collect();
+    let bytes = data.as_bytes();
+    // Very small budget (64 bytes)
+    let stream = p.read_bytes_stream(bytes, MemoryBudget::new(64)).unwrap();
+    let total: usize = stream.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 100);
+}
+
+#[test]
+fn bounded_executor_large_budget() {
+    let p = pipeline();
+    let data: String = (0..100).map(|i| format!("A={i} B={}\n", i * 2)).collect();
+    let bytes = data.as_bytes();
+    // Large budget (1 MB)
+    let stream = p.read_bytes_stream(bytes, MemoryBudget::new(1_000_000)).unwrap();
+    let total: usize = stream.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 100);
+}
+
+#[test]
+fn bounded_executor_exact_budget() {
+    let p = pipeline();
+    let data = "A=1 B=2\nA=3 B=4\nA=5 B=6\n";
+    let stream = p.read_bytes_stream(data.as_bytes(), MemoryBudget::new(64)).unwrap();
+    let total: usize = stream.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 3);
+}
+
+// ---------------------------------------------------------------------------
+// 15. Splitter edge cases
+
+#[test]
+fn splitter_empty_input() {
+    let splitter = LineSplitter;
+    let points = splitter.find_split_points(b"", 4);
+    assert_eq!(points, vec![0, 0]);
+}
+
+#[test]
+fn splitter_single_newline() {
+    let splitter = LineSplitter;
+    let points = splitter.find_split_points(b"\n", 4);
+    assert!(points.len() >= 2);
+    assert_eq!(points[0], 0);
+    assert_eq!(*points.last().unwrap(), 1);
+}
+
+#[test]
+fn splitter_no_newlines() {
+    let splitter = LineSplitter;
+    let points = splitter.find_split_points(b"hello world", 4);
+    assert_eq!(points, vec![0, 11]);
+}
+
+#[test]
+fn splitter_many_newlines() {
+    let splitter = LineSplitter;
+    let data = (0..1000).map(|i| format!("X={i}\n")).collect::<String>();
+    let bytes = data.as_bytes();
+    let points = splitter.find_split_points(bytes, 8);
+    assert!(points.len() >= 2);
+    assert_eq!(points[0], 0);
+    assert_eq!(*points.last().unwrap(), bytes.len());
+    // All points must be strictly increasing
+    assert!(points.windows(2).all(|w| w[0] < w[1]));
+}
+
+#[test]
+fn splitter_estimate_bytes_per_row() {
+    let splitter = LineSplitter;
+    let sample = b"A=1 B=2\nA=3 B=4\nA=5 B=6\n";
+    let est = splitter.estimate_bytes_per_row(sample);
+    assert!(est > 0);
+    assert!(est <= sample.len());
+}
+
+// ---------------------------------------------------------------------------
+// 16. RecordParser edge cases
+
+#[test]
+fn parser_validate_rejects_invalid_utf8() {
+    let parser = LineParser;
+    let invalid_utf8 = b"\xff\xfe\xfd";
+    assert!(parser.validate(invalid_utf8).is_err());
+}
+
+#[test]
+fn parser_validate_accepts_valid_utf8() {
+    let parser = LineParser;
+    let valid = b"A=1 B=2\n";
+    assert!(parser.validate(valid).is_ok());
+}
+
+#[test]
+fn parser_handles_empty_lines() {
+    let parser = LineParser;
+    let mut sink = TableBuilder::new();
+    let data = b"\n\nA=1\n\nB=2\n\n";
+    parser.parse_chunk(data, &mut sink).unwrap();
+    assert_eq!(sink.num_rows(), 2);
+}
+
+#[test]
+fn parser_handles_partial_lines() {
+    let parser = LineParser;
+    let mut sink = TableBuilder::new();
+    let data = b"A=1 B=2\nA=3"; // no trailing newline
+    parser.parse_chunk(data, &mut sink).unwrap();
+    // Should get 2 rows: complete line + partial line (parser doesn't discard partial)
+    assert_eq!(sink.num_rows(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// 17. All column types via Pipeline (exercises all ColumnBuilder variants)
+
+#[test]
+fn all_column_types_push_and_export() {
+    let variants: Vec<(&str, FieldType)> = vec![
+        ("S", FieldType::String),
+        ("I", FieldType::Int64),
+        ("F", FieldType::Float64),
+        ("B", FieldType::Boolean),
+        ("D", FieldType::Date32),
+        ("T", FieldType::Timestamp(arrow::datatypes::TimeUnit::Microsecond)),
+        ("P", FieldType::Dictionary),
+    ];
+    for (name, ft) in &variants {
+        let plan = ExecutionPlan::new().type_as(*name, ft.clone());
+        let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+        let data = format!("{name}=test\n{name}=value\n{name}=ok\n");
+        let batch = p.read_bytes(data.as_bytes()).unwrap();
+        assert_eq!(batch.num_rows(), 3, "failed for {name}");
+        assert!(batch.column_by_name(name).is_some(), "column {name} missing");
+    }
+}
+
+#[test]
+fn column_split_off_preserves_values() {
+    let plan = ExecutionPlan::new();
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data: String = (0..8).map(|i| format!("X=v{i}\n")).collect();
+    let batches = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(batches.num_rows(), 8);
+    let col = batches.column_by_name("X").unwrap().as_string::<i32>();
+    for i in 0..8 {
+        assert_eq!(col.value(i), format!("v{i}"));
+    }
+}
+
+#[test]
+fn column_extend_preserves_all_rows() {
+    let p = pipeline();
+    let d1 = "A=1 B=2\nA=3\n";
+    let d2 = "B=4 C=5\n";
+    let b1 = p.read_bytes(d1.as_bytes()).unwrap();
+    let b2 = p.read_bytes(d2.as_bytes()).unwrap();
+    // Verify each batch independently
+    assert_eq!(b1.num_rows(), 2);
+    assert_eq!(b2.num_rows(), 1);
+    // Spot-check values in first batch
+    let a = b1.column_by_name("A").unwrap().as_string::<i32>();
+    assert_eq!(a.value(0), "1");
+    assert_eq!(a.value(1), "3");
+    // Second batch has C but not A
+    assert!(b2.column_by_name("A").is_none());
+    let c = b2.column_by_name("C").unwrap().as_string::<i32>();
+    assert_eq!(c.value(0), "5");
+}
+
+// ---------------------------------------------------------------------------
+// 18. Filter view and filter value consistency
+
+#[test]
+fn get_filter_view_matches_get_for_strings() {
+    let plan = ExecutionPlan::new();
+    let mut tb = TableBuilder::with_plan(4, Arc::new(plan));
+    tb.put_field("X", Value::Str(Cow::Borrowed("hello")));
+    tb.end_row();
+    tb.put_field("X", Value::Str(Cow::Borrowed("world")));
+    tb.end_row();
+    let batch = tb.finish().unwrap();
+    let col = batch.column_by_name("X").unwrap().as_string::<i32>();
+    assert_eq!(col.value(0), "hello");
+    assert_eq!(col.value(1), "world");
+}
+
+// ---------------------------------------------------------------------------
+// 19. Schema order with many columns
+
+#[test]
+fn schema_order_reorders_correctly() {
+    let plan = ExecutionPlan::new().schema_order(["Z", "Y", "X", "W", "V"]);
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "V=1 W=2 X=3 Y=4 Z=5\n";
+    let batch = p.read_bytes(data.as_bytes()).unwrap();
+    let schema = batch.schema();
+    let names: Vec<&str> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    assert_eq!(names, vec!["Z", "Y", "X", "W", "V"]);
+}
+
+// ---------------------------------------------------------------------------
+// 20. Combined plan: rename + drop + filter + types + dictionary
+
+#[test]
+fn combined_plan_all_pushdowns() {
+    let plan = ExecutionPlan::new()
+        .rename("A", "Alpha")
+        .drop("C")
+        .type_as("Alpha", FieldType::Int64)
+        .dictionary("B")
+        .filter_eq("Alpha", "10");
+    let p = Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+    let data = "A=10 B=x C=drop\nA=20 B=y C=keep\nA=10 B=z C=keep\n";
+    let single = p.read_bytes(data.as_bytes()).unwrap();
+    assert_eq!(single.num_rows(), 2); // A=10 rows
+    assert!(single.column_by_name("Alpha").is_some());
+    assert!(single.column_by_name("A").is_none());
+    assert!(single.column_by_name("C").is_none());
+    // B should be dictionary-encoded
+    let b = single.column_by_name("B").unwrap();
+    assert!(matches!(b.data_type(), arrow::datatypes::DataType::Dictionary(..)));
+    let par = p.read_bytes_par(data.as_bytes(), 2).unwrap();
+    let stream = p.read_bytes_stream(data.as_bytes(), MemoryBudget::new(128)).unwrap();
+    assert_batches_equal(std::slice::from_ref(&single), &par);
+    assert_batches_equal(&[single], &stream);
+}
+
+// ---------------------------------------------------------------------------
+// 21. Cross-parser consistency: put_field vs resolve_and_put vs resolve_and_put_generic
+
+#[test]
+fn three_parsers_produce_identical_results() {
+    let data: String = (0..200)
+        .map(|i| format!("A={} B={} C={}\n", i % 5, i % 3, i % 7))
+        .collect();
+    let bytes = data.as_bytes();
+
+    let plan = ExecutionPlan::new()
+        .rename("A", "Alpha")
+        .drop("C")
+        .filter_eq("Alpha", "2")
+        .type_as("Alpha", FieldType::Int64);
+
+    let p_normal = Pipeline::new(LineSplitter, LineParser).with_plan(plan.clone());
+    let p_resolved = Pipeline::new(LineSplitter, LineParserResolved).with_plan(plan.clone());
+    let p_resolve_put = Pipeline::new(LineSplitter, LineParserResolveAndPut).with_plan(plan);
+
+    let n = p_normal.read_bytes(bytes).unwrap();
+    let r = p_resolved.read_bytes(bytes).unwrap();
+    let rp = p_resolve_put.read_bytes(bytes).unwrap();
+    assert_batches_equal(std::slice::from_ref(&n), &std::slice::from_ref(&r));
+    assert_batches_equal(std::slice::from_ref(&n), &std::slice::from_ref(&rp));
+
+    let n_par = p_normal.read_bytes_par(bytes, 4).unwrap();
+    let r_par = p_resolved.read_bytes_par(bytes, 4).unwrap();
+    let rp_par = p_resolve_put.read_bytes_par(bytes, 4).unwrap();
+    assert_batches_equal(&n_par, &r_par);
+    assert_batches_equal(&n_par, &rp_par);
+}
+
+// ---------------------------------------------------------------------------
+// 22. Mmap vs Owned input equivalence
+
+#[test]
+fn mmap_vs_owned_equivalence() {
+    use std::io::Write as _;
+    let data: String = (0..500)
+        .map(|i| format!("A={} B={}\n", i % 10, i % 7))
+        .collect();
+    let bytes = data.as_bytes().to_vec();
+    let dir = std::env::temp_dir().join(format!("rypipe_mmap_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("data.txt");
+    std::fs::File::create(&path).unwrap().write_all(&bytes).unwrap();
+
+    let p = pipeline();
+    let via_owned = p.read_path(&path, false, false).unwrap(); // no mmap
+    let via_mmap = p.read_path(&path, true, false).unwrap();   // mmap
+    assert_batches_equal(
+        std::slice::from_ref(&via_owned),
+        std::slice::from_ref(&via_mmap),
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// 23. Thread safety: concurrent reads of same pipeline
+
+#[test]
+fn concurrent_pipeline_reads() {
+    use std::sync::Arc;
+    let p = Arc::new(pipeline());
+    let data = "A=1 B=2\nA=3 B=4\nA=5 B=6\n";
+    let bytes = data.as_bytes().to_vec();
+
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let p = Arc::clone(&p);
+            let bytes = bytes.clone();
+            std::thread::spawn(move || p.read_bytes(&bytes).unwrap())
+        })
+        .collect();
+
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    for r in &results {
+        assert_batches_equal(std::slice::from_ref(&results[0]), std::slice::from_ref(r));
+    }
+}
