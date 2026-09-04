@@ -8,18 +8,6 @@ Adapters are **separate packages** that depend on `rypipe-core`. They are not
 part of `rypipe` itself. This keeps `rypipe` pure: it is only the
 ingestion-to-Arrow engine.
 
-## Getting started
-
-If you are new to rypipe, start here:
-
-| Page | Time | What you learn |
-|------|------|---------------|
-| [Quick start](./quickstart.md) | 15 min | Build a complete adapter from scratch |
-| [Python wiring](./python-wiring.md) | 30 min | Wire Rust to Python with PyO3 |
-| [Rust creation](./rust-creation.md) | 1 hour | Deep dive into Splitter, RecordParser, ColumnarSink |
-| [Techniques](./techniques.md) | 30 min | Performance optimizations for production adapters |
-| [Anti-patterns](./anti-patterns.md) | 20 min | Common mistakes and how to fix them |
-
 ## Architecture
 
 ### Data flow
@@ -192,6 +180,12 @@ With the crxml reference adapter on a Ryzen 5800X:
 
 | Page | What you learn |
 |------|---------------|
+| [Quick start](./quickstart.md) | Build a complete adapter from scratch (15 min) |
+| [Python wiring](./python-wiring.md) | Wire Rust to Python with PyO3 |
+| [Rust creation](./rust-creation.md) | Deep dive into Splitter, RecordParser, ColumnarSink |
+| [Schema](./schema.md) | The biggest performance lever: declare columns upfront |
+| [Techniques](./techniques.md) | 10 optimizations for production adapters |
+| [Anti-patterns](./anti-patterns.md) | 20 common mistakes and how to fix them |
 | [Splitter](./splitter.md) | `Splitter` trait: `next_record_start`, `estimate_bytes_per_row` |
 | [Parser](./parser.md) | `RecordParser` trait: `validate`, `parse_chunk`, `parse_chunk_generic` |
 | [Sink](./sink.md) | `ColumnarSink`: all 21 methods, fast paths, projection |

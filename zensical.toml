@@ -62,7 +62,22 @@ name = "rypipe on PyPI"
 "Rust Core" = "rust-api.md"
 
 [[project.nav]]
-"Writing Adapters" = "writing-adapters/index.md"
+"Writing Adapters" = [
+    "writing-adapters/index.md",
+    { "Quick start" = "writing-adapters/quickstart.md" },
+    { "Python wiring" = "writing-adapters/python-wiring.md" },
+    { "Rust creation" = "writing-adapters/rust-creation.md" },
+    { "Schema" = "writing-adapters/schema.md" },
+    { "Techniques" = "writing-adapters/techniques.md" },
+    { "Anti-patterns" = "writing-adapters/anti-patterns.md" },
+    { "Splitter" = "writing-adapters/splitter.md" },
+    { "Parser" = "writing-adapters/parser.md" },
+    { "Sink" = "writing-adapters/sink.md" },
+    { "Scan primitives" = "writing-adapters/scan.md" },
+    { "Skip regions" = "writing-adapters/skip-regions.md" },
+    { "Chunk planning" = "writing-adapters/chunk-planning.md" },
+    { "Examples" = "writing-adapters/examples.md" },
+]
 
 [[project.nav]]
 "Examples" = "examples.md"
@@ -96,6 +111,7 @@ name = "rypipe on PyPI"
     { "Execution" = "architecture/execution.md" },
     { "Data flow" = "architecture/data-flow.md" },
     { "Storage and export" = "architecture/storage.md" },
+    { "Schema" = "architecture/schema.md" },
     { "Optimizations" = "architecture/optimizations.md" },
 ]
 
