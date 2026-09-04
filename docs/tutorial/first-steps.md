@@ -62,7 +62,6 @@ source = CrystalXMLSource(
     drop_fields=["InternalId"],  # skip this column entirely
 )
 ```
-```
 
 ## Schema hints { #schema-hints }
 
