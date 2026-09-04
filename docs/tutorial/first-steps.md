@@ -43,7 +43,7 @@ table = rypipe.read("report.xml", adapter=CrystalXMLAdapter(), row_tag="Details"
 !!! tip
 
     If no adapter is registered for the extension, **rypipe** raises a
-    `RypipeError` with a helpful message suggesting which adapter to install.
+    `RypipeError`.
 
 
 ## Passing adapter kwargs { #passing-adapter-kwargs }
