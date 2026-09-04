@@ -30,7 +30,7 @@ format-specific parsing. You install the adapter you need:
 ## Installation { #installation }
 
 ```bash
-pip install rypipe crxml
+pip install crxml
 ```
 
 This installs **rypipe** (the engine) and **crxml** (the Crystal Reports XML
