@@ -1889,8 +1889,9 @@ mod tests {
         plan.dictionary_columns.insert("P".to_string());
         let engine = parse_bytes(b"P=Widget\nP=Gadget\nP=Widget\n", plan);
         assert_eq!(engine.num_rows(), 3);
-        if let ColumnBuilder::Dictionary { codes, index, .. } = engine.get_column("P").unwrap() {
-            assert_eq!(index.len(), 2);
+        if let ColumnBuilder::Dictionary { codes, data, offsets, .. } = engine.get_column("P").unwrap() {
+            let dict_len = offsets.len() - 1;
+            assert_eq!(dict_len, 2);
             assert_eq!(
                 codes.iter().map(|o| o.copied()).collect::<Vec<_>>(),
                 vec![Some(0), Some(1), Some(0)]
