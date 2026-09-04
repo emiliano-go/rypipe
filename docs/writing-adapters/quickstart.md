@@ -43,7 +43,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rypipe-core = "2"
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
 simdutf8 = "0.1"
 ```
@@ -170,9 +170,10 @@ pub enum Value<'a> {
     Str(Cow<'a, str>),      // string value (borrowed or owned)
     Int64(i64),              // 64-bit integer
     Float64(f64),            // 64-bit float
-    Boolean(bool),           // boolean
+    Bool(bool),              // boolean
     Date32(i32),             // days since epoch
-    Timestamp(TimeUnit, i64), // timestamp with unit
+    Timestamp(i64),          // timestamp as raw integer (unit declared via field_types)
+    Null,                    // explicit null/missing value
 }
 ```
 
@@ -180,24 +181,31 @@ For a simple string format, always use `Value::Str(Cow::Borrowed(v))`.
 The `Cow::Borrowed` variant avoids allocation by borrowing directly from
 the input bytes.
 
+When you have typed data, emit the correct variant directly. The engine
+builds Arrow arrays from these values without string-to-number conversion.
+
 ## Step 4: Expose to Python
 
 Add PyO3 bindings to expose your parser to Python.
 
 ```rust
 use pyo3::prelude::*;
+use rypipe_python::record_batches_to_pyarrow_table;
 
 /// Read a log file and return a pyarrow.Table.
 #[pyfunction]
-fn read_log(path: String, row_tag: Option<String>) -> PyResult<PyArrowTable> {
+fn read_log(path: String) -> PyResult<PyObject> {
     let plan = ExecutionPlan::new();
-    let pipeline = Pipeline::new(LogSplitter::new(), LogParser::new())
+    let pipeline = Pipeline::new(LogSplitter, LogParser)
         .with_plan(plan);
 
-    let table = pipeline.read_path(&path, false, false)
+    let batches = pipeline.read_path(&path, false, false)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    Ok(table.into())
+    Python::with_gil(|py| {
+        record_batches_to_pyarrow_table(py, &[batches])
+            .map(|obj| obj.into())
+    })
 }
 
 /// Python module definition
@@ -306,6 +314,7 @@ use std::borrow::Cow;
 use rypipe_core::{Splitter, RecordParser, ColumnarSink, Value, Result};
 use rypipe_core::{ExecutionPlan, Pipeline};
 use pyo3::prelude::*;
+use rypipe_python::record_batches_to_pyarrow_table;
 
 #[derive(Clone, Default)]
 pub struct LogSplitter;
@@ -351,13 +360,17 @@ impl RecordParser for LogParser {
 }
 
 #[pyfunction]
-fn read_log(path: String) -> PyResult<PyArrowTable> {
+fn read_log(path: String) -> PyResult<PyObject> {
     let plan = ExecutionPlan::new();
-    let table = Pipeline::new(LogSplitter::new(), LogParser::new())
+    let batches = Pipeline::new(LogSplitter, LogParser)
         .with_plan(plan)
         .read_path(&path, false, false)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    Ok(table.into())
+
+    Python::with_gil(|py| {
+        record_batches_to_pyarrow_table(py, &[batches])
+            .map(|obj| obj.into())
+    })
 }
 
 #[pymodule]
@@ -396,7 +409,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rypipe-core = "2"
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
 simdutf8 = "0.1"
 ```

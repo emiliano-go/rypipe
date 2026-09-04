@@ -81,7 +81,7 @@ O(1) fast path:
 use rypipe_core::scan;
 
 // Good: uses scan::find with O(1) fast path
-let pos = scan::find(bytes, b'<');
+let pos = scan::find(bytes, 0, b'<');
 
 // Raw memchr: no fast path
 let pos = memchr::memchr(b'<', bytes);
@@ -125,7 +125,7 @@ sink.put_field("id", Value::Str(Cow::Borrowed(field.value)));
 ```
 
 **Why it helps:** The engine builds typed Arrow arrays directly from
-`Int64`/`Float64`/`Boolean` values. With strings, it must parse later
+`Int64`/`Float64`/`Bool` values. With strings, it must parse later
 (double work).
 
 **Performance gain:** 10-20% for numeric-heavy workloads.
@@ -136,8 +136,8 @@ For hot paths, use single-hash-probe resolution:
 
 ```rust
 // Good: single hash probe
-if let Some(idx) = sink.resolve(name) {
-    sink.put_field_resolved(idx, value);
+if let Some(resolved) = sink.resolve(name) {
+    sink.put_field_resolved(resolved, value);
 }
 
 // Slower: two hash probes (wants + put_field)
@@ -146,8 +146,8 @@ if sink.wants(name) {
 }
 ```
 
-**Why it helps:** `resolve` returns the column index with one hash probe.
-`put_field_resolved` uses that index directly (no second lookup).
+**Why it helps:** `resolve` returns the resolved column name with one hash
+probe. `put_field_resolved` uses that name directly (no second lookup).
 
 **When to use:** In the inner loop of your parser, for every field.
 
@@ -157,14 +157,31 @@ once per row (not per field).
 ## Technique 7: Implement `skip_regions`
 
 If your format has comments, CDATA sections, or quoted strings that may
-contain false-positive delimiters, implement `skip_regions`:
+contain false-positive delimiters, implement `skip_regions` by implementing
+the `SkipRegionFinder` trait:
 
 ```rust
-fn skip_regions(&self) -> Option<&[SkipRegion]> {
-    Some(&[
-        SkipRegion::new(b"<!--", b"-->"),  // XML comments
-        SkipRegion::new(b"<![CDATA[", b"]]>"),  // CDATA
-    ])
+use rypipe_core::decoder::SkipRegionFinder;
+
+struct XmlSkipRegions;
+
+impl SkipRegionFinder for XmlSkipRegions {
+    fn openers(&self) -> &[&'static [u8]] {
+        &[b"<!--", b"<![CDATA["]
+    }
+
+    fn closer_for(&self, opener: &[u8]) -> &'static [u8] {
+        match opener {
+            b"<!--" => b"-->",
+            b"<![CDATA[" => b"]]>",
+            _ => unreachable!(),
+        }
+    }
+}
+
+// In your Splitter implementation:
+fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
+    Some(&XmlSkipRegions)
 }
 ```
 

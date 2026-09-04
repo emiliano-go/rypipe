@@ -298,7 +298,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rypipe-core = "2"
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
 simdutf8 = "0.1"
 ```

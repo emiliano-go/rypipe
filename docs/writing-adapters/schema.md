@@ -53,8 +53,8 @@ source = MyAdapter("data.log", schema=["id", "timestamp", "amount", "status"])
 
 How it works inside the engine:
 
-1. `FrozenSchema::from_plan` builds an immutable schema from the names and
-   the plan's type/drop/rename rules
+1. `FrozenSchema::from_partial_plan` builds an immutable schema from the names and
+   the plan's type rules (drops are applied at parse time via `wants()`)
 2. Each worker's `TableBuilder` calls `ensure_schema` to pre-size all
    columns before parsing starts
 3. At export time, `sort_columns` reorders columns to match `schema_order`
@@ -90,14 +90,14 @@ Supported types:
 | Type string | Rust variant | Arrow type |
 |-------------|-------------|------------|
 | `string` | `FieldType::String` | `Utf8Array` |
-| `int64` / `int` | `FieldType::Int64` | `Int64Array` |
-| `float64` / `float` | `FieldType::Float64` | `Float64Array` |
+| `int64` | `FieldType::Int64` | `Int64Array` |
+| `float64` | `FieldType::Float64` | `Float64Array` |
 | `bool` / `boolean` | `FieldType::Boolean` | `BooleanArray` |
 | `dictionary` | `FieldType::Dictionary` | `DictionaryArray<Int32>` |
 | `date32` | `FieldType::Date32` | `Date32Array` |
 | `timestamp` | `FieldType::Timestamp(Microsecond)` | `Timestamp<Microsecond>` |
 | `timestamp[s]` | `FieldType::Timestamp(Second)` | `Timestamp<Second>` |
-| `timestamp[ms]` | `FieldType::Timestamp(Millisecond)` | `Timestamp<Millisecond>` |
+| `timestamp[ms]` | `FieldType::Timestamp(Millisecond)` | `Timestamp<Millillisecond>` |
 | `timestamp[us]` | `FieldType::Timestamp(Microsecond)` | `Timestamp<Microsecond>` |
 | `timestamp[ns]` | `FieldType::Timestamp(Nanosecond)` | `Timestamp<Nanosecond>` |
 
@@ -426,9 +426,9 @@ let plan = ExecutionPlan::new()
     .schema_order(["id", "category", "value"])
     .type_as("id", FieldType::Int64)
     .type_as("value", FieldType::Float64)
-    .auto_dict(true)
-    .dict_threshold(0.03)  // upgrade if <3% distinct
-    .dict_max_size(512);   // max 512 entries
+    .with_auto_dict(true)
+    .with_dict_threshold(0.03)  // upgrade if <3% distinct
+    .with_dict_max_size(512);   // max 512 entries
 ```
 
 ## Implementing schema in your adapter
@@ -515,7 +515,7 @@ fn parse_value(&self, field: &Field) -> Value {
         }
         FieldType::Boolean => {
             let v = matches!(field.value, "true" | "1" | "yes");
-            Value::Boolean(v)
+            sink.put_field(field.name, Value::Bool(v));
         }
         _ => Value::Str(Cow::Borrowed(field.value)),
     }

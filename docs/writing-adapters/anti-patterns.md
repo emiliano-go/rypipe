@@ -459,7 +459,7 @@ Double work.
 // Good: typed values
 sink.put_field("id", Value::Int64(123));
 sink.put_field("amount", Value::Float64(45.67));
-sink.put_field("active", Value::Boolean(true));
+sink.put_field("active", Value::Bool(true));
 ```
 
 ## Anti-pattern 17: Not implementing `skip_regions`
