@@ -1,5 +1,10 @@
 # Pipeline { #pipeline }
 
+!!! note
+
+    The stages shown here (`CastTypes`, `FilterRows`, etc.) are available in
+    most adapters but may have different options. Check your adapter's docs.
+
 The pipeline operator (`|`) lets you chain transformation stages on a Source.
 Each stage transforms the data as it flows through, like a Unix pipe.
 

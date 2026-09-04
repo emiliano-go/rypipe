@@ -1,5 +1,11 @@
 # Tutorial { #tutorial }
 
+!!! note
+
+    The examples on this page use the **crxml** adapter. Other adapters may
+    have different kwargs, options, or behavior. Check your adapter's
+    documentation for specifics.
+
 This tutorial teaches you how to use **rypipe** to read files into Arrow tables
 and DataFrames. You do not need to write Rust or build anything; just install
 **rypipe** and an adapter package, and start reading data.

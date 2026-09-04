@@ -1,5 +1,10 @@
 # Stages { #stages }
 
+!!! note
+
+    The stages shown here are available in most adapters but may have
+    different options. Check your adapter's docs.
+
 This page is a detailed reference for every pipeline stage. Each stage
 transforms a stream of Python dicts and optionally pushes work into the
 Rust parse loop.
