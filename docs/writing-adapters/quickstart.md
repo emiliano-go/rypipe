@@ -337,7 +337,7 @@ print(result)
 ## Recap { #recap }
 
 * An adapter is a Rust crate (Splitter + RecordParser) and a Python package
-  (Source + Adapter + stages).
+  (Source + stages + sinks).
 * The engine handles parallel execution, memory management, and Arrow export.
 * Users import everything from the adapter package: never from **rypipe**
   directly.
