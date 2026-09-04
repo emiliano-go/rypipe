@@ -48,45 +48,22 @@ separate packages. Install the engine plus the adapters you need.
 
 ## Quick start { #quick-start }
 
-### Generate sample data { #generate-sample-data }
-
-```python
-# generate_data.py: create a sample XML file for testing
-from pathlib import Path
-
-xml = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<Report>
-{chr(10).join(f'  <Row><Name>{name}</Name><Amount>{amt}</Amount><Status>{status}</Status></Row>' for name, amt, status in [
-    ("Alice", 150.0, "active"), ("Bob", 75.0, "inactive"),
-    ("Carol", 200.0, "active"), ("Dave", 50.0, "active"),
-])}
-</Report>
-"""
-
-Path("report.xml").write_text(xml)
-print(f"Generated report.xml with 4 rows")
-```
-
-```bash
-python generate_data.py
-```
-
 ### From Python { #from-python }
 
 ```bash
-pip install rypipe crxml
+pip install crxml
 ```
+
+Download a sample [report.xml](examples/report.xml) or create your own:
 
 ```python
 from crxml import CrystalXMLSource
 
-# Read the XML file into a pyarrow.Table
-source = CrystalXMLSource("report.xml", row_tag="Row")
+source = CrystalXMLSource("report.xml", row_tag="Details")
 table = source.to_arrow()
 
 print(table.num_rows, table.num_columns)
-# 4 3
+# 9 8
 ```
 
 ### Pipeline API { #pipeline-api }
