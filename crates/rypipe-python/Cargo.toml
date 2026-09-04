@@ -1,6 +1,6 @@
 [package]
 name = "rypipe-python"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 license = "MIT"
 description = "PyO3 bindings over the rypipe-core ingestion framework"

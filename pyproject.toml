@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rypipe"
-version = "2.1.0"
+version = "2.2.0"
 description = "Format-agnostic data ingestion framework: Rust core with Python bindings. Adapters for XML, JSON, CSV, etc. are separate packages."
 readme = "README.md"
 license = "MIT"
