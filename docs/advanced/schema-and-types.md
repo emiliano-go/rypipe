@@ -1,6 +1,13 @@
 # Schema and types
 
-`rypipe` can infer column names and types, but inference passes cost time and memory. Providing `schema_order` and `field_types` up front avoids those passes, stabilizes column order, and enables numeric compare filters.
+This is the single largest performance lever for adapters with known schemas.
+In the crxml reference adapter, declaring `schema=[...]` lifts throughput from
+4.2 GB/s to 7.6 GB/s on production data (+80%), and the `row_satisfied`
+byte-jump reaches 11 GB/s on benchmarks.
+
+`rypipe` can infer column names and types, but inference passes cost time and
+memory. Providing `schema_order` and `field_types` up front avoids those
+passes, stabilizes column order, and enables numeric compare filters.
 
 ## Avoiding inference passes
 
