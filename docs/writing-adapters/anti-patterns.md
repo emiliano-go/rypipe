@@ -467,8 +467,8 @@ sink.put_field("active", Value::Bool(true));
 **The mistake:** Letting the splitter chunk inside comments or CDATA.
 
 ```rust
-// Bad: no skip regions
-fn skip_regions(&self) -> Option<&[SkipRegion]> {
+// Bad: no skip regions — splitter may chunk inside comments
+fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
     None
 }
 ```
@@ -484,15 +484,26 @@ errors. For example:
 Without skip regions, the splitter sees `<Row>` inside the comment and
 creates a false-positive split point.
 
-**The fix:** Implement skip regions:
+**The fix:** Implement `SkipRegionFinder`:
 
 ```rust
-// Good: skip comments and CDATA
-fn skip_regions(&self) -> Option<&[SkipRegion]> {
-    Some(&[
-        SkipRegion::new(b"<!--", b"-->"),
-        SkipRegion::new(b"<![CDATA[", b"]]>"),
-    ])
+struct XmlSkipRegions;
+
+impl SkipRegionFinder for XmlSkipRegions {
+    fn openers(&self) -> &[&'static [u8]] {
+        &[b"<!--", b"<![CDATA["]
+    }
+
+    fn closer_for(&self, opener: &[u8]) -> &'static [u8] {
+        if opener == b"<!--" { b"-->" } else { b"]]>" }
+    }
+}
+
+// Wire into your splitter:
+impl Splitter for MyXmlSplitter {
+    fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
+        Some(&XmlSkipRegions)
+    }
 }
 ```
 

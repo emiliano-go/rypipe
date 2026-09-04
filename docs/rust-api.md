@@ -280,6 +280,6 @@ impl ColumnarSink for RowCounter {
 
 ## See also
 
-- [Writing a format adapter](./writing-adapters.md): implement `Splitter` and `RecordParser` in a separate package.
+- [Writing a format adapter](./writing-adapters/index.md): implement `Splitter` and `RecordParser` in a separate package.
 - [Architecture](./architecture/): how the pieces fit together.
 - [Python API](./python-api.md): the Python bindings over the same engine.

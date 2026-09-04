@@ -1,112 +1,65 @@
-# Python Adapter Wiring
+# Python Adapter Wiring { #python-wiring }
 
-This page explains how to wire your Rust adapter to Python using PyO3, and
-how to expose it through a Source subclass for full pipeline support.
+This page explains how to wire your Rust adapter to Python — the Source
+subclass, adapter class, registration, and repacked stages.
 
-## Overview
+## The crxml formula { #the-crxml-formula }
 
-A rypipe adapter has two layers:
-
-1. **Rust layer**: `Splitter` + `RecordParser` (the parsing logic)
-2. **Python layer**: A `Source` subclass, a thin adapter that delegates to it,
-   repacked stage classes, and registration with `rypipe`
-
-Users never see the Rust code. They import everything from the adapter
-package:
+The reference adapter (**crxml**) defines the standard pattern. Every adapter
+follows this structure:
 
 ```python
+# Users import everything from the adapter package
 from my_adapter import MySource, CastTypes, FilterRows
 ```
 
-## The crxml formula
+### Directory layout { #directory-layout }
 
-The reference adapter (`crxml`) defines the standard pattern:
-
-1. **`MySource(Source)`** — pipeline-capable source with `_read_arrow()` and
-   plan forwarding
-2. **`MyAdapter`** — stateless class with `read()` that delegates to
-   `MySource(...).to_arrow()`
-3. **`my_adapter.stages/`** — own copies of `CastTypes`, `FilterRows`,
-   `RenameFields`, `DropFields`
-4. **Registration** — adapter registered at import time via side-effect import
-
-### Minimal adapter
-
-```python
-from .source import MySource
-
-
-class MyAdapter:
-    def read(self, path, **kwargs):
-        return MySource(path, **kwargs).to_arrow()
-
-
-def _register():
-    try:
-        import rypipe
-    except Exception:
-        return
-    rypipe.register_adapter("myfmt", MyAdapter(), extensions=[".myfmt"])
-
-
-_register()
+```
+my_adapter/
+├── __init__.py            # re-exports, lazy loading
+├── rypipe_adapter.py      # MyAdapter + registration
+├── source.py              # MySource(Source)
+└── stages/
+    ├── __init__.py        # lazy re-exports
+    ├── cast.py            # CastTypes
+    ├── filter.py          # FilterRows
+    ├── rename.py          # RenameFields
+    └── drop.py            # DropFields
 ```
 
-### Source subclass
+## Source subclass { #source-subclass }
+
+The Source subclass is the pipeline-capable entry point. It implements
+`_read_arrow()` and forwards plan kwargs from fused stages:
 
 ```python
+# my_adapter/source.py
+from __future__ import annotations
+from typing import Any
+
 import _rypipe_myfmt
 from rypipe import Source
 
 
 class MySource(Source):
-    def _read_arrow(self, plan_overrides=None):
+    """Pipeline-capable source for MyFormat files."""
+
+    def _read_arrow(self, plan_overrides: dict[str, Any] | None = None) -> Any:
+        # Start with construction-time kwargs (field_mapping, drop_fields, etc.)
         plan = self._build_plan_kwargs()
+        # Fused pipeline stages override construction-time kwargs
         if plan_overrides:
             plan.update(plan_overrides)
+        # Pass the merged plan to the Rust reader
         return _rypipe_myfmt.read(str(self._path), **plan)
 ```
 
-### Registration
-
-Register at module load time. The side-effect import in `__init__.py`
-ensures the adapter is registered before user code calls `rypipe.read()`:
-
-```python
-from . import rypipe_adapter  # noqa: F401 — registers the adapter
-```
-
-After registration:
-
-- `rypipe.read("file.myfmt")` auto-detects the extension
-- `rypipe.read("file.myfmt", format="myfmt")` works explicitly
-- `rypipe.read("file.txt", format="myfmt")` works with explicit format
-
-Users can also pass the adapter directly:
-
-```python
-from my_adapter import MyAdapter
-table = rypipe.read("file.myfmt", adapter=MyAdapter())
-```
-
-## `rypipe.Source` vs adapter duck-type
-
-| Feature | `Source` subclass | Duck-type adapter |
-|---------|-------------------|-------------------|
-| Pipeline `\|` operator | Yes | No |
-| Fusion (stages in Rust) | Yes (with `_read_arrow`) | No |
-| `.to_pandas()`, `.to_parquet()` | Yes | No |
-| `.iter_arrow_batches()` | Yes | No |
-| Complexity | More (must handle `plan_overrides`) | Less (just `read`) |
-
-**Always prefer a Source subclass.** The duck-type adapter only supports
-`rypipe.read()` and cannot use pipelines, fusion, or streaming.
-
-## How `_read_arrow` works
+### How _read_arrow works { #how-read-arrow-works }
 
 When a user writes `src | RenameFields(...) | FilterRows(...)`, the pipeline
-stages are collected into a plan. When `to_arrow()` is called, the pipeline
-calls `_read_arrow(plan_overrides=...)` on your source.
+collects stages into a plan. When `.to_arrow()` is called, the pipeline calls
+`_read_arrow(plan_overrides=...)` on your source.
 
 `plan_overrides` contains the fused stage kwargs:
 
@@ -120,554 +73,287 @@ calls `_read_arrow(plan_overrides=...)` on your source.
 ```
 
 You must merge these with your construction kwargs and pass them to your
-Rust reader:
+Rust reader. If you ignore `plan_overrides`, fused stages silently fall back
+to Python execution — 10–50× slower.
+
+## Adapter class { #adapter-class }
+
+The adapter is a thin, stateless wrapper. It delegates to the Source for
+actual parsing:
 
 ```python
-def _read_arrow(self, plan_overrides=None):
-    plan = self._build_plan_kwargs()  # kwargs from __init__
-    if plan_overrides:
-        plan.update(plan_overrides)   # fused stages override
-    return my_rust_read(str(self._path), **plan)
+# my_adapter/rypipe_adapter.py
+from __future__ import annotations
+from typing import Any
+
+from .source import MySource
+
+
+class MyAdapter:
+    """rypipe-compatible adapter for MyFormat files."""
+
+    def read(self, path: str, **kwargs: Any) -> Any:
+        """Parse ``path`` and return a ``pyarrow.Table``."""
+        return MySource(path, **kwargs).to_arrow()
+
+    def iter_record_batches(
+        self, path: str, memory: str | int = "64MiB",
+        batch_size: int | None = None, **kwargs: Any,
+    ):
+        """Yield ``pyarrow.RecordBatch`` objects with constant memory."""
+        yield from MySource(path, **kwargs).iter_record_batches(
+            memory=memory, batch_size=batch_size
+        )
 ```
 
-**If you ignore `plan_overrides`**, fused stages silently fall back to
-Python execution over a full table. This is a common performance bug.
+/// note
 
-## Registration
+The adapter's `read()` method returns a `pyarrow.Table`, not a Source.
+This is by design — `rypipe.read()` calls `adapter.read()` and expects a
+table. Users who want pipelines use the Source directly.
 
-`register_adapter` tells rypipe about your adapter:
+///
+
+## Registration { #registration }
+
+Register the adapter at import time. Users get the adapter by importing
+your package:
 
 ```python
-rypipe.register_adapter(
-    "log",           # name: used for format="log" lookups
-    LogAdapter(),    # adapter: object with read() method
-    extensions=[".log"],  # extensions: for auto-detection
-)
+# my_adapter/rypipe_adapter.py (continued)
+
+def _register() -> None:
+    try:
+        import rypipe
+    except Exception:  # pragma: no cover — rypipe is optional
+        return
+    rypipe.register_adapter("myfmt", MyAdapter(), extensions=[".myfmt"])
+
+
+_register()  # runs on import
+```
+
+### __init__.py { #init-py }
+
+The `__init__.py` triggers registration and lazily loads public names:
+
+```python
+# my_adapter/__init__.py
+import importlib
+
+# Side-effect import: registers the adapter with rypipe on import
+from . import rypipe_adapter  # noqa: F401
+
+__all__ = [
+    "MySource",
+    "MyAdapter",
+    "CastTypes",
+    "FilterRows",
+    "RenameFields",
+    "DropFields",
+]
+
+_modules = {
+    "MySource": ".source",
+    "CastTypes": ".stages",
+    "FilterRows": ".stages",
+    "RenameFields": ".stages",
+    "DropFields": ".stages",
+}
+
+
+def __getattr__(name):
+    if name in _modules:
+        mod = importlib.import_module(_modules[name], __package__)
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return __all__
 ```
 
 After registration:
 
-- `rypipe.read("file.log")` auto-detects the `.log` extension
-- `rypipe.read("file.log", format="log")` works explicitly
-- `rypipe.read("file.txt", format="log")` works with explicit format
+* `rypipe.read("file.myfmt")` auto-detects the `.myfmt` extension.
+* `rypipe.read("file.myfmt", format="myfmt")` works explicitly.
+* `rypipe.read("file.txt", format="myfmt")` works with explicit format.
 
-### When to register
+## Repacked stages { #repacked-stages }
 
-Register at module load time. Users should get the adapter by importing
-your package:
+Adapters include their own copies of the pipeline stage classes. This
+makes the adapter self-contained — users never import from **rypipe**.
 
-```python
-import rypipe_log  # triggers registration
-table = rypipe.read("app.log")
-```
+The stage implementations are identical to **rypipe**'s. See the
+[Quick Start](./quickstart.md) for full code, or copy from
+`rypipe/rypipe/stages/`. Each stage has three methods:
 
-Or the user can pass your adapter directly:
+* `apply(record)` — transform a single dict (fused path).
+* `__call__(stream)` — transform an iterable of dicts (unfused path).
+* `_plan_kwargs()` — return pushdown kwargs for the Rust engine.
 
-```python
-from rypipe_log import LogAdapter
-table = rypipe.read("app.log", adapter=LogAdapter())
-```
-
-## Python wrapper patterns
-
-### Pattern 1: Delegating to Rust
+### CastTypes { #casttypes }
 
 ```python
-class LogAdapter:
-    def read(self, path, **kwargs):
-        return _rypipe_log.read_log(path, **kwargs)
-```
+from typing import Callable
 
-The Rust function handles everything. The Python wrapper is one line.
-
-### Pattern 2: Adding Python-side logic
-
-```python
-class LogAdapter:
-    def read(self, path, **kwargs):
-        # Add Python-side validation or preprocessing
-        if not path.endswith(".log"):
-            raise ValueError("Expected .log file")
-
-        # Delegate to Rust
-        return _rypipe_log.read_log(path, **kwargs)
-```
-
-### Pattern 3: Multiple entry points
-
-```python
-class LogSource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
-        plan = self._build_plan_kwargs()
-        if plan_overrides:
-            plan.update(plan_overrides)
-        return _rypipe_log.read_log(str(self._path), **plan)
-
-    # Add custom methods specific to your format
-    def preview(self, n=5):
-        """Return first n rows as a list of dicts."""
-        table = self.to_arrow()
-        return [dict(zip(table.column_names, row)) for row in zip(*[col.to_pylist() for col in table.columns])][:n]
-```
-
-## PyO3 integration
-
-### Passing kwargs from Python to Rust
-
-In your Rust code, accept kwargs as a `HashMap` or individual parameters:
-
-```rust
-use pyo3::prelude::*;
-use std::collections::HashMap;
-
-#[pyfunction]
-fn read_log(path: String, kwargs: Option<HashMap<String, PyObject>>) -> PyResult<PyArrowTable> {
-    let mut plan = ExecutionPlan::new();
-
-    // Process kwargs
-    if let Some(kw) = kwargs {
-        if let Some(Some(types)) = kw.get("field_types") {
-            // Parse field_types from Python dict
-        }
-        if let Some(Some(schema)) = kw.get("schema") {
-            // Parse schema from Python list
-        }
-    }
-
-    let table = Pipeline::new(LogSplitter::new(), LogParser::new())
-        .with_plan(plan)
-        .read_path(&path, false, false)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-    Ok(table.into())
+_PY_TO_RUST_TYPE = {
+    int: "int64",
+    float: "float64",
+    str: None,
+    bool: "bool",
 }
+
+
+class CastTypes:
+    __slots__ = ("_mapping",)
+
+    def __init__(self, mapping: dict[str, Callable]):
+        self._mapping = mapping
+
+    def apply(self, record: dict) -> dict:
+        for field, cast_fn in self._mapping.items():
+            try:
+                record[field] = cast_fn(record[field])
+            except KeyError:
+                pass  # field not in this row — skip silently
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"CastTypes: cannot cast field '{field}' "
+                    f"value {record[field]!r}: {e}"
+                ) from e
+        return record
+
+    def __call__(self, stream):
+        return map(self.apply, stream)
+
+    def _plan_kwargs(self) -> dict | None:
+        ft = {}
+        for field, fn in self._mapping.items():
+            rust_type = _PY_TO_RUST_TYPE.get(fn)
+            if rust_type is None:
+                if fn is str:
+                    continue  # str cast is a no-op
+                return None  # unsupported type — can't fuse
+            ft[field] = rust_type
+        return {"field_types": ft} if ft else None
 ```
 
-### Using `execution_plan_from_kwargs`
-
-For complex adapters, use the `rypipe_python` helper. It accepts individual
-typed parameters (not a HashMap) and returns a `PyResult<ExecutionPlan>`:
-
-```rust
-use rypipe_python::execution_plan_from_kwargs;
-
-#[pyfunction]
-fn read_log(
-    path: String,
-    field_mapping: Option<HashMap<String, String>>,
-    drop_fields: Option<Vec<String>>,
-    filter: Option<&Bound<'_, PyAny>>,
-    field_types: Option<HashMap<String, String>>,
-    dictionary_columns: Option<Vec<String>>,
-    schema: Option<Vec<String>>,
-    auto_dict: bool,
-    auto_dict_threshold: Option<f64>,
-    auto_dict_max_size: Option<usize>,
-) -> PyResult<PyObject> {
-    let plan = execution_plan_from_kwargs(
-        field_mapping, drop_fields, filter, field_types,
-        dictionary_columns, schema, auto_dict,
-        auto_dict_threshold, auto_dict_max_size,
-    )?;
-
-    let batches = Pipeline::new(LogSplitter, LogParser)
-        .with_plan(plan)
-        .read_path(&path, false, false)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-    Python::with_gil(|py| {
-        rypipe_python::record_batches_to_pyarrow_table(py, &[batches])
-            .map(|obj| obj.into())
-    })
-}
-```
-
-This handles all standard plan kwargs (`field_types`, `schema`, `filter`,
-`drop_fields`, `field_mapping`, `dictionary_columns`, `auto_dict`, etc.)
-automatically.
-
-## Error handling
-
-### Rust side
-
-```rust
-use rypipe_core::Error;
-
-fn parse_line(line: &str) -> Result<(&str, &str)> {
-    line.split_once('=')
-        .ok_or_else(|| Error::Plan(format!("invalid line: {line}")))
-}
-```
-
-### Python side
+### FilterRows { #filterrows }
 
 ```python
-import rypipe
+class FilterRows:
+    __slots__ = ("_predicate", "_filter_spec")
 
-try:
-    table = rypipe.read("bad_file.log")
-except rypipe.ParseError as e:
-    print(f"Parse error: {e}")
-except rypipe.PlanError as e:
-    print(f"Invalid plan: {e}")
-except rypipe.RypipeError as e:
-    print(f"API error: {e}")
-```
-
-## Testing
-
-### Unit test the Rust parser
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_single_row() {
-        let parser = LogParser;
-        let mut sink = MockSink::new();
-        let bytes = b"name=Alice,age=30";
-        parser.parse_chunk(bytes, &mut sink).unwrap();
-        assert_eq!(sink.rows.len(), 1);
-        assert_eq!(sink.rows[0]["name"], "Alice");
-    }
-}
-```
-
-### Integration test the Python adapter
-
-```python
-import rypipe
-import rypipe_log
-
-def test_read_returns_table(tmp_path):
-    p = tmp_path / "test.log"
-    p.write_text("name=Alice,age=30\nname=Bob,age=25\n")
-    table = rypipe.read(str(p))
-    assert table.num_rows == 2
-    assert "name" in table.column_names
-
-def test_pipeline_stages(tmp_path):
-    from rypipe import CastTypes, FilterRows
-    p = tmp_path / "test.log"
-    p.write_text("name=Alice,age=30\nname=Bob,age=25\n")
-    src = rypipe_log.LogSource(p)
-    result = (
-        src
-        | CastTypes({"age": int})
-        | FilterRows(field="age", op=">", value="25")
-    ).to_arrow()
-    assert result.num_rows == 1
-```
-
-## Common mistakes
-
-1. **Forgetting to register**: Users get "no adapter registered" error
-2. **Ignoring `plan_overrides`**: Fused stages fall back to Python (slow)
-3. **Not returning `pyarrow.Table`**: `read()` must return a table, not dicts
-4. **Missing `extensions`**: Auto-detection from file extension does not work
-
-## Package structure
-
-### Minimal package
-
-```
-my-adapter/
-├── Cargo.toml
-├── pyproject.toml
-├── src/
-│   └── lib.rs
-└── my_adapter/
-    └── __init__.py
-```
-
-### `pyproject.toml`
-
-```toml
-[build-system]
-requires = ["maturin>=1.0"]
-build-backend = "maturin"
-
-[project]
-name = "my-adapter"
-version = "0.1.0"
-requires-python = ">=3.10"
-dependencies = ["rypipe"]
-
-[tool.maturin]
-features = ["pyo3/extension-module"]
-python-source = "my_adapter"
-module-name = "my_adapter._core"
-```
-
-### Building for distribution
-
-```bash
-# Build wheel
-maturin build --release
-
-# Build for specific Python version
-maturin build --release --interpreter python3.12
-
-# Publish to PyPI
-maturin publish
-```
-
-## Schema integration
-
-### Accepting schema kwargs
-
-Your adapter should accept `schema` and `field_types` kwargs and pass them
-to the Rust reader:
-
-```python
-class LogSource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
-        plan = self._build_plan_kwargs()
-        if plan_overrides:
-            plan.update(plan_overrides)
-        # plan now contains schema, field_types, etc.
-        return _rypipe_log.read_log(str(self._path), **plan)
-```
-
-### Passing schema to Rust
-
-In your Rust code, accept these kwargs:
-
-```rust
-use std::collections::HashMap;
-
-#[pyfunction]
-fn read_log(
-    path: String,
-    schema: Option<Vec<String>>,
-    field_types: Option<HashMap<String, String>>,
-    kwargs: Option<HashMap<String, PyObject>>,
-) -> PyResult<PyArrowTable> {
-    let mut plan = ExecutionPlan::new();
-
-    // Apply schema_order
-    if let Some(names) = schema {
-        plan.schema_order = names;
-    }
-
-    // Apply field_types
-    if let Some(types) = field_types {
-        for (name, type_str) in &types {
-            if let Some(ft) = FieldType::from_str(type_str) {
-                plan.field_types.insert(name.clone(), ft);
+    def __init__(self, predicate=None, *, field=None, op=None, value=None,
+                 field_a=None, field_b=None):
+        if predicate is not None:
+            self._predicate = predicate
+            self._filter_spec = None
+        elif field is not None and op is not None and value is not None:
+            self._filter_spec = {"field": field, "op": op, "value": value}
+            self._predicate = lambda r: (
+                r.get(field) == value if op in ("==", "eq")
+                else r.get(field) != value
+            )
+        elif field_a is not None and op is not None and field_b is not None:
+            self._filter_spec = {"field_a": field_a, "op": op, "field_b": field_b}
+            ops = {
+                ">": lambda a, b: a > b, "<": lambda a, b: a < b,
+                ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
+                "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
             }
-        }
-    }
+            fn = ops[op]
+            self._predicate = lambda r: bool(fn(r.get(field_a), r.get(field_b)))
+        else:
+            raise ValueError(
+                "FilterRows requires a callable predicate or "
+                "keyword arguments (field+op+value or field_a+op+field_b)"
+            )
 
-    // ... rest of implementation
-}
+    def apply(self, record: dict) -> dict | None:
+        return record if self._predicate(record) else None
+
+    def __call__(self, stream):
+        return (r for r in map(self.apply, stream) if r is not None)
+
+    def _plan_kwargs(self) -> dict | None:
+        return {"filter": self._filter_spec} if self._filter_spec else None
 ```
 
-### Using execution_plan_from_kwargs
-
-For simpler code, use the `rypipe_python` helper:
-
-```rust
-use rypipe_python::execution_plan_from_kwargs;
-
-#[pyfunction]
-fn read_log(path: String, kwargs: HashMap<String, PyObject>) -> PyResult<PyArrowTable> {
-    let plan = execution_plan_from_kwargs(&kwargs)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-    // ... use plan ...
-}
-```
-
-This handles all standard kwargs automatically.
-
-## Dictionary encoding
-
-### Accepting dictionary kwargs
-
-Your adapter should accept `dictionary_columns` and `auto_dict` kwargs:
+### RenameFields and DropFields { #rename-and-drop }
 
 ```python
-class LogSource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
+class RenameFields:
+    __slots__ = ("_mapping",)
+
+    def __init__(self, mapping: dict[str, str]):
+        self._mapping = mapping
+
+    def apply(self, record: dict) -> dict:
+        return {self._mapping.get(k, k): v for k, v in record.items()}
+
+    def __call__(self, stream):
+        return map(self.apply, stream)
+
+    def _plan_kwargs(self) -> dict | None:
+        return {"field_mapping": self._mapping}
+
+
+class DropFields:
+    __slots__ = ("_fields_set",)
+
+    def __init__(self, fields: list[str]):
+        if isinstance(fields, str):
+            raise TypeError(
+                f"DropFields expects a list, got a string; use DropFields([{fields!r}])"
+            )
+        self._fields_set = frozenset(fields)
+
+    def apply(self, record: dict) -> dict:
+        return {k: v for k, v in record.items() if k not in self._fields_set}
+
+    def __call__(self, stream):
+        return map(self.apply, stream)
+
+    def _plan_kwargs(self) -> dict | None:
+        return {"drop_fields": sorted(self._fields_set)}
+```
+
+## Streaming { #streaming }
+
+For bounded-memory streaming, override `iter_record_batches` on your Source:
+
+```python
+class MySource(Source):
+    def _read_arrow(self, plan_overrides=None):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
-        # kwargs may contain dictionary_columns, auto_dict, etc.
-        return _rypipe_log.read_log(str(self._path), **plan)
-```
+        return _rypipe_myfmt.read(str(self._path), **plan)
 
-### Passing dictionary options to Rust
-
-```rust
-#[pyfunction]
-fn read_log(
-    path: String,
-    dictionary_columns: Option<Vec<String>>,
-    auto_dict: Option<bool>,
-    kwargs: Option<HashMap<String, PyObject>>,
-) -> PyResult<PyArrowTable> {
-    let mut plan = ExecutionPlan::new();
-
-    // Apply dictionary_columns
-    if let Some(cols) = dictionary_columns {
-        for col in &cols {
-            plan.dictionary_columns.insert(col.clone());
-        }
-    }
-
-    // Apply auto_dict
-    if let Some(auto) = auto_dict {
-        plan.auto_dict = auto;
-    }
-
-    // ... rest of implementation
-}
-```
-
-## Streaming
-
-### Implementing batch iteration
-
-To support `iter_record_batches`, implement it in your adapter:
-
-```python
-class LogSource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
-        # ... same as before ...
-
-    def iter_record_batches(self, *, memory="64MiB", batch_size=None, **kwargs):
+    def iter_record_batches(self, memory="64MiB", batch_size=None, **kwargs):
         plan = self._build_plan_kwargs()
-        return _rypipe_log.iter_batches(
-            str(self._path),
-            memory=memory,
-            batch_size=batch_size,
-            **plan,
+        return _rypipe_myfmt.iter_batches(
+            str(self._path), memory=memory, batch_size=batch_size, **plan
         )
 ```
 
-### Rust-side batch iteration
-
-```rust
-use pyo3::iter::IterNextOutput;
-
-#[pyclass]
-struct BatchIterator {
-    inner: rypipe_core::StreamingBatchIterator,
-}
-
-#[pymethods]
-impl BatchIterator {
-    fn __next__(&mut self) -> IterNextOutput<PyArrowRecordBatch, PyObject> {
-        match self.inner.next() {
-            Some(Ok(batch)) => IterNextOutput::Yield(batch.into()),
-            Some(Err(e)) => IterNextOutput::Return(
-                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).into()
-            ),
-            None => IterNextOutput::Return(Err(pyo3::exceptions::PyStopIteration::new_err(()).into())),
-        }
-    }
-}
-```
-
-## Fusion in detail
-
-### How fusion works
-
-When a user writes:
+Users can then process large files:
 
 ```python
-src = LogSource("data.log")
-result = src | RenameFields({"name": "user_name"}) | FilterRows(field="age", op=">", value="25")
+from my_adapter import MySource
+
+src = MySource("huge_file.myfmt")
+for batch in src.iter_record_batches(memory="256MiB"):
+    process(batch)
 ```
 
-The pipeline stages are collected into a plan. When `to_arrow()` is called,
-the pipeline calls `_read_arrow(plan_overrides=...)` on your source.
+## Recap { #recap }
 
-`plan_overrides` contains the fused stage kwargs:
-
-```python
-{
-    "field_mapping": {"name": "user_name"},
-    "filter": {"field": "age", "op": ">", "value": "25"},
-}
-```
-
-### Forwarding plan_overrides
-
-Always forward `plan_overrides` to your Rust reader:
-
-```python
-def _read_arrow(self, *, plan_overrides=None, **kwargs):
-    plan = self._build_plan_kwargs()
-    if plan_overrides:
-        plan.update(plan_overrides)
-    return _rypipe_log.read_log(str(self._path), **plan)
-```
-
-### What happens if you ignore plan_overrides
-
-If you ignore `plan_overrides`, the stages fall back to Python execution:
-
-```python
-# Bad: ignores plan_overrides
-def _read_arrow(self, **kwargs):
-    return _rypipe_log.read_log(str(self._path))
-
-# Result: RenameFields and FilterRows run in Python over a full table
-# This is 10-50x slower than fused execution
-```
-
-### What happens if you forward plan_overrides
-
-If you forward `plan_overrides`, the stages are pushed into Rust:
-
-```python
-# Good: forwards plan_overrides
-def _read_arrow(self, *, plan_overrides=None, **kwargs):
-    plan = self._build_plan_kwargs()
-    if plan_overrides:
-        plan.update(plan_overrides)
-    return _rypipe_log.read_log(str(self._path), **plan)
-
-# Result: RenameFields and FilterRows run in the Rust parse loop
-# This is 10-50x faster than Python execution
-```
-
-## Advanced: Source with custom methods
-
-You can add custom methods to your Source:
-
-```python
-class LogSource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
-        plan = self._build_plan_kwargs()
-        if plan_overrides:
-            plan.update(plan_overrides)
-        return _rypipe_log.read_log(str(self._path), **plan)
-
-    def preview(self, n=5):
-        """Return first n rows as a list of dicts."""
-        table = self.to_arrow()
-        return [
-            dict(zip(table.column_names, row))
-            for row in zip(*[col.to_pylist() for col in table.columns])
-        ][:n]
-
-    def field_names(self):
-        """Return the list of field names in the file."""
-        return _rypipe_log.list_fields(str(self._path))
-
-    def sample(self, n=100):
-        """Return a sample of n rows for inspection."""
-        return _rypipe_log.sample_rows(str(self._path), n)
-```
-
-## See also
-
-- [Rust adapter creation](./rust-creation.md): Deep dive into the Rust traits
-- [Schema](./schema.md): Declare column names for maximum performance
-- [Techniques](./techniques.md): Performance optimizations
-- [Examples](./examples.md): Worked CSV, JSONL, and TSV adapters
+* **Source** — pipeline-capable, implements `_read_arrow()` with plan
+  forwarding.
+* **Adapter** — thin wrapper, `read()` delegates to `Source(...).to_arrow()`.
+* **Stages** — repacked copies of `CastTypes`, `FilterRows`, etc.
+* **Registration** — adapter registered at import time via side-effect import.
+* Users import everything from the adapter package, never from **rypipe**.

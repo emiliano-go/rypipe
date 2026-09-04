@@ -139,7 +139,8 @@ This means:
 - No byte scanning for the field's value
 - No UTF-8 decoding
 - No hash lookup in the engine
-- The scanner can byte-jump past the entire field (via `find_close_after`)
+- The scanner can byte-jump past the entire field if the adapter implements
+  a `find_close_after` optimization
 
 In crxml, this saves ~66% of parse time on `drop_all` workloads (4,183 MB/s
 vs 2,706 MB/s baseline).
@@ -200,8 +201,8 @@ pub fn from_plan(names: &[&str], plan: &ExecutionPlan) -> Self {
 }
 ```
 
-When `schema_order` is set, the engine calls `from_plan` with the declared
-names. This is the fast path: no discovery, no sampling, no cache lookup.
+When `schema_order` is set, the engine calls `from_partial_plan` with the declared
+names. This allows unknown columns to be appended in discovery order.
 
 **Discovered schema** (`FrozenSchema::from_discovered`):
 
@@ -351,7 +352,7 @@ compares them natively during parsing:
 # This works correctly only with field_types:
 result = (
     MyAdapter("data.log", schema=["price", "cost"], field_types={"price": "float64", "cost": "float64"})
-    | FilterRows(field="price", op=">", field2="cost")
+    | FilterRows(field_a="price", op=">", field_b="cost")
 ).to_arrow()
 ```
 
