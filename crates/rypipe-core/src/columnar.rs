@@ -454,20 +454,31 @@ pub(crate) enum ColumnBuilder {
     Timestamp(TimeUnit, PrimColumn<i64>),
     Dictionary {
         codes: NullableColumn<i32>,
-        dict: Vec<String>,
+        /// Contiguous byte buffer for dictionary values (like StrColumn).
+        data: Vec<u8>,
+        /// Byte offsets into `data` for each dictionary entry.
+        offsets: Vec<i32>,
         /// value → code side-index.
-        index: HashMap<String, i32>,
+        index: rustc_hash::FxHashMap<Box<str>, i32>,
     },
 }
 
 /// Look up `v` in the dictionary index, inserting a new code if absent.
-fn dict_code(dict: &mut Vec<String>, index: &mut HashMap<String, i32>, v: &str) -> i32 {
-    if let Some(&code) = index.get(v) {
+/// Uses a contiguous byte buffer for values instead of Vec<String>.
+fn dict_code(
+    data: &mut Vec<u8>,
+    offsets: &mut Vec<i32>,
+    index: &mut rustc_hash::FxHashMap<Box<str>, i32>,
+    v: &str,
+) -> i32 {
+    let key: Box<str> = v.into();
+    if let Some(&code) = index.get(&key) {
         return code;
     }
-    let code = dict.len() as i32;
-    dict.push(v.to_owned());
-    index.insert(v.to_owned(), code);
+    let code = offsets.len() as i32 - 1;
+    data.extend_from_slice(v.as_bytes());
+    offsets.push(data.len() as i32);
+    index.insert(key, code);
     code
 }
 
@@ -547,8 +558,9 @@ impl ColumnBuilder {
             }
             FieldType::Dictionary => ColumnBuilder::Dictionary {
                 codes: NullableColumn::with_capacity(cap),
-                dict: Vec::new(),
-                index: HashMap::default(),
+                data: Vec::new(),
+                offsets: vec![0],
+                index: rustc_hash::FxHashMap::default(),
             },
         }
     }
@@ -567,8 +579,8 @@ impl ColumnBuilder {
                 ColumnBuilder::Int64(v) => v.push(Some(i)),
                 ColumnBuilder::Float64(v) => v.push(Some(i as f64)),
                 ColumnBuilder::String(col) => col.push(Some(&i.to_string())),
-                ColumnBuilder::Dictionary { codes, dict, index } => {
-                    let code = dict_code(dict, index, &i.to_string());
+                ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                    let code = dict_code(data, offsets, index, &i.to_string());
                     codes.push(Some(code));
                 }
                 _ => self.push(None),
@@ -577,8 +589,8 @@ impl ColumnBuilder {
                 ColumnBuilder::Float64(v) => v.push(Some(f)),
                 ColumnBuilder::Int64(v) => v.push(Some(f as i64)),
                 ColumnBuilder::String(col) => col.push(Some(&f.to_string())),
-                ColumnBuilder::Dictionary { codes, dict, index } => {
-                    let code = dict_code(dict, index, &f.to_string());
+                ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                    let code = dict_code(data, offsets, index, &f.to_string());
                     codes.push(Some(code));
                 }
                 _ => self.push(None),
@@ -586,8 +598,8 @@ impl ColumnBuilder {
             Value::Bool(b) => match self {
                 ColumnBuilder::Boolean(v) => v.push(Some(b)),
                 ColumnBuilder::String(col) => col.push(Some(&b.to_string())),
-                ColumnBuilder::Dictionary { codes, dict, index } => {
-                    let code = dict_code(dict, index, &b.to_string());
+                ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                    let code = dict_code(data, offsets, index, &b.to_string());
                     codes.push(Some(code));
                 }
                 _ => self.push(None),
@@ -597,8 +609,8 @@ impl ColumnBuilder {
                 ColumnBuilder::Int64(v) => v.push(Some(d as i64)),
                 ColumnBuilder::Float64(v) => v.push(Some(d as f64)),
                 ColumnBuilder::String(col) => col.push(Some(&format_date32(d))),
-                ColumnBuilder::Dictionary { codes, dict, index } => {
-                    let code = dict_code(dict, index, &format_date32(d));
+                ColumnBuilder::Dictionary { codes, data, offsets, index } => {
+                    let code = dict_code(data, offsets, index, &format_date32(d));
                     codes.push(Some(code));
                 }
                 _ => self.push(None),
@@ -614,12 +626,12 @@ impl ColumnBuilder {
                         Some(unit) => col.push(Some(&format_timestamp(ts, unit))),
                         None => col.push(Some(&ts.to_string())),
                     },
-                    ColumnBuilder::Dictionary { codes, dict, index } => {
+                    ColumnBuilder::Dictionary { codes, data, offsets, index } => {
                         let text = match unit {
                             Some(unit) => format_timestamp(ts, unit),
                             None => ts.to_string(),
                         };
-                        let code = dict_code(dict, index, &text);
+                        let code = dict_code(data, offsets, index, &text);
                         codes.push(Some(code));
                     }
                     _ => self.push(None),
@@ -697,16 +709,17 @@ impl ColumnBuilder {
                     "cannot promote column to unified variant '{target}'"
                 )));
             }
-            let mut dict: Vec<String> = Vec::new();
-            let mut index: HashMap<String, i32> = HashMap::default();
+            let mut data: Vec<u8> = Vec::new();
+            let mut offsets: Vec<i32> = vec![0];
+            let mut index: rustc_hash::FxHashMap<Box<str>, i32> = rustc_hash::FxHashMap::default();
             let mut codes = NullableColumn::with_capacity(old.len());
             for val in old.iter() {
                 match val {
-                    Some(s) => codes.push(Some(dict_code(&mut dict, &mut index, s))),
+                    Some(s) => codes.push(Some(dict_code(&mut data, &mut offsets, &mut index, s))),
                     None => codes.push(None),
                 }
             }
-            *self = ColumnBuilder::Dictionary { codes, dict, index };
+            *self = ColumnBuilder::Dictionary { codes, data, offsets, index };
             return Ok(());
         }
 
@@ -735,9 +748,9 @@ impl ColumnBuilder {
             ColumnBuilder::Timestamp(unit, v) => {
                 v.push(value.and_then(|s| parse_timestamp(&s, *unit)));
             }
-            ColumnBuilder::Dictionary { codes, dict, index } => match value {
+            ColumnBuilder::Dictionary { codes, data, offsets, index } => match value {
                 Some(v) => {
-                    let idx = dict_code(dict, index, &v);
+                    let idx = dict_code(data, offsets, index, &v);
                     codes.push(Some(idx));
                 }
                 None => codes.push(None),
@@ -765,9 +778,9 @@ impl ColumnBuilder {
             ColumnBuilder::Timestamp(unit, v) => {
                 v.push(value.and_then(|s| parse_timestamp(s, *unit)));
             }
-            ColumnBuilder::Dictionary { codes, dict, index } => match value {
+            ColumnBuilder::Dictionary { codes, data, offsets, index } => match value {
                 Some(v) => {
-                    let idx = dict_code(dict, index, v);
+                    let idx = dict_code(data, offsets, index, v);
                     codes.push(Some(idx));
                 }
                 None => codes.push(None),
@@ -807,7 +820,7 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => v.bytes_used(),
             ColumnBuilder::Date32(v) => v.bytes_used(),
             ColumnBuilder::Timestamp(_, v) => v.bytes_used(),
-            ColumnBuilder::Dictionary { codes, dict, .. } => codes.len() * 4 + dict.len() * 16,
+            ColumnBuilder::Dictionary { codes, data, offsets, .. } => codes.len() * 4 + data.len() + offsets.len() * 4,
         }
     }
 
@@ -820,8 +833,8 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => v.capacity_bytes(),
             ColumnBuilder::Date32(v) => v.capacity_bytes(),
             ColumnBuilder::Timestamp(_, v) => v.capacity_bytes(),
-            ColumnBuilder::Dictionary { codes, dict, .. } => {
-                codes.capacity_bytes() + dict.capacity() * 16
+            ColumnBuilder::Dictionary { codes, data, offsets, .. } => {
+                codes.capacity_bytes() + data.capacity() + offsets.capacity() * 4
             }
         }
     }
@@ -835,11 +848,12 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => ColumnBuilder::Boolean(v.split_off(n)),
             ColumnBuilder::Date32(v) => ColumnBuilder::Date32(v.split_off(n)),
             ColumnBuilder::Timestamp(unit, v) => ColumnBuilder::Timestamp(*unit, v.split_off(n)),
-            ColumnBuilder::Dictionary { codes, dict, index } => {
+            ColumnBuilder::Dictionary { codes, data, offsets, index } => {
                 let other_codes = codes.split_off(n);
                 ColumnBuilder::Dictionary {
                     codes: other_codes,
-                    dict: dict.clone(),
+                    data: data.clone(),
+                    offsets: offsets.clone(),
                     index: index.clone(),
                 }
             }
@@ -852,8 +866,12 @@ impl ColumnBuilder {
     pub(crate) fn get_filter_view(&self, index: usize) -> Option<&str> {
         match self {
             ColumnBuilder::String(v) => v.get(index),
-            ColumnBuilder::Dictionary { codes, dict, .. } => {
-                codes.get(index).map(|code| dict[*code as usize].as_str())
+            ColumnBuilder::Dictionary { codes, data, offsets, .. } => {
+                codes.get(index).map(|code| {
+                    let start = offsets[*code as usize] as usize;
+                    let end = offsets[*code as usize + 1] as usize;
+                    std::str::from_utf8(&data[start..end]).unwrap_or("")
+                })
             }
             _ => None,
         }
@@ -872,8 +890,12 @@ impl ColumnBuilder {
                 let unit = *unit;
                 v.get(index).map(|ts| format_timestamp(ts, unit))
             }
-            ColumnBuilder::Dictionary { codes, dict, .. } => {
-                codes.get(index).map(|code| dict[*code as usize].clone())
+            ColumnBuilder::Dictionary { codes, data, offsets, .. } => {
+                codes.get(index).map(|code| {
+                    let start = offsets[*code as usize] as usize;
+                    let end = offsets[*code as usize + 1] as usize;
+                    String::from_utf8_lossy(&data[start..end]).into_owned()
+                })
             }
         }
     }
@@ -888,9 +910,13 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => v.get(index).map(TypedValue::Bool),
             ColumnBuilder::Date32(v) => v.get(index).map(TypedValue::Date32),
             ColumnBuilder::Timestamp(_, v) => v.get(index).map(TypedValue::Timestamp),
-            ColumnBuilder::Dictionary { codes, dict, .. } => codes
+            ColumnBuilder::Dictionary { codes, data, offsets, .. } => codes
                 .get(index)
-                .map(|&idx| TypedValue::Str(dict[idx as usize].as_str())),
+                .map(|&idx| {
+                    let start = offsets[idx as usize] as usize;
+                    let end = offsets[idx as usize + 1] as usize;
+                    TypedValue::Str(std::str::from_utf8(&data[start..end]).unwrap_or(""))
+                }),
         }
     }
 
@@ -925,20 +951,25 @@ impl ColumnBuilder {
             (
                 ColumnBuilder::Dictionary {
                     codes: a_codes,
-                    dict: a_dict,
+                    data: a_data,
+                    offsets: a_offsets,
                     index: a_index,
                 },
                 ColumnBuilder::Dictionary {
                     codes: b_codes,
-                    dict: b_dict,
+                    data: b_data,
+                    offsets: b_offsets,
                     ..
                 },
             ) => {
                 // Remap b's dictionary into a's once, then translate codes.
-                let remap: Vec<i32> = b_dict
-                    .iter()
-                    .map(|val| dict_code(a_dict, a_index, val))
-                    .collect();
+                let mut remap: Vec<i32> = Vec::with_capacity(b_offsets.len() - 1);
+                for i in 0..(b_offsets.len() - 1) {
+                    let start = b_offsets[i] as usize;
+                    let end = b_offsets[i + 1] as usize;
+                    let val = std::str::from_utf8(&b_data[start..end]).unwrap_or("");
+                    remap.push(dict_code(a_data, a_offsets, a_index, val));
+                }
                 for c in b_codes.iter() {
                     a_codes.push(c.map(|code| remap[*code as usize]));
                 }
@@ -981,19 +1012,20 @@ impl ColumnBuilder {
             return;
         }
         // Upgrade: build dictionary + codes.
-        let mut dict: Vec<String> = Vec::new();
-        let mut index: HashMap<String, i32> = HashMap::default();
+        let mut data: Vec<u8> = Vec::new();
+        let mut offsets: Vec<i32> = vec![0];
+        let mut index: rustc_hash::FxHashMap<Box<str>, i32> = rustc_hash::FxHashMap::default();
         let mut codes = NullableColumn::with_capacity(old.len());
         for v in old.iter() {
             match v {
                 Some(s) => {
-                    let idx = dict_code(&mut dict, &mut index, s);
+                    let idx = dict_code(&mut data, &mut offsets, &mut index, s);
                     codes.push(Some(idx));
                 }
                 None => codes.push(None),
             }
         }
-        *self = ColumnBuilder::Dictionary { codes, dict, index };
+        *self = ColumnBuilder::Dictionary { codes, data, offsets, index };
     }
 
     /// Mutable access to dictionary codes for in-place remap.
@@ -1009,11 +1041,13 @@ impl ColumnBuilder {
     /// No-op if not a Dictionary variant.
     pub(crate) fn replace_dict(
         &mut self,
-        new_dict: Vec<String>,
-        new_index: rustc_hash::FxHashMap<String, i32>,
+        new_data: Vec<u8>,
+        new_offsets: Vec<i32>,
+        new_index: rustc_hash::FxHashMap<Box<str>, i32>,
     ) {
-        if let ColumnBuilder::Dictionary { dict, index, .. } = self {
-            *dict = new_dict;
+        if let ColumnBuilder::Dictionary { data, offsets, index, .. } = self {
+            *data = new_data;
+            *offsets = new_offsets;
             *index = new_index;
         }
     }
@@ -1100,13 +1134,14 @@ impl ColumnBuilder {
                 TimeUnit::Microsecond => v.to_arrow::<TimestampMicrosecondType>()?,
                 TimeUnit::Nanosecond => v.to_arrow::<TimestampNanosecondType>()?,
             },
-            ColumnBuilder::Dictionary { codes, dict, .. } => {
+            ColumnBuilder::Dictionary { codes, data, offsets, .. } => {
+                use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
                 let codes_arr: Int32Array = std::mem::take(codes).into_options().collect();
-                let values: ArrayRef = Arc::new(
-                    dict.iter()
-                        .map(|s| Some(s.as_str()))
-                        .collect::<StringArray>(),
-                );
+                // Zero-copy: wrap contiguous data+offsets directly into StringArray.
+                // Dictionary values are always non-null, so validity is None.
+                let offsets_buf = OffsetBuffer::new(ScalarBuffer::from(std::mem::take(offsets)));
+                let data_buf = Buffer::from_vec(std::mem::take(data));
+                let values: ArrayRef = Arc::new(StringArray::try_new(offsets_buf, data_buf, None)?);
                 let arr = DictionaryArray::<Int32Type>::try_new(codes_arr, values)?;
                 Arc::new(arr)
             }
@@ -1277,8 +1312,16 @@ mod tests {
         d.push_value(Value::Float64(7.0)); // same string as Int64(7)
         d.push_value(Value::Bool(true));
         d.push_value(Value::Null);
-        if let ColumnBuilder::Dictionary { codes, dict, .. } = &d {
-            assert_eq!(dict, &["7", "true"]);
+        if let ColumnBuilder::Dictionary { codes, data, offsets, .. } = &d {
+            // Verify dictionary values via the contiguous buffer
+            let vals: Vec<&str> = (0..offsets.len() - 1)
+                .map(|i| {
+                    let start = offsets[i] as usize;
+                    let end = offsets[i + 1] as usize;
+                    std::str::from_utf8(&data[start..end]).unwrap()
+                })
+                .collect();
+            assert_eq!(vals, vec!["7", "true"]);
             assert_eq!(
                 codes.iter().map(|o| o.copied()).collect::<Vec<_>>(),
                 vec![Some(0), Some(0), Some(1), None]

@@ -153,21 +153,21 @@ impl ParallelExecutor {
                     let first_idx = engines[0].field_index.get(col_name).copied();
                     if let Some(idx) = first_idx {
                         if engines[0].columns[idx].variant_key() == "dictionary" {
-                            let first_dict =
-                                if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } =
+                            let first_data =
+                                if let crate::columnar::ColumnBuilder::Dictionary { data, offsets, .. } =
                                     &engines[0].columns[idx]
                                 {
-                                    dict
+                                    (data, offsets)
                                 } else {
                                     continue;
                                 };
                             for e in &engines[1..] {
                                 if let Some(&j) = e.field_index.get(col_name) {
                                     if let crate::columnar::ColumnBuilder::Dictionary {
-                                        dict, ..
+                                        data, offsets, ..
                                     } = &e.columns[j]
                                     {
-                                        if dict != first_dict {
+                                        if data != first_data.0 || offsets != first_data.1 {
                                             unify_col = Some(col_name.clone());
                                             break;
                                         }
@@ -185,42 +185,54 @@ impl ParallelExecutor {
                 }
                 let col_name = unify_col.unwrap();
                 // Build seed from first chunk, unify, remap.
-                let first_dict =
-                    if let crate::columnar::ColumnBuilder::Dictionary { dict, .. } =
+                let first_data =
+                    if let crate::columnar::ColumnBuilder::Dictionary { data, offsets, .. } =
                         &engines[0].columns[engines[0].field_index[&col_name]]
                     {
-                        dict.clone()
+                        (data.clone(), offsets.clone())
                     } else {
                         return engines_to_record_batches(engines, &plan);
                     };
-                let seed = crate::dict::SeedDict::new(first_dict);
+                // Build SeedDict from the contiguous buffer
+                let mut seed_values = Vec::new();
+                let mut seed_offsets = Vec::with_capacity(first_data.1.len());
+                seed_offsets.push(0);
+                for i in 0..(first_data.1.len() - 1) {
+                    let start = first_data.1[i] as usize;
+                    let end = first_data.1[i + 1] as usize;
+                    seed_values.extend_from_slice(&first_data.0[start..end]);
+                    seed_offsets.push(seed_values.len() as i32);
+                }
+                let seed = crate::dict::SeedDict {
+                    values: seed_values,
+                    offsets: seed_offsets,
+                    index: rustc_hash::FxHashMap::default(), // Will be populated by unify
+                };
                 let col_refs: Vec<&crate::columnar::ColumnBuilder> = engines
                     .iter()
                     .filter_map(|e| e.field_index.get(&col_name).map(|&idx| &e.columns[idx]))
                     .collect();
                 let (unified_dict, remaps) = crate::dict::unify_dictionaries(&seed, &col_refs);
-                // Build unified dict values and index for replace_dict.
-                let mut new_dict = Vec::with_capacity(unified_dict.offsets.len() - 1);
-                for w in unified_dict.offsets.windows(2) {
-                    let start = w[0] as usize;
-                    let end = w[1] as usize;
-                    let s = std::str::from_utf8(&unified_dict.data[start..end])
-                        .unwrap_or("")
-                        .to_owned();
-                    new_dict.push(s);
+                // Build unified data+offsets+index for replace_dict.
+                let mut new_index: rustc_hash::FxHashMap<Box<str>, i32> = rustc_hash::FxHashMap::default();
+                for i in 0..(unified_dict.offsets.len() - 1) {
+                    let start = unified_dict.offsets[i] as usize;
+                    let end = unified_dict.offsets[i + 1] as usize;
+                    let s = std::str::from_utf8(&unified_dict.data[start..end]).unwrap_or("");
+                    let k: Box<str> = s.into();
+                    new_index.insert(k, i as i32);
                 }
-                let new_index: HashMap<String, i32> = new_dict
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| (s.clone(), i as i32))
-                    .collect();
                 // Apply remap to each chunk, then replace dict.
                 for (e, remap) in engines.iter_mut().zip(remaps.iter()) {
                     if let Some(idx) = e.field_index.get(&col_name).copied() {
                         if let Some(codes) = e.columns[idx].dict_codes_mut() {
                             codes.remap_codes(&remap.map);
                         }
-                        e.columns[idx].replace_dict(new_dict.clone(), new_index.clone());
+                        e.columns[idx].replace_dict(
+                            unified_dict.data.clone(),
+                            unified_dict.offsets.clone(),
+                            new_index.clone(),
+                        );
                     }
                 }
                 return engines_to_record_batches(engines, &plan);
