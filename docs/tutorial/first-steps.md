@@ -41,8 +41,8 @@ The Source parses the file once and caches the result. Subsequent calls to
 | `.to_pandas()` | `pd.DataFrame` | Convert to pandas |
 | `.to_dataframe()` | `pd.DataFrame` | Alias for `.to_pandas()` |
 | `.to_polars()` | `pl.DataFrame` | Convert to Polars |
-| `.to_parquet(path)` | — | Write to Parquet |
-| `.clear_cache()` | — | Drop cached table |
+| `.to_parquet(path)` | - | Write to Parquet |
+| `.clear_cache()` | - | Drop cached table |
 | `.schema()` | `list[str]` | Column names from first row |
 | `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts |
 
