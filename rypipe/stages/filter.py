@@ -4,13 +4,32 @@ from __future__ import annotations
 class _ConstantPredicate:
     __slots__ = ("_field", "_op", "_value")
 
-    _VALID_OPS = frozenset({"==", "eq", "!=", "ne"})
+    _VALID_OPS = frozenset({
+        "==", "eq", "!=", "ne",
+        ">", "gt", "<", "lt",
+        ">=", "ge", "<=", "le",
+    })
+
+    _OPS = {
+        ">": lambda a, b: a > b,
+        "<": lambda a, b: a < b,
+        ">=": lambda a, b: a >= b,
+        "<=": lambda a, b: a <= b,
+        "==": lambda a, b: a == b,
+        "!=": lambda a, b: a != b,
+        "eq": lambda a, b: a == b,
+        "ne": lambda a, b: a != b,
+        "gt": lambda a, b: a > b,
+        "lt": lambda a, b: a < b,
+        "ge": lambda a, b: a >= b,
+        "le": lambda a, b: a <= b,
+    }
 
     def __init__(self, field: str, op: str, value: str):
         if op not in self._VALID_OPS:
             raise ValueError(
                 f"FilterRows: unsupported operator {op!r} for constant filter; "
-                f"use '==' or '!='"
+                f"valid operators: {', '.join(sorted(self._VALID_OPS))}"
             )
         self._field = field
         self._op = op
@@ -18,9 +37,9 @@ class _ConstantPredicate:
 
     def __call__(self, record: dict) -> bool:
         actual = record.get(self._field)
-        if self._op in ("==", "eq"):
-            return actual == self._value
-        return actual != self._value
+        if actual is None:
+            return False
+        return self._OPS[self._op](actual, self._value)
 
 
 class _ComparePredicate:

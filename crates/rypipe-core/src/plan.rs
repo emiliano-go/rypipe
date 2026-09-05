@@ -220,9 +220,9 @@ impl CompareOp {
 
 /// A filter predicate evaluated per-row during parsing.
 ///
-// Leaf predicates (`Equal`, `NotEqual`, `Compare`) can be composed into a
-// tree with `And`, `Or`, and `Not`. Evaluation is recursive with
-// short-circuiting; a row is kept only if the whole tree passes.
+// Leaf predicates (`Equal`, `NotEqual`, `Compare`, `CompareLiteral`) can be
+// composed into a tree with `And`, `Or`, and `Not`. Evaluation is recursive
+// with short-circuiting; a row is kept only if the whole tree passes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FilterPredicate {
     /// Keep row if `field_value != value` (string comparison, per-row).
@@ -235,6 +235,13 @@ pub enum FilterPredicate {
         field_a: String,
         op: CompareOp,
         field_b: String,
+    },
+    /// Column-to-literal comparison with ordering. Uses typed comparison
+    /// with numeric promotion (e.g. Int64 field > Float64 literal).
+    CompareLiteral {
+        field: String,
+        op: CompareOp,
+        value: String,
     },
     /// Keep row if both sub-predicates pass. Short-circuits on the first
     /// failure.
@@ -304,6 +311,16 @@ impl FilterPredicate {
                     (Some(a), Some(b)) => compare_typed(&a, *op, &b),
                     _ => false,
                 }
+            }
+            FilterPredicate::CompareLiteral { field, op, value } => {
+                let va = get_column(columns, field_index, resolve(field, plan))
+                    .and_then(|b| b.get_typed_value(row_index));
+                if let Some(a) = va {
+                    if let Some(b) = typed_from_literal(&a, value) {
+                        return compare_typed(&a, *op, &b);
+                    }
+                }
+                false
             }
             FilterPredicate::And(a, b) => {
                 // Evaluate the operand with the earlier field first for
@@ -408,6 +425,27 @@ fn apply_op(op: CompareOp, ord: Option<std::cmp::Ordering>) -> bool {
     }
 }
 
+/// Parse a string literal into a `TypedValue` matching the operand's type.
+/// Used by `CompareLiteral` to coerce the literal to the field's type.
+fn typed_from_literal<'a>(
+    sample: &crate::columnar::TypedValue<'a>,
+    literal: &'a str,
+) -> Option<crate::columnar::TypedValue<'a>> {
+    use crate::columnar::TypedValue as T;
+    match sample {
+        T::Str(_) => Some(T::Str(literal)),
+        T::Int64(_) => literal.parse::<i64>().ok().map(T::Int64),
+        T::Float64(_) => literal.parse::<f64>().ok().map(T::Float64),
+        T::Bool(_) => match literal {
+            "true" | "True" | "TRUE" => Some(T::Bool(true)),
+            "false" | "False" | "FALSE" => Some(T::Bool(false)),
+            _ => None,
+        },
+        T::Date32(_) => literal.parse::<i32>().ok().map(T::Date32),
+        T::Timestamp(_) => literal.parse::<i64>().ok().map(T::Timestamp),
+    }
+}
+
 /// Return the minimum field ordinal for a predicate, used to order
 /// `And`/`Or` operands by document position (C2). Higher ordinal = later
 /// in the document. Returns `usize::MAX` for predicates without a
@@ -418,7 +456,9 @@ fn pred_ordinal(
     plan: &ExecutionPlan,
 ) -> usize {
     match pred {
-        FilterPredicate::Equal { field, .. } | FilterPredicate::NotEqual { field, .. } => {
+        FilterPredicate::Equal { field, .. }
+        | FilterPredicate::NotEqual { field, .. }
+        | FilterPredicate::CompareLiteral { field, .. } => {
             field_index
                 .get(resolve(field, plan))
                 .copied()
