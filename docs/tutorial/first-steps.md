@@ -45,8 +45,8 @@ kwargs; check your adapter's documentation for what it supports.
 | `.to_arrow()` | `pyarrow.Table` | Parse and cache the table |
 | `.to_pandas()` | `pd.DataFrame` | Convert to pandas |
 | `.to_polars()` | `pl.DataFrame` | Convert to Polars |
-| `.to_parquet(path)` | — | Write to Parquet |
-| `.clear_cache()` | — | Drop cached table |
+| `.to_parquet(path)` | - | Write to Parquet |
+| `.clear_cache()` | - | Drop cached table |
 | `.schema()` | `list[str]` | Column names from first row |
 | `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts |
 | `.__or__(stage)` | `Pipeline` | Pipe operator for stages |

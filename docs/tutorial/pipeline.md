@@ -29,9 +29,9 @@ When you call `.to_arrow()` on a pipeline, **rypipe**:
 
 1. Splits the stages into **fusable** and **non-fusable** groups.
 2. Pushes fusable stages (RenameFields, DropFields, CastTypes, constant
-   FilterRows) into the Rust parse loop via the plan.
-3. Runs remaining stages (lambda predicates, complex combinators) over Arrow
-   batches in Python.
+   FilterRows, and compiled lambdas) into the Rust parse loop via the plan.
+3. Runs remaining stages (non-resolvable lambda predicates, complex
+   combinators) over Arrow batches in Python.
 
 This means fusable stages run at Rust speed during parsing: they never touch
 Python.
