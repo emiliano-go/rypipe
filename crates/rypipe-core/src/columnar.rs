@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Date32Array, Decimal128Array, DictionaryArray, Float64Array, Int32Array, Int64Array,
-    PrimitiveArray, StringArray,
+    ArrayRef, BooleanArray, Date32Array, Decimal128Array, DictionaryArray, Float64Array,
+    Int32Array, Int64Array, PrimitiveArray, StringArray,
 };
 use arrow::datatypes::{
     DataType, Int32Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
@@ -797,7 +797,10 @@ impl ColumnBuilder {
             }
             ColumnBuilder::Decimal128(scale, v) => {
                 v.push(value.and_then(|s| {
-                    s.trim().parse::<i128>().ok().map(|n| n * 10i128.pow(*scale as u32))
+                    s.trim()
+                        .parse::<i128>()
+                        .ok()
+                        .map(|n| n * 10i128.pow(*scale as u32))
                 }));
             }
             ColumnBuilder::Dictionary {
@@ -837,7 +840,10 @@ impl ColumnBuilder {
             }
             ColumnBuilder::Decimal128(scale, v) => {
                 v.push(value.and_then(|s| {
-                    s.trim().parse::<i128>().ok().map(|n| n * 10i128.pow(*scale as u32))
+                    s.trim()
+                        .parse::<i128>()
+                        .ok()
+                        .map(|n| n * 10i128.pow(*scale as u32))
                 }));
             }
             ColumnBuilder::Dictionary {
@@ -927,7 +933,9 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(v) => ColumnBuilder::Boolean(v.split_off(n)),
             ColumnBuilder::Date32(v) => ColumnBuilder::Date32(v.split_off(n)),
             ColumnBuilder::Timestamp(unit, v) => ColumnBuilder::Timestamp(*unit, v.split_off(n)),
-            ColumnBuilder::Decimal128(scale, v) => ColumnBuilder::Decimal128(*scale, v.split_off(n)),
+            ColumnBuilder::Decimal128(scale, v) => {
+                ColumnBuilder::Decimal128(*scale, v.split_off(n))
+            }
             ColumnBuilder::Dictionary {
                 codes,
                 data,
@@ -1176,9 +1184,7 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(_) => DataType::Boolean,
             ColumnBuilder::Date32(_) => DataType::Date32,
             ColumnBuilder::Timestamp(unit, _) => DataType::Timestamp(*unit, None),
-            ColumnBuilder::Decimal128(scale, _) => {
-                DataType::Decimal128(38, *scale as i8)
-            }
+            ColumnBuilder::Decimal128(scale, _) => DataType::Decimal128(38, *scale as i8),
             ColumnBuilder::Dictionary { .. } => {
                 DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
             }
@@ -1262,7 +1268,7 @@ impl ColumnBuilder {
                 let values: Vec<Option<i128>> = (0..v.len()).map(|i| v.get(i)).collect();
                 let arr: Decimal128Array = values.into_iter().collect();
                 Arc::new(arr.with_precision_and_scale(38, *scale as i8)?)
-            },
+            }
             ColumnBuilder::Dictionary {
                 codes,
                 data,

@@ -34,7 +34,11 @@ impl FieldType {
             "timestamp[ns]" => Some(FieldType::Timestamp(TimeUnit::Nanosecond)),
             "decimal128" => Some(FieldType::Decimal128(18)),
             s if s.starts_with("decimal128(") => {
-                let scale = s.trim_start_matches("decimal128(").trim_end_matches(')').parse::<u8>().ok()?;
+                let scale = s
+                    .trim_start_matches("decimal128(")
+                    .trim_end_matches(')')
+                    .parse::<u8>()
+                    .ok()?;
                 Some(FieldType::Decimal128(scale))
             }
             _ => None,
@@ -419,9 +423,7 @@ impl FilterPredicate {
                     let field_f64 = match &a {
                         crate::columnar::TypedValue::Int64(v) => *v as f64,
                         crate::columnar::TypedValue::Float64(v) => *v,
-                        crate::columnar::TypedValue::Str(s) => {
-                            s.parse::<f64>().unwrap_or(0.0)
-                        }
+                        crate::columnar::TypedValue::Str(s) => s.parse::<f64>().unwrap_or(0.0),
                         _ => return false,
                     };
                     let result = match arith_op {
@@ -577,12 +579,10 @@ fn pred_ordinal(
         | FilterPredicate::In { field, .. }
         | FilterPredicate::NotIn { field, .. }
         | FilterPredicate::NotField { field, .. }
-        | FilterPredicate::ArithmeticCompare { field, .. } => {
-            field_index
-                .get(resolve(field, plan))
-                .copied()
-                .unwrap_or(usize::MAX)
-        }
+        | FilterPredicate::ArithmeticCompare { field, .. } => field_index
+            .get(resolve(field, plan))
+            .copied()
+            .unwrap_or(usize::MAX),
         FilterPredicate::Always(_) => usize::MAX,
         FilterPredicate::Compare {
             field_a, field_b, ..
