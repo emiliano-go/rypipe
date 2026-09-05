@@ -57,10 +57,9 @@ stage = RenameFields({"Name": "name", "Amount": "amount"})
 # Output: {"name": "Alice", "amount": 150, "Status": "active"}
 ```
 
-### Plan fusion { #renamefields-fusion }
+### Fusion { #renamefields-fusion }
 
-`_plan_kwargs()` returns `{"field_mapping": {"Name": "name"}}`. The Rust
-engine renames columns during parsing: no Python overhead.
+**Fusable.** The Rust engine renames columns during parsing, no Python overhead.
 
 ## DropFields { #dropfields }
 
@@ -87,11 +86,10 @@ stage = DropFields(["InternalId"])
 # Output: {"Name": "Alice", "Amount": 150}
 ```
 
-### Plan fusion { #dropfields-fusion }
+### Fusion { #dropfields-fusion }
 
-`_plan_kwargs()` returns `{"drop_fields": ["InternalId"]}`. The Rust engine
-skips the dropped column entirely: no scanning, no decoding, no memory
-allocation for that column.
+**Fusable.** The Rust engine skips the dropped column entirely: no scanning,
+no decoding, no memory allocation for that column.
 
 !!! tip
 
@@ -133,11 +131,10 @@ the cast fails (e.g., `int("abc")`), a `ValueError` is raised:
 CastTypes({"age": int})({"age": "abc"})
 ```
 
-### Plan fusion { #casttypes-fusion }
+### Fusion { #casttypes-fusion }
 
-`_plan_kwargs()` returns `{"field_types": {"age": "int64"}}`. The Rust engine
-parses the column directly as the target type: no string-to-number
-conversion in Python.
+**Fusable** for `int`, `float`, `bool`. The Rust engine parses the column
+directly as the target type: no string-to-number conversion in Python.
 
 Supported type mappings:
 
@@ -208,11 +205,11 @@ stage = FilterRows(lambda r: r["name"].startswith("A") and r["amount"] > 100)
     (`field`/`op`/`value`) whenever possible.
 
 
-### Plan fusion { #filterrows-fusion }
+### Fusion { #filterrows-fusion }
 
-Constant filters and column comparisons return a `_plan_kwargs()` dict that
-the Rust engine applies during parsing. Callable predicates return `None`
-(no fusion).
+**Fusable** when using the keyword form (`field`/`op`/`value` or
+`field_a`/`op`/`field_b`). The Rust engine applies the filter during
+parsing. Callable predicates run in Python.
 
 ## FilterRowsAny { #filterrowsany }
 
@@ -231,10 +228,9 @@ stage = FilterRowsAny(
 
 **Parameters:** At least two `FilterRows` instances (keyword form only).
 
-### Plan fusion { #filterrowsany-fusion }
+### Fusion { #filterrowsany-fusion }
 
-`_plan_kwargs()` returns `{"filter": {"or": [...]}}`. The Rust engine applies
-the OR tree during parsing.
+**Fusable.** The Rust engine applies the OR tree during parsing.
 
 ## FilterRowsAll { #filterrowsall }
 
