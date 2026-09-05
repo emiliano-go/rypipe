@@ -194,8 +194,7 @@ stage = FilterRows(field_a="price", op=">", field_b="cost")
 # Input:  {"price": 30,  "cost": 50}  → dropped (30 is not > 50)
 ```
 
-Supported operators: `>`, `<`, `>=`, `<=`, `==`, `!=`, `gt`, `lt`, `ge`,
-`le`, `eq`, `ne`.
+Supported operators: `>`, `<`, `>=`, `<=`, `==`, `!=`.
 
 ### Callable predicate { #filterrows-callable }
 
