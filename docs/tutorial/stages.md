@@ -11,26 +11,28 @@ Rust parse loop.
 
 ## How stages work { #how-stages-work }
 
-A stage is any callable that takes an iterable of dicts and returns an
-iterable of dicts:
+Stages are the building blocks of pipelines. Each stage transforms
+the data as it flows through, like a Unix pipe:
 
 ```python
-# A stage is a Callable[[Iterable[dict]], Iterable[dict]]
-def my_stage(stream):
-    for record in stream:
-        # transform or filter the record
-        yield record
+from crxml import CrystalXMLSource, RenameFields, FilterRows
+
+source = CrystalXMLSource("report.xml", row_tag="Details")
+
+# Each stage transforms the data in order
+result = (
+    source
+    | RenameFields({"Name": "name"})    # renames columns
+    | FilterRows(field="Status", op="==", value="Active")  # keeps matching rows
+)
+
+table = result.to_arrow()
 ```
 
-**rypipe** stages have three methods:
-
-* `apply(record)`: transform a single dict (used for fused iteration).
-* `__call__(stream)`: transform an iterable of dicts (used for unfused
-  iteration).
-* `_plan_kwargs()`: return pushdown kwargs for the Rust engine, or `None`
-  if the stage cannot be fused.
-
-You never call these methods directly. The pipeline calls them automatically.
+Under the hood, stages are callables that transform dicts. **rypipe**
+automatically pushes fusable stages (RenameFields, DropFields, CastTypes,
+constant FilterRows) into the Rust parse loop for maximum performance.
+Non-fusable stages (lambda predicates) run in Python.
 
 ## RenameFields { #renamefields }
 
