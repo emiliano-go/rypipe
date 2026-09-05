@@ -61,6 +61,7 @@ name = "rypipe on PyPI"
     { "First Steps" = "tutorial/first-steps.md" },
     { "Pipeline" = "tutorial/pipeline.md" },
     { "Stages" = "tutorial/stages.md" },
+    { "Plans" = "tutorial/plans.md" },
     { "Sinks" = "tutorial/sinks.md" },
     { "Streaming" = "tutorial/streaming.md" },
     { "Configuration" = "tutorial/configuration.md" },

@@ -33,6 +33,7 @@ Under the hood, stages are callables that transform dicts. **rypipe**
 automatically pushes fusable stages (RenameFields, DropFields, CastTypes,
 constant FilterRows) into the Rust parse loop for maximum performance.
 Non-fusable stages (lambda predicates) run in Python.
+See [Plans](plans.md#plans) for how this works.
 
 ## RenameFields { #renamefields }
 
