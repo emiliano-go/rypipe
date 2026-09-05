@@ -151,7 +151,6 @@ def _read_arrow(self, plan_overrides: dict | None = None) -> pyarrow.Table:
 |--------|---------|-------------|
 | `.to_arrow()` | `pyarrow.Table` | Parse and cache the table. |
 | `.to_pandas(dtype_backend="pyarrow")` | `pd.DataFrame` | Convert to pandas. |
-| `.to_dataframe(dtype_backend="pyarrow")` | `pd.DataFrame` | Alias for `.to_pandas()`. |
 | `.to_polars()` | `pl.DataFrame` | Convert to Polars. |
 | `.to_parquet(path, **kwargs)` | `None` | Write to Parquet. |
 | `.schema()` | `list[str]` | Column names from first row. |

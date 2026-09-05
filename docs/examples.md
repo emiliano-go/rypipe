@@ -27,7 +27,7 @@ df = (
     | DropFields(["internal_id"])
     | FilterRows(field="status", op="==", value="active")
     | CastTypes({"amount": float, "qty": int})
-).to_dataframe()
+).to_pandas()
 ```
 
 ### Build an adapter subclass { #build-an-adapter-subclass }
@@ -63,7 +63,7 @@ for row in source:
 
 # Or export to Arrow and reuse it { #or-export-to-arrow-and-reuse-it }
 arrow = source.to_arrow()
-df = source.to_dataframe()
+df = source.to_pandas()
 source.to_parquet("report.parquet")
 ```
 

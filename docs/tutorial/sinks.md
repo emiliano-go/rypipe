@@ -53,14 +53,6 @@ You can disable PyArrow backing with `dtype_backend="numpy"`:
 df = src.to_pandas(dtype_backend="numpy")
 ```
 
-### to_dataframe() { #to-dataframe }
-
-Alias for `to_pandas()`:
-
-```python
-df = src.to_dataframe()  # same as src.to_pandas()
-```
-
 ### to_polars() { #to-polars }
 
 Returns a Polars DataFrame:
@@ -117,7 +109,7 @@ print(rows[0])
 # {"name": "Alice", "amount": 150.0, "status": "active"}
 ```
 
-### to_arrow() (function) { #to-arrow-function }
+### to_arrow { #to-arrow }
 
 Materializes a pipeline to a `pyarrow.Table`:
 
@@ -127,7 +119,7 @@ from crxml import to_arrow
 table = to_arrow(pipeline)
 ```
 
-### to_pandas() (function) { #to-pandas-function}
+### to_pandas { #to-pandas }
 
 Materializes a pipeline to a pandas DataFrame:
 
@@ -137,7 +129,7 @@ from crxml import to_pandas
 df = to_pandas(pipeline)
 ```
 
-### to_polars() (function) { #to-polars-function}
+### to_polars { #to-polars }
 
 Materializes a pipeline to a Polars DataFrame:
 
@@ -147,7 +139,7 @@ from crxml import to_polars
 df = to_polars(pipeline)
 ```
 
-### to_csv() (function) { #to-csv-function}
+### to_csv { #to-csv }
 
 Writes pipeline results to a CSV file:
 
@@ -169,7 +161,7 @@ to_csv(pipeline, "output.tsv", delimiter="\t", encoding="utf-8")
 * `fieldnames`: optional list of column names. If omitted, uses the keys
   from the first row.
 
-### to_parquet() (function) { #to-parquet-function}
+### to_parquet { #to-parquet }
 
 Writes pipeline results to a Parquet file:
 

@@ -38,7 +38,7 @@ S3 / API / FTP
 
 * **Orchestration** is Python (`Airflow`, `Dagster`, `Prefect`, `Mage`, plain `cron`). A DAG that can `import rypipe` keeps the whole pipeline in one language.
 * **File handling** is Python (`pathlib`, `fsspec`, `boto3`, `requests`). Requiring users to shell out to a Rust binary breaks composability.
-* **Interactivity** is Python. Data is discovered in a Jupyter notebook: `source | FilterRows(...) | .to_dataframe().describe()`. The same code then runs headless in CI. A pure-Rust library forces a context switch (new language, new toolchain, new mental model) exactly when exploration should be fastest.
+* **Interactivity** is Python. Data is discovered in a Jupyter notebook: `source | FilterRows(...) | .to_pandas().describe()`. The same code then runs headless in CI. A pure-Rust library forces a context switch (new language, new toolchain, new mental model) exactly when exploration should be fastest.
 * **Error handling & data quality** are Python (`pydantic`, `pandera`, `great_expectations`). Row-level validation, Slack alerts, and quarantine logic live next to the parse call, not inside the parser.
 
 A pure-Rust `rypipe` would need users to learn `cargo`, `tokio`, lifetimes, and Arrow’s Rust API to do what today is one `pip install` and five lines.
@@ -77,7 +77,7 @@ In other words: *you pay Rust for the hot loop, Python for the composition*. A p
 |-----------|----------------------|----------------------|
 | **Install** | `pip install rypipe my-adapter`, one wheel, stable ABI (`abi3`, 3.10+), manylinux/musllinux/macOS/Windows | `cargo add rypipe-core my-adapter && cargo build --release`, requires Rust 1.78+, `cc`, Arrow build, per-project compilation |
 | **Audience** | Anyone who can `import pandas`, data engineers, analysts, scientists | Rust developers only, <10% of data teams |
-| **Prototyping** | `source \| FilterRows(...) \| .to_dataframe()` in a notebook cell, instant feedback | Write a binary, handle `Result`, print tables manually, rebuild on every change |
+| **Prototyping** | `source \| FilterRows(...) \| .to_pandas()` in a notebook cell, instant feedback | Write a binary, handle `Result`, print tables manually, rebuild on every change |
 | **Reuse in prod** | Same notebook code runs in Airflow/Dagster unchanged | Rewrite notebook logic in Rust or maintain two codebases |
 | **Tool chain** | Stays in `pip`/`conda`/`uv`, no new tool | Adds `rustup`, `cargo`, `miri`, `clippy` to every data repo |
 | **Arrow interop** | `pyarrow`, `pandas`, `Polars` zero-copy out of the box | Must go through FFI or JSON/CSV round-trip to reach Python consumers anyway |
@@ -113,7 +113,7 @@ let batch = Pipeline::new(MySplitter, MyDecoder::new())
 Modern data work is **data-driven development**: the shape of the output dictates the shape of the code, not the other way around.
 
 1. **See the data** (`source.schema()`, `source.to_pandas().head()`).
-2. **Shape it interactively** (`RenameFields`, `FilterRows`, `CastTypes` with instant `.to_dataframe()` preview).
+2. **Shape it interactively** (`RenameFields`, `FilterRows`, `CastTypes` with instant `.to_pandas()` preview).
 3. **Freeze the pipeline** (commit the `ExecutionPlan`).
 4. **Scale it** (same pipeline via `read_stream` with `memory="1GiB"` on 100 GB of files).
 

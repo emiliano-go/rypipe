@@ -20,7 +20,7 @@ my_adapter/
 ├── __init__.py            # re-exports, lazy loading
 ├── rypipe_adapter.py      # MyAdapter + registration
 ├── source.py              # MySource(Source)
-├── sinks.py               # collect, to_dataframe, to_csv (repacked)
+├── sinks.py               # collect, to_pandas, to_csv (repacked)
 └── stages/
     ├── __init__.py        # lazy re-exports
     ├── cast.py            # CastTypes

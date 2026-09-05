@@ -8,14 +8,6 @@ from pathlib import Path
 from typing import Iterable, Union
 
 
-def to_dataframe(
-    pipeline: Iterable[dict],
-    chunksize: int | None = None,
-    dtype_backend: str = "pyarrow",
-) -> "pd.DataFrame":
-    return to_pandas(pipeline, chunksize=chunksize, dtype_backend=dtype_backend)
-
-
 def to_pandas(
     pipeline: Iterable[dict],
     chunksize: int | None = None,

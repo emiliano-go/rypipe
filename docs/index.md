@@ -79,7 +79,7 @@ df = (
     src
     | CastTypes({"Amount": float})
     | FilterRows(field="Status", op="==", value="active")
-).to_dataframe()
+).to_pandas()
 
 print(df)
 #     Name  Amount  Status
