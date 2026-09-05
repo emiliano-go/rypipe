@@ -3,17 +3,11 @@
 </p>
 
 <p align="center">
-  <strong>Format-agnostic data ingestion framework with Rust core and Python bindings.</strong>
+  <strong>Format-agnostic columnar ingestion engine. Rust core, Python bindings.</strong>
 </p>
 
 <p align="center">
-  rypipe is a format- and source-agnostic ingestion framework that provides a common
-  execution runtime for turning arbitrary record-oriented data sources into typed
-  columnar data.
-</p>
-
-<p align="center">
-  Parse row-oriented byte streams into Apache Arrow record batches with parallel
+  Parse row-oriented byte streams into Apache Arrow tables with parallel
   scheduling, memory-bounded execution, query pushdown, and a chainable
   pipeline API. Format adapters live in separate packages.
 </p>
@@ -43,30 +37,49 @@
 
 ## What is rypipe
 
-`rypipe` is a pure ingestion-to-Arrow engine. It separates format-specific
-parsing (splitting, row extraction) from format-agnostic execution (typed
-column builders, filtering, projection, dictionary encoding, parallel
-scheduling, memory-bounded execution, and Arrow export). Add a new format by
+`rypipe` is a format-agnostic columnar ingestion engine. It separates
+format-specific parsing from format-agnostic execution. Add a new format by
 implementing two small traits: `Splitter` and `RecordParser`.
 
-`rypipe` itself does **not** ship parsers for XML, JSON, CSV, HTML, or any
-other format. Those live in separate adapter packages. Install the engine plus
-the adapters you need.
+`rypipe` itself does **not** ship parsers. Those live in separate adapter
+packages. Install the engine plus the adapters you need.
+
+## Quick start
+
+```bash
+pip install crxml
+```
+
+```python
+from crxml import CrystalXMLSource, CastTypes, FilterRows
+
+source = CrystalXMLSource("report.xml", row_tag="Details")
+
+# Simple read
+table = source.to_arrow()
+
+# Pipeline with stages
+result = (
+    source
+    | CastTypes({"Amount": float})
+    | FilterRows(field="Status", op="==", value="Active")
+).to_arrow()
+
+# Convert to DataFrame
+df = source.to_pandas()
+```
 
 ## Why rypipe
 
-- **One runtime, many formats.** XML, JSON, CSV, HTML, TSV, and any future
-  format share the same parallel scheduler, memory-bounded executor, Arrow
-  export, and pushdown infrastructure. An adapter is two small traits, not a
-  full engine.
+- **One runtime, many formats.** XML, JSON, CSV, and any future format share
+  the same parallel scheduler, memory-bounded executor, and pushdown
+  infrastructure. An adapter is two small traits, not a full engine.
 
-- **Performance without compromise.** Single-thread ~1 GB/s, parallel ~4.9 GB/s
-  unprojected, ~6.8-7.0 GB/s with projection. Zero-copy Arrow export. Predicate
-  first evaluation. Layout prediction via memcmp.
+- **Performance without compromise.** Parallel ~4.5 GB/s, single-thread ~1 GB/s.
+  Zero-copy Arrow export. Predicate-first evaluation. Layout prediction via memcmp.
 
-- **Correctness by construction.** Differential testing against an independent
-  oracle, fuzz targets, property tests, and a tier-ladder profiler that
-  decomposes every nanosecond of the hot path.
+- **Correctness by construction.** Differential testing, fuzz targets, property
+  tests, and a tier-ladder profiler.
 
 - **Python-native ergonomics.** Chainable pipeline API with automatic fusion of
   rename/drop/cast/filter into the Rust parse loop. Streaming with bounded
@@ -74,16 +87,9 @@ the adapters you need.
 
 ## What rypipe is not
 
-- **Not a query engine.** It handles projection, renaming, dropping, casting,
-  filtering, and dictionary encoding. It does not do joins, aggregations, window
-  functions, or SQL.
-
-- **Not a one-size-fits-all parser.** Each format needs a `RecordParser` +
-  `Splitter` adapter from a separate package. The engine provides the runtime;
-  you provide the format knowledge.
-
-- **Not a data warehouse.** It ingests data into Arrow; it does not store it,
-  index it, or serve queries over it.
+- **Not a query engine.** No joins, aggregations, window functions, or SQL.
+- **Not a parser.** Each format needs an adapter package.
+- **Not a data warehouse.** It ingests into Arrow; it does not store or serve.
 
 ## Features
 
@@ -92,94 +98,25 @@ the adapters you need.
 - **GIL-free parsing**: heavy work runs outside Python's GIL.
 - **Parallel by default**: chunked parsing with `rayon` scales to many cores.
 - **Memory bounded**: stream files larger than RAM with a configurable budget.
-- **Typed columns**: cast strings to `int64`, `float64`, or `bool` during parse.
 - **Pushdown filters**: rename, drop, type, and filter rows while parsing.
 - **Pipeline API**: chainable rename/drop/cast/filter stages with automatic fusion.
-- **Dictionary encoding**: explicit or automatic low-cardinality encoding.
 - **Arrow native**: produces `RecordBatch` and exports via the C Data Interface.
 
 ## Crates
 
 | Crate | Purpose |
 |-------|---------|
-| `rypipe-core` | Pure Rust engine: `Value`, `ExecutionPlan`, `TableBuilder`, `ColumnarSink`, `RecordParser`, `Splitter`, `Pipeline`, parallel/bounded drivers, Arrow export |
-| `rypipe-python` | PyO3 bindings and helper functions for adapter packages; exposes the `rypipe` package |
+| `rypipe-core` | Pure Rust engine: `Value`, `ExecutionPlan`, `TableBuilder`, `Pipeline`, parallel/bounded drivers, Arrow export |
+| `rypipe-python` | PyO3 bindings for adapter packages; exposes the `rypipe` package |
 
-## Python quick start
+## Documentation
 
-```bash
-pip install rypipe my-adapter
-```
-
-Wheels are built against CPython's stable ABI (`abi3`, 3.10+), so one wheel per
-platform covers every supported interpreter, including versions released after
-a given rypipe release. Prebuilt wheels ship for manylinux (glibc 2.17+),
-musllinux, macOS (x86_64 and arm64), and Windows x64; anything else builds from
-the sdist and needs a Rust toolchain.
-
-Optional DataFrame sinks pull their own dependencies:
-
-```bash
-pip install "rypipe[pandas]"   # to_pandas / to_dataframe
-pip install "rypipe[polars]"   # to_polars
-pip install "rypipe[all]"      # both
-```
-
-```python
-import rypipe
-import my_adapter
-
-table = rypipe.read(
-    "data.myfmt",
-    fields={"amount": "float64", "qty": "int64"},
-    filter={"field": "status", "op": "==", "value": "active"},
-)
-print(table.num_rows, table.num_columns)
-```
-
-```python
-# Bounded-memory streaming.
-table = rypipe.read_stream("huge.myfmt", memory="256MiB")
-```
-
-### Pipeline API
-
-Adapters that expose a `rypipe.Adapter` subclass give you a chainable pipeline
-with automatic fusion of rename, drop, cast, and filter stages into the Rust
-parse loop. Subclasses only implement ``read(path, **kwargs)``::
-
-```python
-from rypipe import RenameFields, DropFields, CastTypes, FilterRows
-import my_adapter
-
-source = my_adapter.MySource("data.myfmt")
-
-df = (
-    source
-    | RenameFields({"old_name": "new_name"})
-    | DropFields(["internal_id"])
-    | CastTypes({"amount": float, "qty": int})
-    | FilterRows(field="status", op="==", value="active")
-).to_dataframe()
-```
-
-The same operations work as kwargs on `rypipe.read` when you only need a table.
-
-## Rust quick start
-
-```rust
-use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-use my_adapter::{MySplitter, MyDecoder}; // separate adapter crate
-
-let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
-    .with_plan(
-        ExecutionPlan::new()
-            .type_as("amount", FieldType::Float64)
-            .type_as("qty", FieldType::Int64)
-            .filter_eq("status", "active"),
-    )
-    .read_path("data.myfmt", false, false)?;
-```
+- [Tutorial](docs/tutorial/index.md): install, first read, pipeline, stages, sinks, streaming
+- [Writing Adapters](docs/writing-adapters/index.md): add a new format
+- [Architecture](docs/architecture/index.md): how the engine works internally
+- [Advanced](docs/advanced/index.md): fusion, execution modes, memory, parallelism
+- [Python API](docs/reference/python-api.md): full API reference
+- [Rust API](docs/reference/rust-api.md): full API reference
 
 ## Building
 
@@ -196,83 +133,11 @@ maturin develop --release
 ```bash
 # Rust
 cargo test --workspace --all-features
-cargo clippy --workspace --all-targets --all-features : -D warnings
 
-# Python (against an installed build)
+# Python
 pip install -e ".[dev]"
 pytest crates/rypipe-python/tests/
 ```
-
-Tests covering optional dependencies (`pandas`, `polars`) skip when those
-packages are absent. Set `RYPIPE_REQUIRE_OPTIONAL_DEPS=1` to turn a missing
-optional dependency into a hard failure instead. CI sets it so that optional
-coverage cannot silently disappear from a green run.
-
-## Benchmark: parallel streaming with explicit schema
-
-`crxml` (reference adapter) on Ryzen 5800X, 533 MB / 1 GB, warm, median-of-7, explicit schema (`FrozenSchema` `crates/rypipe-core/src/schema.rs:21`, `discovery_ns` in `get_par_profile()`):
-
-| Mode | 533 MB Table | 1 GB Table | RssAnon 533 MB | Schema |
-|---|---|---|---|---|
-| `Pipeline::read_path_par` `par128` (4 MB) | **4470 MB/s** | 4278 MB/s | 137 MB | N/A |
-| `ParallelStreamingExecutor` `64MB/16t` auto (2 MB) | **4497 MB/s** | 3782* MB/s | **88 MB** | parallel 16x2 MiB sampled Discovery (5.3 ms) |
-| `ParallelStreamingExecutor` `64MB/16t` explicit `schema=[10 cols]` | **4980 MB/s** | ~4900 MB/s | **88 MB** | `from_plan` exact, no Discovery |
-| `ParallelStreamingExecutor` Vec\<Batch\> auto | 4485 MB/s | 3863* MB/s | 88 MB | same |
-
-\* 1 GB auto still 3782/3863; 533 MB auto matches par128 (4497 vs 4470, +0.6%, within CoV) with Discovery at 5.3 ms. Explicit schema is +11% vs par128 (4980 vs 4470) and defines the ceiling. `par` peaks at 4 MB, streaming at 2 MB; one divisor cannot serve both, kept split (`par` `4 MB`, streaming `2 MB` via `budget/(threads*2)`). See `crxml` `docs/performance.md` for like-for-like, chunk-per-cell, fixed-chunk isolation.
-
-### Schema pre-declaration
-
-The biggest performance lever for known schemas is declaring `schema=[...]`
-and `field_types={...}` up front. This skips column discovery, builds typed
-Arrow arrays directly (no intermediate strings), and stabilizes column order
-across parallel chunks. In the crxml reference adapter, explicit schema
-lifts throughput from 4.2 GB/s to 7.6 GB/s on production data (+80%), and
-the `row_satisfied` byte-jump reaches 11 GB/s on benchmarks.
-
-Run the engine throughput benchmark:
-
-```bash
-cargo run --release -p rypipe-core --example bench_throughput
-```
-
-## Documentation
-
-Full docs and integration guides are in the `docs/` directory:
-
-- [Overview](docs/index.md)
-- [Architecture](docs/architecture.md)
-- [Python API](docs/python-api.md)
-- [Rust API](docs/rust-api.md)
-- [Writing a format adapter](docs/writing-adapters.md)
-- [Performance](docs/performance.md)
-
-## Why Python, not pure Rust
-
-Data work lives in Python : `pip`, notebooks, and the PyArrow/pandas/Polars
-ecosystem. ETL is glue: `S3 → parse → rename/drop/cast/filter → validate →
-write Parquet`. That glue is Python; the hot loop that touches every byte at
-700 MB/s (2.5 GB/s parallel) must be Rust.
-
-`rypipe` is **Rust where it counts, Python where it ships**:
-
-* **Zero-copy, GIL-free Rust core** parses outside the GIL and hands Arrow
-  `RecordBatch`es to `pyarrow` via the C Data Interface : no copy, no
-  serialization.
-* **Python composition** : `source | RenameFields | FilterRows | CastTypes |
-  .to_dataframe()` : lets the same pipeline be explored in a notebook and
-  scaled unchanged in Airflow/Dagster on 100 GB of files.
-* **Pure-Rust still works** when you need it: `rypipe-core` has no Python
-  dependency and is usable as a crate (`Pipeline::new(Splitter, Parser)` →
-  `read_path_par`).
-
-A pure-Rust library would save ~0.1 ms of orchestration and cost the 90% of
-users who have never run `cargo build` their workflow. For data teams, a
-`pip install` beats a toolchain install every time.
-
-> `polars` didn’t win by being pure Rust : it won with a Rust engine behind
-> `pl.DataFrame`. `rypipe` does the same for ingestion. See the full
-> data-driven justification in [Why Python?](docs/why-python.md).
 
 ## License
 
