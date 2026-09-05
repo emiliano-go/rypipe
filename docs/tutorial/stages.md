@@ -205,25 +205,18 @@ or `False` to drop:
 stage = FilterRows(lambda r: r["name"].startswith("A"))
 ```
 
-Simple lambdas (field comparisons, `startswith`, compound AND) are
-automatically compiled into fusable predicates. See
-[Lambda Compiler](../architecture/lambda-compiler.md) for the full list of
-supported patterns and limitations.
-
-!!! warning
-
-    Complex lambdas (closures, nested calls) fall back to Python execution.
-    For best performance, use the keyword form (`field`/`op`/`value`) whenever
-    possible.
+Simple lambdas (field comparisons, `startswith`, `endswith`, compound AND/OR)
+are automatically compiled into fusable predicates that run in the Rust parse
+loop. Complex lambdas (closures, nested calls) fall back to Python execution.
+See [Lambda Compiler](../architecture/lambda-compiler.md) for the full list
+of supported patterns.
 
 
 ### Fusion { #filterrows-fusion }
 
-**Fusable** when using the keyword form (`field`/`op`/`value` or
-`field_a`/`op`/`field_b`), or when a lambda is automatically compiled by
-the lambda compiler (simple comparisons, `startswith`, `endswith`, arithmetic).
-The Rust engine applies the filter during parsing. Complex lambdas
-(closures, nested calls) run in Python.
+FilterRows is fusable when using the keyword form or a compiled lambda.
+The Rust engine applies the filter during parsing. See
+[Callable predicate](#filterrows-callable) for details.
 
 ## FilterRowsAny { #filterrowsany }
 
@@ -316,7 +309,7 @@ table = result.to_arrow()
 * **DropFields** removes columns. Always fusable.
 * **CastTypes** converts column types. Fusable for `int`, `float`, `bool`.
 * **FilterRows** filters rows. Fusable when using the keyword form or a
-  compiled lambda.
+  compiled lambda. See [Lambda Compiler](../architecture/lambda-compiler.md).
 * **FilterRowsAny**, **FilterRowsAll**, **FilterRowsNot** combine filters.
 * Import stages from the adapter package, not from **rypipe**.
 
