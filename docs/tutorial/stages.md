@@ -135,14 +135,23 @@ directly as the target type: no string-to-number conversion in Python.
 
 Supported type mappings:
 
-| Python type | Rust type | Arrow type |
-|------------|-----------|------------|
-| `int` | `"int64"` | `int64` |
-| `float` | `"float64"` | `float64` |
-| `bool` | `"bool"` | `bool` |
-| `str` | skipped | `string` (no-op) |
-| `datetime.date` | `"date32"` | `date32` |
-| `datetime.datetime` | `"timestamp"` | `timestamp` |
+| Python type | Rust type | Arrow type | Notes |
+|------------|-----------|------------|-------|
+| `int` | `"int64"` | `int64` | String "123" → integer 123 |
+| `float` | `"float64"` | `float64` | String "1.5" → float 1.5 |
+| `bool` | `"bool"` | `bool` | String "true" → boolean true |
+| `str` | skipped | `string` | No-op: values are already strings |
+| `datetime.date` | `"date32"` | `date32` | String "2024-01-15" → date |
+| `datetime.datetime` | `"timestamp"` | `timestamp` | String "2024-01-15T10:30:00" → timestamp |
+| `Decimal` | `"float64"` | `float64` | Lossy: decimal → float64 |
+| `UUID` | `"string"` | `string` | No-op: UUIDs are already strings |
+
+!!! note
+
+    The `str` cast is a no-op because the engine already stores all values as
+    strings. Casting to `str` does nothing. Similarly, `UUID` is a no-op
+    because UUIDs are stored as strings. `Decimal` is cast to `float64`, which
+    may lose precision for very large decimals.
 
 ## FilterRows { #filterrows }
 
