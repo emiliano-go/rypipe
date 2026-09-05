@@ -49,8 +49,8 @@ handles them at parse time:
 | `FilterRowsAll` | All inner filters are fusable | `filter` |
 | `FilterRowsNot` | Inner filter is fusable | `filter` |
 
-Stages that cannot be expressed as plan kwargs (lambda predicates) are
-**non-fusable**. They run in Python over the parsed data.
+Stages that cannot be expressed as plan kwargs (non-resolvable lambda
+predicates) are **non-fusable**. They run in Python over the parsed data.
 
 ## Why plans matter { #why-plans-matter }
 
