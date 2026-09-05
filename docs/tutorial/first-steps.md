@@ -95,7 +95,7 @@ data as it flows through, like a Unix pipe:
 * `CastTypes` casts the "Amount" column from string to float.
 * `FilterRows` keeps only rows where Status equals "Active".
 
-Each `|` returns a new `Pipeline` — the original Source is not modified.
+Each `|` returns a new `Pipeline`, the original Source is not modified.
 
 ### What **rypipe** does automatically { #what-rypipe-does-pipeline }
 

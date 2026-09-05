@@ -168,8 +168,8 @@ source.to_pandas(dtype_backend="numpy")    # NumPy-backed dtypes
 ```
 
 When `dtype_backend="pyarrow"` (default), string columns use
-`pd.ArrowDtype(pa.string())` — zero-copy from Arrow. When
-`dtype_backend="numpy"`, string columns use `pd.StringDtype()` — standard
+`pd.ArrowDtype(pa.string())`, zero-copy from Arrow. When
+`dtype_backend="numpy"`, string columns use `pd.StringDtype()`, standard
 pandas strings.
 
 ### to_parquet() details { #to-parquet-details }
