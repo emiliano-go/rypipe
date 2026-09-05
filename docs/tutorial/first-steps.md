@@ -1,163 +1,141 @@
 # First Steps { #first-steps }
 
-!!! note
+This page explains the complete example from the [Tutorial](index.md#tutorial)
+line by line. By the end, you will understand what a **Source** is, how the
+pipeline operator works, and what **rypipe** does behind the scenes.
 
-    The examples on this page use the **crxml** adapter. Other adapters may
-    accept different parameters. Check your adapter's docs.
+## The example { #the-example }
 
-This page covers the core **rypipe** concepts: the Source abstraction, the
-pipeline operator, stages, and sinks. **rypipe** provides these interfaces
-as a framework, adapter packages implement them for each format.
+Here is the complete code we will explain:
 
-## The Source { #the-source }
+```python
+from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows
 
-A **Source** is a handle over one input file. It parses the file into a
-`pyarrow.Table` and provides caching, pipeline support, and multiple output
-formats:
+source = CrystalXMLSource("report.xml", row_tag="Details")
+
+df = (
+    source
+    | RenameFields({"Name": "name"})
+    | CastTypes({"Amount": float})
+    | FilterRows(field="Status", op="==", value="Active")
+).to_pandas()
+
+print(df)
+```
+
+## Step 1: Create a Source { #step-1-create-a-source }
 
 ```python
 from crxml import CrystalXMLSource
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
-
-# Parse and get a table (cached on first call)
-table = source.to_arrow()
-
-# Convert to pandas
-df = source.to_pandas()
-
-# Convert to Polars
-df_pl = source.to_polars()
 ```
 
-The Source parses the file once and caches the result. Subsequent calls to
-`to_arrow()`, `to_pandas()`, etc. reuse the cached table.
+A **Source** is a handle over one input file. It does not parse the file yet.
+It stores the path and configuration, and waits for you to ask for data.
 
-### What the Source gives you { #what-the-source-gives-you }
+The `row_tag="Details"` argument is adapter-specific: it tells the **crxml**
+adapter which XML element represents a row. Each adapter accepts its own
+kwargs; check your adapter's documentation for what it supports.
+
+### What a Source gives you { #what-a-source-gives-you }
 
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `.to_arrow()` | `pyarrow.Table` | Parse and cache the table |
 | `.to_pandas()` | `pd.DataFrame` | Convert to pandas |
-| `.to_pandas()` | `pd.DataFrame` | Alias for `.to_pandas()` |
 | `.to_polars()` | `pl.DataFrame` | Convert to Polars |
-| `.to_parquet(path)` | - | Write to Parquet |
-| `.clear_cache()` | - | Drop cached table |
+| `.to_parquet(path)` | — | Write to Parquet |
+| `.clear_cache()` | — | Drop cached table |
 | `.schema()` | `list[str]` | Column names from first row |
 | `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts |
+| `.__or__(stage)` | `Pipeline` | Pipe operator for stages |
 
-## The pipeline operator { #the-pipeline-operator}
-
-The `|` operator chains transformation stages on a Source:
+## Step 2: Parse with to_arrow() { #step-2-parse-with-to_arrow}
 
 ```python
-from crxml import CrystalXMLSource
-from crxml import RenameFields, CastTypes, FilterRows
-
 source = CrystalXMLSource("report.xml", row_tag="Details")
+table = source.to_arrow()
+```
 
+The first time you call `.to_arrow()`, **rypipe** parses the file:
+
+1. The **Splitter** finds row boundaries in the byte stream.
+2. The **RecordParser** extracts field values from each row.
+3. The **Engine** accumulates values into Arrow columns.
+4. The result is a `pyarrow.Table`.
+
+The table is cached. Subsequent calls to `.to_arrow()`, `.to_pandas()`,
+etc. reuse the cached table without re-parsing.
+
+### What **rypipe** does automatically { #what-rypipe-does }
+
+With just that one call, **rypipe**:
+
+* Splits the file into chunks for parallel parsing.
+* Discovers the schema from the data.
+* Builds Arrow column arrays with near-zero copy.
+* Returns a `pyarrow.Table` you can use directly.
+
+## Step 3: Chain stages with | { #step-3-chain-stages-with}
+
+```python
 result = (
     source
     | RenameFields({"Name": "name"})
     | CastTypes({"Amount": float})
     | FilterRows(field="Status", op="==", value="Active")
 )
-
-# Materialize to a table
-table = result.to_arrow()
-
-# Or to a DataFrame
-df = result.to_pandas()
 ```
 
-Each `|` returns a new `Pipeline`, the original Source is not modified.
+The `|` operator chains transformation stages. Each stage transforms the
+data as it flows through, like a Unix pipe:
 
-## Stages { #stages }
+* `RenameFields` renames the "Name" column to "name".
+* `CastTypes` casts the "Amount" column from string to float.
+* `FilterRows` keeps only rows where Status equals "Active".
 
-Stages transform streams of dicts. **rypipe** provides these stages:
+Each `|` returns a new `Pipeline` — the original Source is not modified.
 
-| Stage | Purpose |
-|-------|---------|
-| `RenameFields` | Rename columns |
-| `DropFields` | Remove columns |
-| `CastTypes` | Cast column types |
-| `FilterRows` | Filter rows by predicate |
+### What **rypipe** does automatically { #what-rypipe-does-pipeline }
 
-All stages are fusable: **rypipe** pushes them into the Rust parse loop
-for maximum performance. See [Stages](stages.md#stages) for details.
+When you call `.to_pandas()` on the pipeline, **rypipe**:
 
-## Sinks { #sinks}
+1. Splits the stages into **fusable** and **non-fusable** groups.
+2. Pushes fusable stages (RenameFields, DropFields, CastTypes, constant
+   FilterRows) into the Rust parse loop via the plan.
+3. Runs remaining stages (lambda predicates, complex combinators) over Arrow
+   batches in Python.
 
-Sinks materialize pipeline results. You can use them as methods on a Source
-or as standalone functions:
+Fusable stages run at Rust speed during parsing: they never touch Python.
+
+## Step 4: Get a DataFrame { #step-4-get-a-dataframe}
 
 ```python
-from crxml import CrystalXMLSource, collect, to_pandas
-
-source = CrystalXMLSource("report.xml", row_tag="Details")
-
-# As Source methods
-table = source.to_arrow()
-df = source.to_pandas()
-
-# As standalone functions (on pipelines)
-pipeline = source | FilterRows(field="Status", op="==", value="Active")
-rows = collect(pipeline)
-df = to_pandas(pipeline)
+df = result.to_pandas()
+print(df)
+#     name  Amount  Status
+# 0  Alice   150.0  Active
+# 2  Carol   200.0  Active
 ```
+
+`.to_pandas()` materializes the pipeline into a pandas DataFrame. You can
+also use:
+
+* `.to_arrow()` for a `pyarrow.Table`
+* `.to_polars()` for a Polars DataFrame
+* `.to_parquet(path)` to write to a Parquet file
+* `rypipe.collect()` to get a list of dicts
 
 See [Sinks](sinks.md#sinks) for the full reference.
 
-## Streaming { #streaming}
-
-For large files, use `iter_record_batches()` to process data in bounded
-chunks:
-
-```python
-from crxml import CrystalXMLSource
-
-source = CrystalXMLSource("huge_report.xml", row_tag="Details")
-
-for batch in source.iter_record_batches(memory="64MiB"):
-    # Each batch is a pyarrow.RecordBatch
-    process(batch)
-```
-
-See [Streaming](streaming.md#streaming) for details.
-
-## Error handling { #error-handling }
-
-Adapters raise specific exceptions for different error types:
-
-```python
-from crxml import CrystalXMLSource, XmlError, PlanError, MergeError
-
-try:
-    source = CrystalXMLSource("bad_file.xml", row_tag="Details")
-    table = source.to_arrow()
-except XmlError as e:
-    # The file could not be parsed (malformed XML, encoding errors)
-    print(f"Parse error: {e}")
-except PlanError as e:
-    # Invalid plan kwargs (bad filter spec, unknown field type)
-    print(f"Invalid plan: {e}")
-except MergeError as e:
-    # Schema mismatch between chunks
-    print(f"Schema merge error: {e}")
-```
-
-!!! note
-
-    Exception names vary by adapter. Check your adapter's docs for the
-    specific exception types it raises.
-
 ## Recap { #recap }
 
-* A **Source** parses a file into a `pyarrow.Table` with caching.
+* A **Source** is a handle over one input file. It parses lazily and caches.
 * The `|` operator chains stages into a **Pipeline**.
-* **Stages** (`RenameFields`, `CastTypes`, `FilterRows`, `DropFields`)
-  transform data with Rust-speed fusion.
-* **Sinks** materialize results to tables, DataFrames, or files.
-* **Streaming** processes large files with bounded memory.
+* **Stages** (`RenameFields`, `CastTypes`, `FilterRows`) transform data.
+* **Sinks** (`.to_pandas()`, `.to_arrow()`) materialize results.
+* **rypipe** pushes fusable stages into the Rust parse loop automatically.
 
-**Next:** [Pipeline](pipeline.md#pipeline), stages in depth.
+**Next:** [Building an Adapter](building-an-adapter.md#building-an-adapter),
+the basic scaffolding.

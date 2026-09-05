@@ -1,253 +1,191 @@
 # Pipeline { #pipeline }
 
-!!! note
-
-    The stages shown here (`CastTypes`, `FilterRows`, etc.) are available in
-    most adapters but may have different options. Check your adapter's docs.
-
 The pipeline operator (`|`) lets you chain transformation stages on a Source.
 Each stage transforms the data as it flows through, like a Unix pipe.
 
 ## Basic usage { #basic-usage }
 
 ```python
-from crxml import CrystalXMLSource
-from crxml import RenameFields, CastTypes, FilterRows
+from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows
 
-# Create a source
 src = CrystalXMLSource("report.xml", row_tag="Details")
 
-# Chain stages with |
 result = (
     src
     | RenameFields({"Name": "name", "Amount": "amount"})
     | CastTypes({"amount": float})
-    | FilterRows(field="status", op="==", value="active")
+    | FilterRows(field="Status", op="==", value="Active")
 )
 
 # Materialize to a table
 table = result.to_arrow()
-print(table.num_rows)
-# 12 (rows where Status == "Active")
 ```
 
-### What **rypipe** does automatically { #what-rypipe-does }
+Each `|` returns a new `Pipeline` — the original Source is not modified.
+
+### What **rypipe** does automatically { #what-rypipe-does}
 
 When you call `.to_arrow()` on a pipeline, **rypipe**:
 
 1. Splits the stages into **fusable** and **non-fusable** groups.
 2. Pushes fusable stages (RenameFields, DropFields, CastTypes, constant
    FilterRows) into the Rust parse loop via the plan.
-3. Runs remaining stages (non-resolvable lambda predicates, complex
-   combinators) over Arrow batches in Python.
+3. Runs remaining stages (lambda predicates, complex combinators) over Arrow
+   batches in Python.
 
 This means fusable stages run at Rust speed during parsing: they never touch
 Python.
 
-## Available stages { #available-stages }
+## Building the Python wrapper { #building-the-python-wrapper }
 
-All stages are re-exported from adapter packages. Import them from the
-adapter, not from **rypipe**:
+To support the pipeline `|` operator, your adapter needs a Source subclass
+that forwards plan kwargs to the Rust reader.
 
-```python
-from crxml import RenameFields, DropFields, CastTypes, FilterRows
-from crxml import FilterRowsAny, FilterRowsAll, FilterRowsNot
-```
-
-### RenameFields { #renamefields }
-
-Renames columns. Fields not in the mapping pass through unchanged.
+### `rypipe_log/source.py` { #source-py }
 
 ```python
-from crxml import RenameFields
+from __future__ import annotations
+from typing import Any
 
-# Rename "Name" to "name" and "Amount" to "amount"
-stage = RenameFields({"Name": "name", "Amount": "amount"})
+import _rypipe_log
+from rypipe import Source
+
+
+class LogSource(Source):
+    """Pipeline-capable source for newline-delimited key=value logs."""
+
+    def _read_arrow(self, plan_overrides: dict[str, Any] | None = None) -> Any:
+        # Start with construction-time kwargs (field_mapping, drop_fields, etc.)
+        plan = self._build_plan_kwargs()
+        # Fused pipeline stages override construction-time kwargs
+        if plan_overrides:
+            plan.update(plan_overrides)
+        # Pass the merged plan to the Rust reader
+        return _rypipe_log.read_log(str(self._path), **plan)
 ```
 
-**Parameters:**
+When a user writes `src | RenameFields(...) | FilterRows(...)`, the pipeline
+collects stages into a plan. When `.to_arrow()` is called, the pipeline calls
+`_read_arrow(plan_overrides=...)` on your source.
 
-* `mapping: dict[str, str]`: mapping from old names to new names.
-
-### DropFields { #dropfields }
-
-Removes columns entirely. Dropped columns are skipped during parsing: no
-scanning, no decoding.
+`plan_overrides` contains the fused stage kwargs:
 
 ```python
-from crxml import DropFields
-
-# Drop the "InternalId" column
-stage = DropFields(["InternalId"])
-
-# Drop multiple columns
-stage = DropFields(["InternalId", "TempCol", "DebugInfo"])
+{
+    "field_mapping": {"Name": "name"},
+    "drop_fields": ["InternalId"],
+    "filter": {"field": "Status", "op": "==", value": "Active"},
+    "field_types": {"Amount": "float64"},
+}
 ```
 
-**Parameters:**
+You must merge these with your construction kwargs and pass them to your
+Rust reader. If you ignore `plan_overrides`, fused stages silently fall back
+to Python execution (10-50x slower).
 
-* `fields: list[str]`: list of column names to drop.
+### `rypipe_log/rypipe_adapter.py` { #adapter-py}
 
-!!! warning
-
-    Pass a list, not a bare string. `DropFields("name")` raises `TypeError`.
-    Use `DropFields(["name"])` instead.
-
-
-### CastTypes { #casttypes}
-
-Casts column values to the specified Python types.
+The adapter is a thin, stateless wrapper that delegates to the Source:
 
 ```python
-from crxml import CastTypes
+from __future__ import annotations
+from typing import Any
 
-# Cast "amount" to float and "age" to int
-stage = CastTypes({"amount": float, "age": int})
+from .source import LogSource
+
+
+class LogAdapter:
+    """rypipe-compatible adapter for newline-delimited key=value logs."""
+
+    def read(self, path: str, **kwargs: Any) -> Any:
+        """Parse ``path`` and return a ``pyarrow.Table``."""
+        return LogSource(path, **kwargs).to_arrow()
+
+
+def _register() -> None:
+    try:
+        import rypipe
+    except Exception:  # pragma: no cover — rypipe is optional
+        return
+    rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
+
+
+_register()
 ```
-
-**Parameters:**
-
-* `mapping: dict[str, Callable]`: mapping from column name to Python callable
-  (`int`, `float`, `str`, `bool`).
 
 !!! note
 
-    If a row is missing the field, the cast is silently skipped. If the cast
-    fails (e.g., `int("abc")`), a `ValueError` is raised with the row value.
+    The adapter's `read()` method returns a `pyarrow.Table`, not a Source.
+    This is by design — `rypipe.read()` calls `adapter.read()` and expects a
+    table. Users who want pipelines use the Source directly.
 
+## Using the Pipeline { #using-the-pipeline}
 
-### FilterRows { #filterrows}
-
-Filters rows by a predicate. Supports three forms:
-
-**Constant filter**: compare a field to a value:
+With the Source and stages in place, users can write:
 
 ```python
-from crxml import FilterRows
+from rypipe_log import LogSource, CastTypes, FilterRows
 
-# Keep rows where status == "active"
-stage = FilterRows(field="status", op="==", value="active")
-
-# Keep rows where age != "0"
-stage = FilterRows(field="age", op="!=", value="0")
-```
-
-**Column comparison**: compare two fields:
-
-```python
-# Keep rows where price > cost
-stage = FilterRows(field_a="price", op=">", field_b="cost")
-```
-
-**Callable predicate**: arbitrary Python logic:
-
-```python
-# Keep rows where name starts with "A"
-stage = FilterRows(lambda r: r["name"].startswith("A"))
-```
-
-**Parameters:**
-
-* `predicate`: a callable `(dict) -> bool` (mutually exclusive with the
-  keyword forms below).
-* `field: str`: column name for constant filter.
-* `op: str`: operator: `"=="`, `"!="`, `"eq"`, `"ne"`.
-* `value: str`: value to compare against (constant filter).
-* `field_a: str`: left column for column comparison.
-* `field_b: str`: right column for column comparison.
-
-Column comparison operators: `">"`, `"<"`, `">="`, `"<="`, `"=="`, `"!="`,
-`"gt"`, `"lt"`, `">="`, `"<="`, `"eq"`, `"ne"`.
-
-### Combinators { #combinators }
-
-Combine multiple `FilterRows` with boolean logic:
-
-```python
-from crxml import FilterRows, FilterRowsAny, FilterRowsAll, FilterRowsNot
-
-# OR: keep rows matching ANY filter
-stage = FilterRowsAny(
-    FilterRows(field="status", op="==", value="active"),
-    FilterRows(field="status", op="==", value="pending"),
+src = LogSource("test.log")
+result = (
+    src
+    | CastTypes({"age": int})
+    | FilterRows(field="active", op="==", value="true")
 )
 
-# AND: keep rows matching ALL filters
-stage = FilterRowsAll(
-    FilterRows(field="status", op="==", value="active"),
-    FilterRows(field="age", op="!=", value="0"),
-)
-
-# NOT: negate a filter
-stage = FilterRowsNot(FilterRows(field="status", op="==", value="deleted"))
+table = result.to_arrow()
 ```
 
-!!! warning
+## Chaining multiple stages { #chaining-multiple-stages}
 
-    Combinators only accept fusable `FilterRows` instances (keyword form
-    or compiled lambdas). Raw callable predicates cannot be combined.
-
-
-## Chaining multiple stages { #chaining-multiple-stages }
-
-Stages are applied in order. Each `|` returns a new `Pipeline`: the original
-Source is not modified:
+Stages are applied in order. Each `|` returns a new `Pipeline`:
 
 ```python
-from crxml import CrystalXMLSource
-from crxml import RenameFields, DropFields, CastTypes, FilterRows
+from rypipe_log import LogSource
+from rypipe_log import RenameFields, DropFields, CastTypes, FilterRows
 
-src = CrystalXMLSource("report.xml", row_tag="Details")
+src = LogSource("test.log")
 
 # All stages are fusable: runs entirely in Rust
 table = (
     src
     | RenameFields({"Name": "name"})
     | DropFields(["InternalId"])
-    | CastTypes({"amount": float})
-    | FilterRows(field="status", op="==", value="active")
+    | CastTypes({"age": int})
+    | FilterRows(field="active", op="==", value="true")
 ).to_arrow()
 ```
 
-!!! tip
-
-    When all stages are fusable, **rypipe** pushes the entire pipeline into the
-    Rust parse loop. No Python row processing occurs.
-
-
-## Iterating rows { #iterating-rows }
+## Iterating rows { #iterating-rows}
 
 You can iterate over pipeline results as Python dicts:
 
 ```python
-from crxml import CrystalXMLSource
-from crxml import FilterRows
+from rypipe_log import LogSource, FilterRows
 
-src = CrystalXMLSource("report.xml", row_tag="Details")
-pipeline = src | FilterRows(field="status", op="==", value="active")
+src = LogSource("test.log")
+pipeline = src | FilterRows(field="active", op="==", value="true")
 
 for row in pipeline:
-    print(row["name"], row["amount"])
-# Alice 150.0
-# Bob 75.0
+    print(row["name"], row["age"])
 ```
 
-## Collecting to a list { #collecting-to-a-list }
+## Collecting to a list { #collecting-to-a-list}
 
 ```python
-from crxml import collect
+from rypipe import collect
 
-rows = collect(src | FilterRows(field="status", op="==", value="active"))
-print(rows)
-# [{"name": "Alice", "amount": 150.0, "status": "active"}, ...]
+rows = collect(src | FilterRows(field="active", op="==", value="true"))
 ```
 
 ## Recap { #recap }
 
 * Use `|` to chain stages on a Source.
 * **rypipe** pushes fusable stages into the Rust parse loop automatically.
+* The Source's `_read_arrow()` method must forward `plan_overrides` to the
+  Rust reader.
 * Import stages from the adapter package, not from **rypipe**.
 * Call `.to_arrow()`, `.to_pandas()`, or `.to_polars()` to materialize.
-* Iterate with `for row in pipeline` or collect with `collect()`.
 
-**Next:** [Stages](stages.md#stages): detailed reference for each stage class.
+**Next:** [Stages](stages.md#stages), implement `CastTypes`, `FilterRows`,
+etc.
