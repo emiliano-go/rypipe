@@ -564,13 +564,17 @@ def test_nested_combinator_pipeline(sample_table):
 
 
 def test_filter_rows_any_rejects_callable_inner():
+    """Callable predicates that can't be compiled are rejected by combinators."""
+    uncompileable = lambda r: r["name"].strip().lower() == "alice"
     with pytest.raises(ValueError, match="only accepts fusable"):
-        FilterRowsAny(FilterRows(predicate=lambda r: True), FilterRows(field="x", op="==", value="1"))
+        FilterRowsAny(FilterRows(predicate=uncompileable), FilterRows(field="x", op="==", value="1"))
 
 
 def test_filter_rows_not_requires_leaf():
+    """Callable predicates that can't be compiled are rejected by NOT."""
+    uncompileable = lambda r: r["name"].strip().lower() == "alice"
     with pytest.raises(ValueError, match="only accepts fusable"):
-        FilterRowsNot(FilterRows(predicate=lambda r: False))
+        FilterRowsNot(FilterRows(predicate=uncompileable))
 
 
 def test_filter_rows_any_needs_two():

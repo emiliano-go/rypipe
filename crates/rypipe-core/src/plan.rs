@@ -203,6 +203,27 @@ pub enum CompareOp {
     Ne,
 }
 
+/// Arithmetic operator for field expressions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl ArithOp {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "+" | "add" => Some(ArithOp::Add),
+            "-" | "sub" => Some(ArithOp::Sub),
+            "*" | "mul" => Some(ArithOp::Mul),
+            "/" | "div" => Some(ArithOp::Div),
+            _ => None,
+        }
+    }
+}
+
 impl CompareOp {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
@@ -247,6 +268,22 @@ pub enum FilterPredicate {
     StartsWith { field: String, value: String },
     /// Keep row if `field_value.ends_with(value)`.
     EndsWith { field: String, value: String },
+    /// Keep row if `field_value` is in the given set.
+    In { field: String, values: Vec<String> },
+    /// Keep row if `field_value` is not in the given set.
+    NotIn { field: String, values: Vec<String> },
+    /// Always keep or reject the row.
+    Always(bool),
+    /// Keep row if the field is falsy (None, empty string, or missing).
+    NotField { field: String },
+    /// Arithmetic compare: field <arith_op> <arith_value> <cmp_op> <cmp_value>
+    ArithmeticCompare {
+        field: String,
+        arith_op: ArithOp,
+        arith_value: f64,
+        cmp_op: CompareOp,
+        cmp_value: String,
+    },
     /// Keep row if both sub-predicates pass. Short-circuits on the first
     /// failure.
     And(Box<FilterPredicate>, Box<FilterPredicate>),
@@ -339,6 +376,57 @@ impl FilterPredicate {
                     Some(s) => s.ends_with(value.as_str()),
                     None => false,
                 }
+            }
+            FilterPredicate::In { field, values } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => values.contains(&s),
+                    None => false,
+                }
+            }
+            FilterPredicate::NotIn { field, values } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => !values.contains(&s),
+                    None => true,
+                }
+            }
+            FilterPredicate::Always(keep) => *keep,
+            FilterPredicate::NotField { field } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => s.is_empty(),
+                    None => true,
+                }
+            }
+            FilterPredicate::ArithmeticCompare {
+                field,
+                arith_op,
+                arith_value,
+                cmp_op,
+                cmp_value,
+            } => {
+                let actual = get_column(columns, field_index, resolve(field, plan))
+                    .and_then(|b| b.get_typed_value(row_index));
+                if let Some(a) = actual {
+                    let field_f64 = match &a {
+                        crate::columnar::TypedValue::Int64(v) => *v as f64,
+                        crate::columnar::TypedValue::Float64(v) => *v,
+                        crate::columnar::TypedValue::Str(s) => {
+                            s.parse::<f64>().unwrap_or(0.0)
+                        }
+                        _ => return false,
+                    };
+                    let result = match arith_op {
+                        ArithOp::Add => field_f64 + arith_value,
+                        ArithOp::Sub => field_f64 - arith_value,
+                        ArithOp::Mul => field_f64 * arith_value,
+                        ArithOp::Div => field_f64 / arith_value,
+                    };
+                    let cmp_f64 = cmp_value.parse::<f64>().unwrap_or(0.0);
+                    return apply_op(*cmp_op, result.partial_cmp(&cmp_f64));
+                }
+                false
             }
             FilterPredicate::And(a, b) => {
                 // Evaluate the operand with the earlier field first for
@@ -478,12 +566,17 @@ fn pred_ordinal(
         | FilterPredicate::NotEqual { field, .. }
         | FilterPredicate::CompareLiteral { field, .. }
         | FilterPredicate::StartsWith { field, .. }
-        | FilterPredicate::EndsWith { field, .. } => {
+        | FilterPredicate::EndsWith { field, .. }
+        | FilterPredicate::In { field, .. }
+        | FilterPredicate::NotIn { field, .. }
+        | FilterPredicate::NotField { field, .. }
+        | FilterPredicate::ArithmeticCompare { field, .. } => {
             field_index
                 .get(resolve(field, plan))
                 .copied()
                 .unwrap_or(usize::MAX)
         }
+        FilterPredicate::Always(_) => usize::MAX,
         FilterPredicate::Compare {
             field_a, field_b, ..
         } => {

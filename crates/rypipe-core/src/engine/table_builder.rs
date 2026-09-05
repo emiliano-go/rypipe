@@ -688,10 +688,15 @@ impl TableBuilder {
             | FilterPredicate::NotEqual { field, .. }
             | FilterPredicate::CompareLiteral { field, .. }
             | FilterPredicate::StartsWith { field, .. }
-            | FilterPredicate::EndsWith { field, .. } => {
+            | FilterPredicate::EndsWith { field, .. }
+            | FilterPredicate::In { field, .. }
+            | FilterPredicate::NotIn { field, .. }
+            | FilterPredicate::NotField { field, .. }
+            | FilterPredicate::ArithmeticCompare { field, .. } => {
                 let resolved = plan.resolve_field(field).unwrap_or(field);
                 names.push(resolved.to_string());
             }
+            FilterPredicate::Always(_) => {}
             FilterPredicate::Compare {
                 field_a, field_b, ..
             } => {
@@ -1057,6 +1062,78 @@ impl TableBuilder {
                 }
                 None => PredicateState::Undecided,
             },
+            FilterPredicate::In { field, values } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if values.contains(&actual) {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Fail,
+            },
+            FilterPredicate::NotIn { field, values } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if !values.contains(&actual) {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Pass,
+            },
+            FilterPredicate::Always(keep) => {
+                if *keep {
+                    PredicateState::Pass
+                } else {
+                    PredicateState::Fail
+                }
+            }
+            FilterPredicate::NotField { field } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if actual.is_empty() {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Pass,
+            },
+            FilterPredicate::ArithmeticCompare {
+                field,
+                arith_op,
+                arith_value,
+                cmp_op,
+                cmp_value,
+            } => {
+                match tb.get_buffered_str(field) {
+                    Some(actual) => {
+                        let field_f64 = actual.parse::<f64>().unwrap_or(0.0);
+                        let result = match arith_op {
+                            crate::plan::ArithOp::Add => field_f64 + arith_value,
+                            crate::plan::ArithOp::Sub => field_f64 - arith_value,
+                            crate::plan::ArithOp::Mul => field_f64 * arith_value,
+                            crate::plan::ArithOp::Div => field_f64 / arith_value,
+                        };
+                        let cmp_f64 = cmp_value.parse::<f64>().unwrap_or(0.0);
+                        match result.partial_cmp(&cmp_f64) {
+                            Some(ord) => {
+                                let pass = match cmp_op {
+                                    crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                                    crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                                    crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                                    crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                                    crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                                    crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                                };
+                                if pass { PredicateState::Pass } else { PredicateState::Fail }
+                            }
+                            None => PredicateState::Fail,
+                        }
+                    }
+                    None => PredicateState::Undecided,
+                }
+            }
             FilterPredicate::And(a, b) => {
                 let sa = Self::eval_predicate(a, tb);
                 let sb = Self::eval_predicate(b, tb);
@@ -1202,12 +1279,17 @@ impl TableBuilder {
                 None => PredicateState::Pass, // missing => None != Some(value) => Pass
             },
             FilterPredicate::Compare { .. } | FilterPredicate::CompareLiteral { .. }
-            | FilterPredicate::StartsWith { .. } | FilterPredicate::EndsWith { .. } => {
-                // Compare/CompareLiteral with missing => Fail
+            | FilterPredicate::StartsWith { .. } | FilterPredicate::EndsWith { .. }
+            | FilterPredicate::In { .. } | FilterPredicate::NotIn { .. }
+            | FilterPredicate::NotField { .. }
+            | FilterPredicate::ArithmeticCompare { .. } => {
                 match Self::eval_predicate(pred, tb) {
                     PredicateState::Undecided => PredicateState::Fail,
                     other => other,
                 }
+            }
+            FilterPredicate::Always(keep) => {
+                if *keep { PredicateState::Pass } else { PredicateState::Fail }
             }
             FilterPredicate::And(a, b) => {
                 let sa = Self::eval_predicate_with_null(a, tb);
