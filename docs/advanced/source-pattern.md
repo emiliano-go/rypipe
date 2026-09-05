@@ -73,7 +73,11 @@ Override `_read_arrow()` when you need to:
 
 ### Streaming Override: `iter_record_batches()` { #streaming-override-iter_record_batches }
 
-For true bounded-memory streaming (not just materialize-then-split):
+The default `iter_record_batches()` materializes the full table then splits
+into batches. This works for files that fit in RAM. It is NOT true streaming.
+
+Override `iter_record_batches()` only when your Rust reader supports true
+streaming (yielding batches without materializing the full table):
 
 ```python
 class LogAdapter(Adapter):
@@ -90,8 +94,8 @@ class LogAdapter(Adapter):
         )
 ```
 
-Override `iter_record_batches()` when your Rust reader supports true
-streaming (yielding batches without materializing the full table).
+If your Rust reader does not have a true streaming path, skip this override.
+The default implementation will work correctly for files that fit in RAM.
 
 ## How it works { #how-it-works}
 
@@ -106,10 +110,11 @@ is which methods you override:
 
 The base class (`rypipe.Adapter`) inherits from `rypipe.Source`, which
 provides:
-* Caching (`to_arrow()` caches the result)
-* Pipeline operator (`|`)
-* All sinks (`.to_pandas()`, `.to_polars()`, `.to_parquet()`)
-* Fallback streaming (`iter_record_batches()` materializes then splits)
+
+* **Caching**: `to_arrow()` caches the result
+* **Pipeline operator**: `|`
+* **All sinks**: `.to_pandas()`, `.to_polars()`, `.to_parquet()`
+* **Fallback streaming**: `iter_record_batches()` materializes then splits
 
 ## The crxml example { #the-crxml-example}
 

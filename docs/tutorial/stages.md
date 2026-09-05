@@ -141,6 +141,8 @@ Supported type mappings:
 | `float` | `"float64"` | `float64` |
 | `bool` | `"bool"` | `bool` |
 | `str` | skipped | `string` (no-op) |
+| `datetime.date` | `"date32"` | `date32` |
+| `datetime.datetime` | `"timestamp"` | `timestamp` |
 
 ## FilterRows { #filterrows }
 
