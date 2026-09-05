@@ -215,8 +215,7 @@ of supported patterns.
 ### Fusion { #filterrows-fusion }
 
 FilterRows is fusable when using the keyword form or a compiled lambda.
-The Rust engine applies the filter during parsing. See
-[Callable predicate](#filterrows-callable) for details.
+The Rust engine applies the filter during parsing.
 
 ## FilterRowsAny { #filterrowsany }
 
