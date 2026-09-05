@@ -143,15 +143,15 @@ Supported type mappings:
 | `str` | skipped | `string` | No-op: values are already strings |
 | `datetime.date` | `"date32"` | `date32` | String "2024-01-15" → date |
 | `datetime.datetime` | `"timestamp"` | `timestamp` | String "2024-01-15T10:30:00" → timestamp |
+| `Decimal` | `"float64"` | `float64` | Lossy: decimal → float64 |
 | `UUID` | `"string"` | `string` | No-op: UUIDs are already strings |
 
 !!! note
 
-    The engine stores all values as strings initially. The `str` cast is a
-    no-op because values are already strings. `UUID` is also a no-op for the
-    same reason. `Decimal` is not supported for fusion and falls back to
-    Python execution (see [issue #14](https://github.com/emiliano-go/rypipe/issues/14)
-    for Decimal128 support).
+    The `str` cast is a no-op because the engine already stores all values as
+    strings. Casting to `str` does nothing. Similarly, `UUID` is a no-op
+    because UUIDs are stored as strings. `Decimal` is cast to `float64`, which
+    may lose precision for very large decimals.
 
 ## FilterRows { #filterrows }
 
