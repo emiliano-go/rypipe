@@ -1,5 +1,7 @@
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Callable
+from uuid import UUID
 
 _PY_TO_RUST_TYPE = {
     int: "int64",
@@ -8,6 +10,8 @@ _PY_TO_RUST_TYPE = {
     bool: "bool",
     date: "date32",
     datetime: "timestamp",
+    Decimal: "float64",
+    UUID: "string",
 }
 
 
