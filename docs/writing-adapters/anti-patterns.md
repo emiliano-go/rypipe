@@ -64,7 +64,7 @@ class MySource(Source):
         return my_rust_read(str(self._path))  # ignores kwargs!
 ```
 
-Fused stages (rename, filter) fall back to Python over a full table —
+Fused stages (rename, filter) fall back to Python over a full table,
 10-50x slower.
 
 **The fix:**
