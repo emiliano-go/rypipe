@@ -130,6 +130,18 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         .ok_or_else(|| PlanError::new_err("filter must include 'op' key"))?
         .extract::<String>()?;
 
+    // Always-true / always-false
+    if f.contains("always")? {
+        let val: bool = f.get_item("always")?.unwrap().extract()?;
+        return Ok(FilterPredicate::Always(val));
+    }
+
+    // Not-field (truthiness negation)
+    if f.contains("not_field")? {
+        let field: String = f.get_item("not_field")?.unwrap().extract()?;
+        return Ok(FilterPredicate::NotField { field });
+    }
+
     // Column-to-column filter: field_a + op + field_b
     if f.contains("field_a")? && f.contains("field_b")? {
         let field_a: String = f.get_item("field_a")?.unwrap().extract()?;
@@ -145,6 +157,24 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         });
     }
 
+    // Collection membership: field + op + values
+    if f.contains("values")? {
+        let field: String = f.get_item("field")?.unwrap().extract()?;
+        let values_py = f.get_item("values")?.unwrap();
+        let values: Vec<String> = values_py.extract()?;
+        return Ok(match op.as_str() {
+            "in" => FilterPredicate::In { field, values },
+            "not_in" => FilterPredicate::NotIn { field, values },
+            _ => {
+                let valid = "in, not_in";
+                return Err(PlanError::new_err(format!(
+                    "unsupported collection op {op:?}; valid: {valid}"
+                )));
+            }
+        });
+    }
+
+    // Constant filter: field + op + value
     let field = f
         .get_item("field")?
         .ok_or_else(|| PlanError::new_err("filter must include 'field' key"))?

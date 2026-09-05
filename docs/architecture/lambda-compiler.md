@@ -65,11 +65,11 @@ The compiler filters out `RESUME`, `CACHE`, `COPY`, `TO_BOOL`, and jump
 instructions before pattern matching. This makes it resilient to Python
 version differences in bytecode encoding.
 
-## Limitations { #limitations}
+## Limitations { #limitations }
 
 The compiler detects common patterns but cannot handle everything:
 
-### Closures { #closures}
+### Closures { #closures }
 
 ```python
 threshold = 100
@@ -79,34 +79,31 @@ FilterRows(lambda r: r["amount"] > threshold)  # falls back to Python
 The value `threshold` is loaded via `LOAD_GLOBAL`, not `LOAD_CONST`. The
 compiler cannot resolve it at construction time.
 
-### Nested function calls { #nested-calls}
+### Nested function calls (beyond cast) { #nested-calls }
 
 ```python
-FilterRows(lambda r: int(r["amount"]) > 100)  # falls back to Python
+FilterRows(lambda r: r["name"].strip().lower() == "alice")  # falls back
 ```
 
-The `int()` call introduces a `CALL` instruction that the compiler does not
-handle. You can work around this by using `CastTypes` + a simple comparison:
+Method chains with multiple calls are not detected. Simple casts like
+`int(r["age"]) > 30` are fully supported.
+
+### Complex compound logic { #complex-boolean-logic }
+
+Single-level AND, OR, and NOT are supported. Mixed or nested compound
+expressions fall back to Python:
 
 ```python
-# Instead of:
-FilterRows(lambda r: int(r["amount"]) > 100)
-
-# Use:
-source | CastTypes({"amount": int}) | FilterRows(field="amount", op=">", value="100")
-```
-
-### Complex boolean logic { #complex-boolean-logic}
-
-```python
-# This works (compound AND):
+# Supported (single-level):
 FilterRows(lambda r: r["a"] > 1 and r["b"] < 2)
+FilterRows(lambda r: r["status"] == "a" or r["status"] == "b")
+FilterRows(lambda r: not r["active"])
 
-# This does not (OR, NOT, nested):
-FilterRows(lambda r: r["a"] > 1 or r["b"] < 2)  # falls back to Python
+# Falls back (nested/mixed):
+FilterRows(lambda r: (r["a"] > 1 or r["b"] < 2) and r["c"] == "x")
 ```
 
-The compiler only detects AND. For OR and NOT, use the keyword combinators:
+Use keyword combinators for complex logic:
 
 ```python
 from my_adapter import FilterRowsAny, FilterRowsNot
@@ -117,18 +114,10 @@ FilterRowsAny(
 )
 ```
 
-### String methods { #string-methods}
+### Other string methods { #string-methods }
 
 Only `startswith` and `endswith` are supported. Other string methods
 (`strip`, `lower`, `contains`, etc.) fall back to Python.
-
-### Arithmetic and math { #arithmetic-and-math}
-
-```python
-FilterRows(lambda r: r["amount"] * 2 > 100)  # falls back to Python
-```
-
-Any expression beyond simple comparison is not detected.
 
 ## What happens when compilation fails { #compilation-fallback}
 
@@ -174,8 +163,15 @@ print(f2._filter_spec)
 ## Recap { #recap }
 
 * The lambda compiler analyzes bytecode at `FilterRows` construction time.
-* Common patterns (field comparisons, startswith, compound AND) are compiled
-  to fusable filter specs.
-* Unknown patterns (closures, nested calls, complex logic) fall back to Python.
+* Common patterns are compiled to fusable filter specs:
+  - Field comparisons: `r["field"] > 100`, `r["a"] > r["b"]`
+  - String methods: `r["name"].startswith("A")`, `r["name"].endswith("z")`
+  - Membership: `r["status"] in ("active", "pending")`
+  - Truthiness: `not r["active"]`
+  - Compound logic: `a and b`, `a or b`
+  - Cast + compare: `int(r["age"]) > 30`
+  - Arithmetic: `r["amount"] * 2 > 100`
+  - Constants: `lambda r: True`, `lambda r: False`
+* Unknown patterns (closures, nested method chains) fall back to Python.
 * The compiler is a best-effort optimization: if it cannot detect a pattern,
   the lambda still works correctly, just slower.

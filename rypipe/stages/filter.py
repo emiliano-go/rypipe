@@ -94,27 +94,63 @@ class _StartsWithPredicate:
 
 
 class _InPredicate:
-    """Fusable predicate: r["field"] in values"""
-    __slots__ = ("_field", "_values")
+    """Fusable predicate: r["field"] in values or r["field"] not in values"""
+    __slots__ = ("_field", "_values", "_negate")
 
-    def __init__(self, field: str, values: tuple):
+    def __init__(self, field: str, values: tuple, negate: bool = False):
         self._field = field
         self._values = values
+        self._negate = negate
 
     def __call__(self, record: dict) -> bool:
         actual = record.get(self._field)
-        return actual in self._values
+        result = actual in self._values
+        return not result if self._negate else result
 
 
 def _build_predicate_from_spec(spec: dict):
     """Build a predicate callable from a filter spec dict (used for Python fallback)."""
-    if "field" in spec and "op" in spec and "value" in spec:
+    if "always" in spec:
+        val = spec["always"]
+        return lambda r: val
+    if "field" in spec and "op" in spec:
         op = spec["op"]
-        if op == "starts_with":
-            return _StartsWithPredicate(spec["field"], spec["value"])
-        return _ConstantPredicate(spec["field"], op, spec["value"])
+        if "value" in spec:
+            if op == "starts_with":
+                return _StartsWithPredicate(spec["field"], spec["value"])
+            if op == "ends_with":
+                return _EndsWithPredicate(spec["field"], spec["value"])
+            if "arith_op" in spec:
+                # Arithmetic compare: field * arith_value op cmp_value
+                arith_op = spec["arith_op"]
+                arith_val = float(spec["arith_value"])
+                cmp_val = spec["value"]
+                arith_fns = {
+                    "+": lambda a, b: a + b,
+                    "-": lambda a, b: a - b,
+                    "*": lambda a, b: a * b,
+                    "/": lambda a, b: a / b,
+                }
+                cmp_fns = {
+                    "==": lambda a, b: a == b,
+                    "!=": lambda a, b: a != b,
+                    ">": lambda a, b: a > b,
+                    "<": lambda a, b: a < b,
+                    ">=": lambda a, b: a >= b,
+                    "<=": lambda a, b: a <= b,
+                }
+                arith_fn = arith_fns[arith_op]
+                cmp_fn = cmp_fns[op]
+                field = spec["field"]
+                return lambda r: cmp_fn(arith_fn(float(r.get(field, 0)), arith_val), float(cmp_val))
+            return _ConstantPredicate(spec["field"], op, spec["value"])
+        if "values" in spec:
+            return _InPredicate(spec["field"], spec["values"], negate=(op == "not_in"))
+        return _ComparePredicate(spec["field_a"], op, spec["field_b"])
     if "field_a" in spec and "op" in spec and "field_b" in spec:
         return _ComparePredicate(spec["field_a"], spec["op"], spec["field_b"])
+    if "not_field" in spec:
+        return lambda r: not r.get(spec["not_field"])
     if "and" in spec:
         predicates = [_build_predicate_from_spec(s) for s in spec["and"]]
         return lambda r: all(p(r) for p in predicates)

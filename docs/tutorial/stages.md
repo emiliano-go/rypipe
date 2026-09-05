@@ -215,8 +215,10 @@ supported patterns and limitations.
 ### Fusion { #filterrows-fusion }
 
 **Fusable** when using the keyword form (`field`/`op`/`value` or
-`field_a`/`op`/`field_b`). The Rust engine applies the filter during
-parsing. Callable predicates run in Python.
+`field_a`/`op`/`field_b`), or when a lambda is automatically compiled by
+the lambda compiler (simple comparisons, `startswith`, `endswith`, arithmetic).
+The Rust engine applies the filter during parsing. Complex lambdas
+(closures, nested calls) run in Python.
 
 ## FilterRowsAny { #filterrowsany }
 
