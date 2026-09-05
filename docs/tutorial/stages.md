@@ -143,15 +143,14 @@ Supported type mappings:
 | `str` | skipped | `string` | No-op: values are already strings |
 | `datetime.date` | `"date32"` | `date32` | String "2024-01-15" → date |
 | `datetime.datetime` | `"timestamp"` | `timestamp` | String "2024-01-15T10:30:00" → timestamp |
-| `Decimal` | `"decimal128"` | `decimal128(38)` | Fixed-precision decimal (38 digits, 18 scale) |
+| `Decimal` | `"decimal128"` | `decimal128` | Fixed-precision decimal |
 | `UUID` | `"string"` | `string` | No-op: UUIDs are already strings |
 
 !!! note
 
     The engine stores all values as strings initially. The `str` cast is a
     no-op because values are already strings. `UUID` is also a no-op for the
-    same reason. `Decimal` uses `Decimal128` with 38-digit precision and
-    18-digit scale by default.
+    same reason.
 
 ## FilterRows { #filterrows }
 
