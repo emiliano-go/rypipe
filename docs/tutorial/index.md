@@ -28,6 +28,8 @@ from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
+table = source.to_arrow()
+
 df = (
     source
     | RenameFields({"Name": "name"})
