@@ -6,7 +6,8 @@
     accept different parameters. Check your adapter's docs.
 
 This page covers the core **rypipe** concepts: the Source abstraction, the
-pipeline operator, stages, and sinks.
+pipeline operator, stages, and sinks. **rypipe** provides these interfaces
+as a framework, adapter packages implement them for each format.
 
 ## The Source { #the-source }
 
