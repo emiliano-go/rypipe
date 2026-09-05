@@ -83,12 +83,25 @@ def _apply_plan(table: pa.Table, plan: dict):
         if "not" in spec:
             inner = _mask_for(spec["not"])
             return pc.invert(inner)
-        if "field" in spec:
-            field, op, value = spec["field"], spec["op"], spec["value"]
+        if "always" in spec:
+            val = spec["always"]
+            return pa.array([val] * table.num_rows)
+        if "not_field" in spec:
+            col = table.column(spec["not_field"])
+            m = pc.or_(pc.equal(col, ""), pc.is_null(col))
+            return pc.fill_null(m, True)
+        if "field" in spec and "op" in spec:
+            field, op = spec["field"], spec["op"]
+            if "values" in spec:
+                values = spec["values"]
+                m = pc.is_in(table.column(field), pa.array(values))
+                if op == "not_in":
+                    m = pc.invert(m)
+                return pc.fill_null(m, False)
             if op == "starts_with":
-                m = pc.starts_with(table.column(field), value)
+                m = pc.starts_with(table.column(field), spec["value"])
             elif op == "ends_with":
-                m = pc.ends_with(table.column(field), value)
+                m = pc.ends_with(table.column(field), spec["value"])
             else:
                 fn_name = {
                     ">": "greater", "gt": "greater",
@@ -98,24 +111,20 @@ def _apply_plan(table: pa.Table, plan: dict):
                     "==": "equal", "eq": "equal",
                     "!=": "not_equal", "ne": "not_equal",
                 }[op]
-                m = getattr(pc, fn_name)(table.column(field), value)
+                m = getattr(pc, fn_name)(table.column(field), spec["value"])
             return pc.fill_null(m, False)
-        field_a, op, field_b = spec["field_a"], spec["op"], spec["field_b"]
-        fn_name = {
-            ">": "greater",
-            "gt": "greater",
-            "<": "less",
-            "lt": "less",
-            ">=": "greater_equal",
-            "ge": "greater_equal",
-            "<=": "less_equal",
-            "le": "less_equal",
-            "==": "equal",
-            "eq": "equal",
-            "!=": "not_equal",
-            "ne": "not_equal",
-        }[op]
-        return pc.fill_null(getattr(pc, fn_name)(table.column(field_a), table.column(field_b)), False)
+        if "field_a" in spec and "op" in spec:
+            field_a, op, field_b = spec["field_a"], spec["op"], spec["field_b"]
+            fn_name = {
+                ">": "greater", "gt": "greater",
+                "<": "less", "lt": "less",
+                ">=": "greater_equal", "ge": "greater_equal",
+                "<=": "less_equal", "le": "less_equal",
+                "==": "equal", "eq": "equal",
+                "!=": "not_equal", "ne": "not_equal",
+            }[op]
+            return pc.fill_null(getattr(pc, fn_name)(table.column(field_a), table.column(field_b)), False)
+        raise ValueError(f"Unknown filter spec: {spec}")
 
     spec = plan.get("filter")
     if spec:

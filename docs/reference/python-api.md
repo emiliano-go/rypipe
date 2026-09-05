@@ -161,6 +161,39 @@ def _read_arrow(self, plan_overrides: dict | None = None) -> pyarrow.Table:
 | `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts. |
 | `.__or__(stage)` | `Pipeline` | Pipe operator for stages. |
 
+### to_pandas() details { #to-pandas-details }
+
+```python
+source.to_pandas(dtype_backend="pyarrow")  # Arrow-backed dtypes (default)
+source.to_pandas(dtype_backend="numpy")    # NumPy-backed dtypes
+```
+
+When `dtype_backend="pyarrow"` (default), string columns use
+`pd.ArrowDtype(pa.string())` — zero-copy from Arrow. When
+`dtype_backend="numpy"`, string columns use `pd.StringDtype()` — standard
+pandas strings.
+
+### to_parquet() details { #to-parquet-details }
+
+Passes all kwargs through to `pyarrow.parquet.write_table`:
+
+```python
+source.to_parquet("output.parquet")
+source.to_parquet("output.parquet", compression="snappy")
+source.to_parquet("output.parquet", compression="zstd", compression_level=9)
+source.to_parquet("output.parquet", row_group_size=100_000)
+```
+
+Common options:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `compression` | `str` | `"snappy"` | Compression codec: `"snappy"`, `"gzip"`, `"zstd"`, `"lz4"`, `"none"` |
+| `compression_level` | `int` | codec default | Compression level (codec-dependent) |
+| `row_group_size` | `int` | `64*1024` | Rows per row group |
+| `use_dictionary` | `bool \| list` | `True` | Enable/disable dictionary encoding |
+| `write_statistics` | `bool` | `True` | Write column statistics |
+
 ## Adapter { #adapter }
 
 Convenience base class. Subclasses implement `read()` instead of

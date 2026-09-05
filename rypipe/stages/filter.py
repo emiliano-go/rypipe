@@ -93,6 +93,21 @@ class _StartsWithPredicate:
         return str(actual).startswith(self._value)
 
 
+class _EndsWithPredicate:
+    """Fusable predicate: r["field"].endswith(value)"""
+    __slots__ = ("_field", "_value")
+
+    def __init__(self, field: str, value: str):
+        self._field = field
+        self._value = value
+
+    def __call__(self, record: dict) -> bool:
+        actual = record.get(self._field)
+        if actual is None:
+            return False
+        return str(actual).endswith(self._value)
+
+
 class _InPredicate:
     """Fusable predicate: r["field"] in values or r["field"] not in values"""
     __slots__ = ("_field", "_values", "_negate")
