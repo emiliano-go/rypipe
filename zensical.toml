@@ -59,6 +59,7 @@ name = "rypipe on PyPI"
 "Tutorial" = [
     "tutorial/index.md",
     { "First Steps" = "tutorial/first-steps.md" },
+    { "Building an Adapter" = "tutorial/building-an-adapter.md" },
     { "Pipeline" = "tutorial/pipeline.md" },
     { "Stages" = "tutorial/stages.md" },
     { "Plans" = "tutorial/plans.md" },
@@ -96,6 +97,7 @@ name = "rypipe on PyPI"
     { "Schema and types" = "advanced/schema-and-types.md" },
     { "I/O tuning" = "advanced/io-tuning.md" },
     { "Adapter design" = "advanced/adapter-design.md" },
+    { "Adapter design patterns" = "advanced/source-pattern.md" },
     { "Profiling" = "advanced/profiling.md" },
     { "Anti-patterns" = "advanced/anti-patterns.md" },
     { "Case study: crxml" = "advanced/case-study-crxml.md" },

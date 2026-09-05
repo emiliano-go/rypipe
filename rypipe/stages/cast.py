@@ -1,3 +1,4 @@
+from datetime import date, datetime
 from typing import Callable
 
 _PY_TO_RUST_TYPE = {
@@ -5,6 +6,8 @@ _PY_TO_RUST_TYPE = {
     float: "float64",
     str: None,
     bool: "bool",
+    date: "date32",
+    datetime: "timestamp",
 }
 
 
