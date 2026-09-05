@@ -2,7 +2,7 @@
 
 !!! note
 
-    The kwargs shown here are for the **crxml** adapter. Other adapters may
+    The kwargs shown here are for the **crxml** adapter (see [crxml](../crxml-adapter.md)). Other adapters may
     accept different parameters or have different defaults.
 
 This page is a reference for all **rypipe** options and kwargs.
