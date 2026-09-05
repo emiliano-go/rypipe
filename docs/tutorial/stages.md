@@ -33,7 +33,7 @@ Under the hood, stages are callables that transform dicts. **rypipe**
 automatically pushes fusable stages (RenameFields, DropFields, CastTypes,
 constant FilterRows) into the Rust parse loop for maximum performance.
 Non-fusable stages (lambda predicates) run in Python.
-See [Plans](plans.md#plans) for how this works.
+This is called **plan fusion**. See [Plans](plans.md#plans) for details.
 
 ## RenameFields { #renamefields }
 
@@ -94,8 +94,8 @@ no decoding, no memory allocation for that column.
 
 !!! tip
 
-    Dropped columns are the cheapest optimization. The engine uses `wants()`
-    to skip all work for the column during parsing.
+    Dropped columns are the cheapest optimization. The engine skips all
+    work for the column during parsing.
 
 
 ## CastTypes { #casttypes }
