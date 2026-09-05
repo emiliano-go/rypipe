@@ -6,15 +6,15 @@ Each stage transforms the data as it flows through, like a Unix pipe.
 ## Basic usage { #basic-usage }
 
 ```python
-from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows
+from rypipe_log import LogSource, RenameFields, CastTypes, FilterRows
 
-src = CrystalXMLSource("report.xml", row_tag="Details")
+src = LogSource("test.log")
 
 result = (
     src
-    | RenameFields({"Name": "name", "Amount": "amount"})
-    | CastTypes({"amount": float})
-    | FilterRows(field="Status", op="==", value="Active")
+    | RenameFields({"Name": "name"})
+    | CastTypes({"age": int})
+    | FilterRows(field="status", op="==", value="active")
 )
 
 # Materialize to a table
@@ -177,7 +177,7 @@ for row in pipeline:
 ## Collecting to a list { #collecting-to-a-list}
 
 ```python
-from rypipe import collect
+from rypipe_log import collect
 
 rows = collect(src | FilterRows(field="active", op="==", value="true"))
 ```

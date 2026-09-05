@@ -1,16 +1,17 @@
 # Sinks { #sinks }
 
 Sinks materialize pipeline results into tables, DataFrames, or files.
-This page explains each sink and shows how to implement them in your adapter.
+You can use them as methods on a Source or as standalone functions on a
+Pipeline.
 
 ## Source methods { #source-methods }
 
 Every Source has built-in sink methods:
 
 ```python
-from crxml import CrystalXMLSource
+from rypipe_log import LogSource
 
-src = CrystalXMLSource("report.xml", row_tag="Details")
+src = LogSource("test.log")
 ```
 
 ### to_arrow() { #to-arrow }
@@ -19,12 +20,6 @@ Returns a `pyarrow.Table`. This is the default materialization:
 
 ```python
 table = src.to_arrow()
-print(table.schema)
-# Name: string
-# Department: string
-# Amount: string
-# Status: string
-# Date: string
 ```
 
 ### to_pandas() { #to-pandas }
@@ -33,18 +28,6 @@ Returns a pandas DataFrame with PyArrow-backed dtypes by default:
 
 ```python
 df = src.to_pandas()
-print(df.dtypes)
-# Name       string[pyarrow]
-# Department string[pyarrow]
-# Amount     string[pyarrow]
-# Status     string[pyarrow]
-# Date       string[pyarrow]
-```
-
-You can disable PyArrow backing with `dtype_backend="numpy"`:
-
-```python
-df = src.to_pandas(dtype_backend="numpy")
 ```
 
 ### to_polars() { #to-polars }
@@ -52,11 +35,7 @@ df = src.to_pandas(dtype_backend="numpy")
 Returns a Polars DataFrame:
 
 ```python
-import polars as pl
-
 df = src.to_polars()
-print(df.columns)
-# ['Name', 'Department', 'Amount', 'Status', 'Date']
 ```
 
 ### to_parquet() { #to-parquet}
@@ -65,9 +44,6 @@ Writes the table to a Parquet file:
 
 ```python
 src.to_parquet("output.parquet")
-
-# Pass additional pyarrow.parquet options
-src.to_parquet("output.parquet", compression="snappy")
 ```
 
 ### clear_cache() { #clear-cache}
@@ -85,9 +61,9 @@ When working with a Pipeline (the result of `src | stage`), use the
 standalone sink functions from the adapter:
 
 ```python
-from crxml import CrystalXMLSource, FilterRows, collect
+from rypipe_log import LogSource, FilterRows, collect
 
-src = CrystalXMLSource("report.xml", row_tag="Details")
+src = LogSource("test.log")
 pipeline = src | FilterRows(field="status", op="==", value="active")
 ```
 
@@ -96,71 +72,57 @@ pipeline = src | FilterRows(field="status", op="==", value="active")
 Collects all rows into a list of dicts:
 
 ```python
-from crxml import collect
+from rypipe_log import collect
 
 rows = collect(pipeline)
-print(rows[0])
-# {"name": "Alice", "amount": 150.0, "status": "active"}
 ```
 
-### to_arrow { #to-arrow }
+### to_arrow() (function) { #to-arrow-function }
 
 Materializes a pipeline to a `pyarrow.Table`:
 
 ```python
-from crxml import to_arrow
+from rypipe_log import to_arrow
 
 table = to_arrow(pipeline)
 ```
 
-### to_pandas { #to-pandas }
+### to_pandas() (function) { #to-pandas-function }
 
 Materializes a pipeline to a pandas DataFrame:
 
 ```python
-from crxml import to_pandas
+from rypipe_log import to_pandas
 
 df = to_pandas(pipeline)
 ```
 
-### to_polars { #to-polars }
+### to_polars() (function) { #to-polars-function }
 
 Materializes a pipeline to a Polars DataFrame:
 
 ```python
-from crxml import to_polars
+from rypipe_log import to_polars
 
 df = to_polars(pipeline)
 ```
 
-### to_csv { #to-csv }
+### to_csv() (function) { #to-csv-function }
 
 Writes pipeline results to a CSV file:
 
 ```python
-from crxml import to_csv
+from rypipe_log import to_csv
 
 to_csv(pipeline, "output.csv")
-
-# Custom delimiter and encoding
-to_csv(pipeline, "output.tsv", delimiter="\t", encoding="utf-8")
 ```
 
-**Parameters:**
-
-* `pipeline`: iterable of dicts.
-* `path`: output file path.
-* `encoding`: file encoding (default: `"utf-8"`).
-* `delimiter`: column delimiter (default: `","`).
-* `fieldnames`: optional list of column names. If omitted, uses the keys
-  from the first row.
-
-### to_parquet { #to-parquet }
+### to_parquet() (function) { #to-parquet-function }
 
 Writes pipeline results to a Parquet file:
 
 ```python
-from crxml import to_parquet
+from rypipe_log import to_parquet
 
 to_parquet(pipeline, "output.parquet")
 ```
@@ -169,12 +131,12 @@ to_parquet(pipeline, "output.parquet")
 
 | Goal | Method |
 |------|--------|
-| Get a PyArrow table | `.to_arrow()` or `crxml.to_arrow()` |
-| Get a pandas DataFrame | `.to_pandas()` or `crxml.to_pandas()` |
-| Get a Polars DataFrame | `.to_polars()` or `crxml.to_polars()` |
-| Write to Parquet | `.to_parquet(path)` or `crxml.to_parquet(pipeline, path)` |
-| Write to CSV | `crxml.to_csv(pipeline, path)` |
-| Get a list of dicts | `crxml.collect(pipeline)` |
+| Get a PyArrow table | `.to_arrow()` or `to_arrow()` |
+| Get a pandas DataFrame | `.to_pandas()` or `to_pandas()` |
+| Get a Polars DataFrame | `.to_polars()` or `to_polars()` |
+| Write to Parquet | `.to_parquet(path)` or `to_parquet(pipeline, path)` |
+| Write to CSV | `to_csv(pipeline, path)` |
+| Get a list of dicts | `collect(pipeline)` |
 
 !!! tip
 
@@ -182,16 +144,41 @@ to_parquet(pipeline, "output.parquet")
     over the standalone functions. Source methods reuse the cached table and
     avoid re-parsing.
 
+## Repacking sinks for your adapter { #repacking-sinks-for-your-adapter }
+
+Adapters include their own copies of the sink functions. This makes the
+adapter self-contained: users never import from **rypipe**.
+
+### `rypipe_log/sinks.py` { #sinks-py }
+
+```python
+from rypipe.sinks import to_pandas as _rypipe_to_pandas
+from rypipe.sinks import to_csv as _rypipe_to_csv
+from rypipe.sinks import collect as _rypipe_collect
+from rypipe.sinks import to_arrow as _rypipe_to_arrow
+from rypipe.sinks import to_polars as _rypipe_to_polars
+from rypipe.sinks import to_parquet as _rypipe_to_parquet
+
+
+# Re-export from rypipe with the adapter's namespace
+collect = _rypipe_collect
+to_pandas = _rypipe_to_pandas
+to_arrow = _rypipe_to_arrow
+to_polars = _rypipe_to_polars
+to_parquet = _rypipe_to_parquet
+to_csv = _rypipe_to_csv
+```
+
+Or reimplement them from scratch for full control.
 
 ## Recap { #recap }
 
 * Source methods: `.to_arrow()`, `.to_pandas()`, `.to_polars()`,
   `.to_parquet()`, `.clear_cache()`.
-* Standalone functions: `crxml.collect()`, `crxml.to_arrow()`,
-  `crxml.to_pandas()`, `crxml.to_polars()`, `crxml.to_csv()`,
-  `crxml.to_parquet()`.
+* Standalone functions: `collect()`, `to_arrow()`, `to_pandas()`,
+  `to_polars()`, `to_csv()`, `to_parquet()`.
 * Source methods reuse the cached table. Standalone functions re-parse if
   the pipeline hasn't been materialized yet.
 
-**Next:** [Streaming](streaming.md#streaming): processing large files with bounded
+**Next:** [Streaming](streaming.md#streaming), processing large files with bounded
 memory.
