@@ -70,7 +70,7 @@ table = result.to_arrow()
 df = result.to_dataframe()
 ```
 
-Each `|` returns a new `Pipeline` — the original Source is not modified.
+Each `|` returns a new `Pipeline`, the original Source is not modified.
 
 ## Stages { #stages }
 
@@ -160,4 +160,4 @@ except MergeError as e:
 * **Sinks** materialize results to tables, DataFrames, or files.
 * **Streaming** processes large files with bounded memory.
 
-**Next:** [Pipeline](pipeline.md#pipeline) — stages in depth.
+**Next:** [Pipeline](pipeline.md#pipeline), stages in depth.

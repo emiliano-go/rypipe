@@ -92,7 +92,7 @@ pipeline `|` operator, caching, and streaming:
 ```python
 from crxml import CrystalXMLSource
 
-# Create a source — this does not parse yet
+# Create a source, this does not parse yet
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
 # Parse and get a table (cached on first call)
@@ -115,5 +115,5 @@ The Source parses the file once and caches the result. Subsequent calls to
   operator.
 * Convert to pandas with `.to_pandas()` or to Polars with `.to_polars()`.
 
-**Next:** [First Steps](first-steps.md#first-steps) — the Source abstraction
+**Next:** [First Steps](first-steps.md#first-steps), the Source abstraction
 in depth.
