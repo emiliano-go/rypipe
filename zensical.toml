@@ -113,6 +113,7 @@ name = "rypipe on PyPI"
     { "Storage and export" = "architecture/storage.md" },
     { "Schema" = "architecture/schema.md" },
     { "Optimizations" = "architecture/optimizations.md" },
+    { "Lambda compiler" = "architecture/lambda-compiler.md" },
 ]
 
 [[project.nav]]
