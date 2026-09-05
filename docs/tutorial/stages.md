@@ -197,15 +197,19 @@ An arbitrary Python function that receives a dict and returns `True` to keep
 or `False` to drop:
 
 ```python
-stage = FilterRows(lambda r: r["name"].startswith("A") and r["amount"] > 100)
+stage = FilterRows(lambda r: r["name"].startswith("A"))
 ```
+
+Simple lambdas (field comparisons, `startswith`, compound AND) are
+automatically compiled into fusable predicates. See
+[Lambda Compiler](../architecture/lambda-compiler.md) for the full list of
+supported patterns and limitations.
 
 !!! warning
 
-    Simple lambdas (e.g., `r["field"] > 100`) are automatically compiled into
-    fusable predicates. Complex lambdas (closures, nested calls) fall back to
-    Python execution. For best performance, use the keyword form
-    (`field`/`op`/`value`) whenever possible.
+    Complex lambdas (closures, nested calls) fall back to Python execution.
+    For best performance, use the keyword form (`field`/`op`/`value`) whenever
+    possible.
 
 
 ### Fusion { #filterrows-fusion }
