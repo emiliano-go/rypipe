@@ -825,7 +825,10 @@ impl TableBuilder {
                         },
                         FieldType::String | FieldType::Dictionary => Some(value.clone()),
                         FieldType::Decimal128(_) => value.as_str().and_then(|s| {
-                            s.trim().parse::<i128>().ok().map(|n| Value::Int64(n as i64))
+                            s.trim()
+                                .parse::<i128>()
+                                .ok()
+                                .map(|n| Value::Int64(n as i64))
                         }),
                     }
                 };
@@ -964,41 +967,38 @@ impl TableBuilder {
                 }
             }
             FilterPredicate::CompareLiteral { field, op, value } => {
-                let va = tb
-                    .get_buffered_value(field)
-                    .and_then(|v| {
-                        let resolved = tb.plan.resolve_field(field).unwrap_or(field);
-                        match tb.plan.column_type(resolved) {
-                            crate::plan::FieldType::Int64 => match v.as_str() {
-                                Some(s) => lexical::parse::<i64, _>(s.as_bytes())
-                                    .ok()
-                                    .map(crate::value::Value::Int64),
-                                _ => Some(v.clone()),
-                            },
-                            crate::plan::FieldType::Float64 => match v.as_str() {
-                                Some(s) => lexical::parse::<f64, _>(s.as_bytes())
-                                    .ok()
-                                    .map(crate::value::Value::Float64),
-                                _ => Some(v.clone()),
-                            },
-                            crate::plan::FieldType::Boolean => match v.as_str() {
-                                Some(s) => s.parse::<bool>().ok().map(crate::value::Value::Bool),
-                                _ => Some(v.clone()),
-                            },
+                let va = tb.get_buffered_value(field).and_then(|v| {
+                    let resolved = tb.plan.resolve_field(field).unwrap_or(field);
+                    match tb.plan.column_type(resolved) {
+                        crate::plan::FieldType::Int64 => match v.as_str() {
+                            Some(s) => lexical::parse::<i64, _>(s.as_bytes())
+                                .ok()
+                                .map(crate::value::Value::Int64),
                             _ => Some(v.clone()),
-                        }
-                    });
-                let vb = match tb.plan.column_type(
-                    tb.plan.resolve_field(field).unwrap_or(field),
-                ) {
+                        },
+                        crate::plan::FieldType::Float64 => match v.as_str() {
+                            Some(s) => lexical::parse::<f64, _>(s.as_bytes())
+                                .ok()
+                                .map(crate::value::Value::Float64),
+                            _ => Some(v.clone()),
+                        },
+                        crate::plan::FieldType::Boolean => match v.as_str() {
+                            Some(s) => s.parse::<bool>().ok().map(crate::value::Value::Bool),
+                            _ => Some(v.clone()),
+                        },
+                        _ => Some(v.clone()),
+                    }
+                });
+                let vb = match tb
+                    .plan
+                    .column_type(tb.plan.resolve_field(field).unwrap_or(field))
+                {
                     crate::plan::FieldType::Int64 => lexical::parse::<i64, _>(value.as_bytes())
                         .ok()
                         .map(crate::value::Value::Int64),
-                    crate::plan::FieldType::Float64 => {
-                        lexical::parse::<f64, _>(value.as_bytes())
-                            .ok()
-                            .map(crate::value::Value::Float64)
-                    }
+                    crate::plan::FieldType::Float64 => lexical::parse::<f64, _>(value.as_bytes())
+                        .ok()
+                        .map(crate::value::Value::Float64),
                     crate::plan::FieldType::Boolean => {
                         value.parse::<bool>().ok().map(crate::value::Value::Bool)
                     }
@@ -1108,35 +1108,37 @@ impl TableBuilder {
                 arith_value,
                 cmp_op,
                 cmp_value,
-            } => {
-                match tb.get_buffered_str(field) {
-                    Some(actual) => {
-                        let field_f64 = actual.parse::<f64>().unwrap_or(0.0);
-                        let result = match arith_op {
-                            crate::plan::ArithOp::Add => field_f64 + arith_value,
-                            crate::plan::ArithOp::Sub => field_f64 - arith_value,
-                            crate::plan::ArithOp::Mul => field_f64 * arith_value,
-                            crate::plan::ArithOp::Div => field_f64 / arith_value,
-                        };
-                        let cmp_f64 = cmp_value.parse::<f64>().unwrap_or(0.0);
-                        match result.partial_cmp(&cmp_f64) {
-                            Some(ord) => {
-                                let pass = match cmp_op {
-                                    crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
-                                    crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
-                                    crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
-                                    crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
-                                    crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
-                                    crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
-                                };
-                                if pass { PredicateState::Pass } else { PredicateState::Fail }
+            } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    let field_f64 = actual.parse::<f64>().unwrap_or(0.0);
+                    let result = match arith_op {
+                        crate::plan::ArithOp::Add => field_f64 + arith_value,
+                        crate::plan::ArithOp::Sub => field_f64 - arith_value,
+                        crate::plan::ArithOp::Mul => field_f64 * arith_value,
+                        crate::plan::ArithOp::Div => field_f64 / arith_value,
+                    };
+                    let cmp_f64 = cmp_value.parse::<f64>().unwrap_or(0.0);
+                    match result.partial_cmp(&cmp_f64) {
+                        Some(ord) => {
+                            let pass = match cmp_op {
+                                crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                                crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                            };
+                            if pass {
+                                PredicateState::Pass
+                            } else {
+                                PredicateState::Fail
                             }
-                            None => PredicateState::Fail,
                         }
+                        None => PredicateState::Fail,
                     }
-                    None => PredicateState::Undecided,
                 }
-            }
+                None => PredicateState::Undecided,
+            },
             FilterPredicate::And(a, b) => {
                 let sa = Self::eval_predicate(a, tb);
                 let sb = Self::eval_predicate(b, tb);
@@ -1281,18 +1283,23 @@ impl TableBuilder {
                 }
                 None => PredicateState::Pass, // missing => None != Some(value) => Pass
             },
-            FilterPredicate::Compare { .. } | FilterPredicate::CompareLiteral { .. }
-            | FilterPredicate::StartsWith { .. } | FilterPredicate::EndsWith { .. }
-            | FilterPredicate::In { .. } | FilterPredicate::NotIn { .. }
+            FilterPredicate::Compare { .. }
+            | FilterPredicate::CompareLiteral { .. }
+            | FilterPredicate::StartsWith { .. }
+            | FilterPredicate::EndsWith { .. }
+            | FilterPredicate::In { .. }
+            | FilterPredicate::NotIn { .. }
             | FilterPredicate::NotField { .. }
-            | FilterPredicate::ArithmeticCompare { .. } => {
-                match Self::eval_predicate(pred, tb) {
-                    PredicateState::Undecided => PredicateState::Fail,
-                    other => other,
-                }
-            }
+            | FilterPredicate::ArithmeticCompare { .. } => match Self::eval_predicate(pred, tb) {
+                PredicateState::Undecided => PredicateState::Fail,
+                other => other,
+            },
             FilterPredicate::Always(keep) => {
-                if *keep { PredicateState::Pass } else { PredicateState::Fail }
+                if *keep {
+                    PredicateState::Pass
+                } else {
+                    PredicateState::Fail
+                }
             }
             FilterPredicate::And(a, b) => {
                 let sa = Self::eval_predicate_with_null(a, tb);
@@ -2081,7 +2088,13 @@ mod tests {
         plan.dictionary_columns.insert("P".to_string());
         let engine = parse_bytes(b"P=Widget\nP=Gadget\nP=Widget\n", plan);
         assert_eq!(engine.num_rows(), 3);
-        if let ColumnBuilder::Dictionary { codes, data, offsets, .. } = engine.get_column("P").unwrap() {
+        if let ColumnBuilder::Dictionary {
+            codes,
+            data,
+            offsets,
+            ..
+        } = engine.get_column("P").unwrap()
+        {
             let dict_len = offsets.len() - 1;
             assert_eq!(dict_len, 2);
             assert_eq!(

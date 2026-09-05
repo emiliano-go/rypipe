@@ -193,7 +193,11 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
                 let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with";
                 PlanError::new_err(format!("unsupported filter op {other:?}; valid: {valid}"))
             })?;
-            FilterPredicate::CompareLiteral { field, op: cop, value }
+            FilterPredicate::CompareLiteral {
+                field,
+                op: cop,
+                value,
+            }
         }
     })
 }
