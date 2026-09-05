@@ -90,18 +90,27 @@ def _fuse_filter_spec(spec: dict):
 
     if "field" in spec:
         field, op, value = spec["field"], spec["op"], spec["value"]
-        fn_name = {
-            ">": "greater", "gt": "greater",
-            "<": "less", "lt": "less",
-            ">=": "greater_equal", "ge": "greater_equal",
-            "<=": "less_equal", "le": "less_equal",
-            "==": "equal", "eq": "equal",
-            "!=": "not_equal", "ne": "not_equal",
-        }[op]
+        if op == "starts_with":
+            def mask_of(rb):
+                m = pc.starts_with(rb.column(field), value)
+                return pc.fill_null(m, False)
+        elif op == "ends_with":
+            def mask_of(rb):
+                m = pc.ends_with(rb.column(field), value)
+                return pc.fill_null(m, False)
+        else:
+            fn_name = {
+                ">": "greater", "gt": "greater",
+                "<": "less", "lt": "less",
+                ">=": "greater_equal", "ge": "greater_equal",
+                "<=": "less_equal", "le": "less_equal",
+                "==": "equal", "eq": "equal",
+                "!=": "not_equal", "ne": "not_equal",
+            }[op]
 
-        def mask_of(rb):
-            m = getattr(pc, fn_name)(rb.column(field), value)
-            return pc.fill_null(m, False)
+            def mask_of(rb):
+                m = getattr(pc, fn_name)(rb.column(field), value)
+                return pc.fill_null(m, False)
 
     else:
         field_a, op, field_b = spec["field_a"], spec["op"], spec["field_b"]

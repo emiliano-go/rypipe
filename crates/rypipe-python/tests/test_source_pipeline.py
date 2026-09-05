@@ -85,15 +85,20 @@ def _apply_plan(table: pa.Table, plan: dict):
             return pc.invert(inner)
         if "field" in spec:
             field, op, value = spec["field"], spec["op"], spec["value"]
-            fn_name = {
-                ">": "greater", "gt": "greater",
-                "<": "less", "lt": "less",
-                ">=": "greater_equal", "ge": "greater_equal",
-                "<=": "less_equal", "le": "less_equal",
-                "==": "equal", "eq": "equal",
-                "!=": "not_equal", "ne": "not_equal",
-            }[op]
-            m = getattr(pc, fn_name)(table.column(field), value)
+            if op == "starts_with":
+                m = pc.starts_with(table.column(field), value)
+            elif op == "ends_with":
+                m = pc.ends_with(table.column(field), value)
+            else:
+                fn_name = {
+                    ">": "greater", "gt": "greater",
+                    "<": "less", "lt": "less",
+                    ">=": "greater_equal", "ge": "greater_equal",
+                    "<=": "less_equal", "le": "less_equal",
+                    "==": "equal", "eq": "equal",
+                    "!=": "not_equal", "ne": "not_equal",
+                }[op]
+                m = getattr(pc, fn_name)(table.column(field), value)
             return pc.fill_null(m, False)
         field_a, op, field_b = spec["field_a"], spec["op"], spec["field_b"]
         fn_name = {
@@ -338,6 +343,75 @@ def test_filter_rows_constant_ordering_fusion():
 def test_filter_rows_invalid_compare_op():
     with pytest.raises(ValueError):
         FilterRows(field_a="x", op="like", field_b="y")
+
+
+def test_lambda_compiler_field_gt_literal():
+    """Lambda: r['age'] > '28' should be compiled and fused."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+        "age": ["30", "25", "35"],
+    }))
+    f = FilterRows(lambda r: r["age"] > "28")
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == ">"
+    rows = collect(src | f)
+    assert sorted([r["name"] for r in rows]) == ["Alice", "Carol"]
+
+
+def test_lambda_compiler_field_a_gt_field_b():
+    """Lambda: r['price'] > r['cost'] should be compiled and fused."""
+    src = _MockSource(pa.table({
+        "item": ["A", "B"],
+        "price": ["700", "50"],
+        "cost": ["60", "80"],
+    }))
+    f = FilterRows(lambda r: r["price"] > r["cost"])
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == ">"
+    rows = collect(src | f)
+    assert len(rows) == 1
+    assert rows[0]["item"] == "A"
+
+
+def test_lambda_compiler_startswith():
+    """Lambda: r['name'].startswith('A') should be compiled and fused."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+    }))
+    f = FilterRows(lambda r: r["name"].startswith("A"))
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == "starts_with"
+    rows = collect(src | f)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+
+
+def test_lambda_compiler_compound_and():
+    """Lambda: r['age'] > '28' and r['name'].startswith('A') should compile."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+        "age": ["30", "25", "35"],
+    }))
+    f = FilterRows(lambda r: r["age"] > "28" and r["name"].startswith("A"))
+    assert f._filter_spec is not None
+    assert "and" in f._filter_spec
+    rows = collect(src | f)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+
+
+def test_lambda_compiler_closure_fallback():
+    """Lambda with closure variable should fall back to Python."""
+    threshold = 100
+    f = FilterRows(lambda r: r["amount"] > threshold)
+    # Closure variable can't be compiled — falls back to Python
+    assert f._filter_spec is None
+
+
+def test_lambda_compiler_complex_fallback():
+    """Complex lambda should fall back to Python."""
+    f = FilterRows(lambda r: r["name"].strip().lower() == "alice")
+    assert f._filter_spec is None
 
 
 def test_drop_fields_rejects_string():

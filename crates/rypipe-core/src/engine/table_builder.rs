@@ -686,7 +686,9 @@ impl TableBuilder {
         match pred {
             FilterPredicate::Equal { field, .. }
             | FilterPredicate::NotEqual { field, .. }
-            | FilterPredicate::CompareLiteral { field, .. } => {
+            | FilterPredicate::CompareLiteral { field, .. }
+            | FilterPredicate::StartsWith { field, .. }
+            | FilterPredicate::EndsWith { field, .. } => {
                 let resolved = plan.resolve_field(field).unwrap_or(field);
                 names.push(resolved.to_string());
             }
@@ -1035,6 +1037,26 @@ impl TableBuilder {
                     _ => PredicateState::Undecided,
                 }
             }
+            FilterPredicate::StartsWith { field, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if actual.starts_with(value.as_str()) {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::EndsWith { field, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if actual.ends_with(value.as_str()) {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
             FilterPredicate::And(a, b) => {
                 let sa = Self::eval_predicate(a, tb);
                 let sb = Self::eval_predicate(b, tb);
@@ -1179,7 +1201,8 @@ impl TableBuilder {
                 }
                 None => PredicateState::Pass, // missing => None != Some(value) => Pass
             },
-            FilterPredicate::Compare { .. } | FilterPredicate::CompareLiteral { .. } => {
+            FilterPredicate::Compare { .. } | FilterPredicate::CompareLiteral { .. }
+            | FilterPredicate::StartsWith { .. } | FilterPredicate::EndsWith { .. } => {
                 // Compare/CompareLiteral with missing => Fail
                 match Self::eval_predicate(pred, tb) {
                     PredicateState::Undecided => PredicateState::Fail,
