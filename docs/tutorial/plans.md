@@ -9,15 +9,14 @@ rename, which to drop, which to filter, and which types to use.
 When you write:
 
 ```python
-from crxml import CrystalXMLSource, RenameFields, DropFields, FilterRows
+from rypipe_log import LogSource, RenameFields, FilterRows
 
-source = CrystalXMLSource("report.xml", row_tag="Details")
+source = LogSource("test.log")
 
 result = (
     source
     | RenameFields({"Name": "name"})
-    | DropFields(["InternalId"])
-    | FilterRows(field="Status", op="==", value="Active")
+    | FilterRows(field="status", op="==", value="active")
 )
 ```
 
@@ -25,9 +24,8 @@ result = (
 
 ```
 Stages:
-  RenameFields({"Name": "name"})    →  field_mapping: {"Name": "name"}
-  DropFields(["InternalId"])        →  drop_fields: ["InternalId"]
-  FilterRows(field="Status", ...)   →  filter: {"field": "Status", "op": "==", "value": "Active"}
+  RenameFields({"Name": "name"})    field_mapping: {"Name": "name"}
+  FilterRows(field="status", ...)   filter: {"field": "status", "op": "==", "value": "active"}
 ```
 
 When `.to_arrow()` is called, **rypipe** passes this plan to the Rust engine.
@@ -37,7 +35,9 @@ before any Python object is created.
 ## Fusable vs non-fusable { #fusable-vs-non-fusable }
 
 Stages that can be expressed as plan kwargs are **fusable**. The Rust engine
-handles them at parse time:
+handles them at parse time. Fusable stages include keyword-form filters
+and lambdas that the [lambda compiler](../architecture/lambda-compiler.md)
+can analyze:
 
 | Stage | Fusable when | Plan key |
 |-------|-------------|----------|
@@ -52,6 +52,26 @@ handles them at parse time:
 Stages that cannot be expressed as plan kwargs (non-resolvable lambda
 predicates) are **non-fusable**. They run in Python over the parsed data.
 
+## How plan forwarding works { #how-plan-forwarding-works }
+
+When a user writes `source | RenameFields(...) | FilterRows(...)`, the pipeline
+collects stages into a plan. When `.to_arrow()` is called, the pipeline calls
+`_read_arrow(plan_overrides=...)` on your source.
+
+Your adapter's `_read_arrow` must merge these overrides with the
+construction-time kwargs:
+
+```python
+def _read_arrow(self, plan_overrides=None):
+    # Start with construction-time kwargs
+    plan = self._build_plan_kwargs()
+    # Fused pipeline stages override construction-time kwargs
+    if plan_overrides:
+        plan.update(plan_overrides)
+    # Pass the merged plan to the Rust reader
+    return _rypipe_log.read_log(str(self._path), **plan)
+```
+
 ## Why plans matter { #why-plans-matter }
 
 Plans are the key to **rypipe**'s performance. When all stages are fusable,
@@ -63,15 +83,7 @@ With fusion:      Parse (rename + filter + cast in Rust) → Table
 ```
 
 Fusion eliminates the Python overhead for each row. On a 533 MB file, this
-is the difference between ~500 MB/s (Python stages) and ~4.5 GB/s (fused).
-
-## What you need to know { #what-you-need-to-know }
-
-As a **user**, you don't need to think about plans. Just chain stages with
-`|` and call `.to_arrow()`. **rypipe** handles the rest automatically.
-
-As an **adapter author**, you need to forward plan kwargs to your Rust reader.
-See [Writing Adapters](../writing-adapters/index.md) for details.
+is the difference between ~2 seconds (all Python) and ~200 ms (fused into Rust).
 
 ## Recap { #recap }
 
