@@ -1,13 +1,8 @@
 # Tutorial { #tutorial }
 
-!!! note
-
-    The examples on this page use the **crxml** adapter. Other adapters may
-    have different kwargs, options, or behavior. Check your adapter's
-    documentation for specifics.
-
 This tutorial teaches you how to use **rypipe** to read files into Arrow tables
-and DataFrames. You do not need to write Rust or build anything.
+and DataFrames, and how to build your own adapter. You do not need to write
+Rust or build anything to get started.
 
 ## What is **rypipe**? { #what-is-rypipe }
 
@@ -23,90 +18,33 @@ format-specific parsing. You install the adapter you need:
 |--------|----------------|-----------|
 | Crystal Reports XML | `crxml` | `.xml` |
 
-## Installation { #installation }
+## Quick example { #quick-example }
 
-```bash
-pip install crxml
-```
-
-This installs **crxml** (the Crystal Reports XML adapter) and its
-dependency **rypipe** (the engine). For other formats, install the
-corresponding adapter.
-
-## Your first read { #your-first-read }
+Here is a complete example that reads a Crystal Reports XML file, renames
+columns, filters rows, and produces a pandas DataFrame:
 
 ```python
-from crxml import CrystalXMLSource
+from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
-table = source.to_arrow()
 
-print(table.schema)
-# Name: string
-# Department: string
-# Amount: string
-# Status: string
-# Date: string
+df = (
+    source
+    | RenameFields({"Name": "name"})
+    | CastTypes({"Amount": float})
+    | FilterRows(field="Status", op="==", value="Active")
+).to_pandas()
 
-print(table.num_rows)
-# 15
+print(df)
+#     name  Amount  Status
+# 0  Alice   150.0  Active
+# 2  Carol   200.0  Active
 ```
 
-That's it. The adapter parsed the file in parallel and returned a
-`pyarrow.Table`.
+Five lines of code. **rypipe** handled parallel parsing, schema discovery,
+type coercion, filtering, and Arrow export automatically.
 
-### What **rypipe** does automatically { #what-rypipe-does }
-
-With just that one call, **rypipe**:
-
-* Splits the file into chunks for parallel parsing.
-* Discovers the schema from the data.
-* Builds Arrow column arrays with near-zero copy.
-* Returns a `pyarrow.Table` you can use directly.
-
-## Getting a DataFrame { #getting-a-dataframe }
-
-The table is already a `pyarrow.Table`, but you can convert it to pandas or
-Polars with one call:
-
-```python
-from crxml import CrystalXMLSource
-
-source = CrystalXMLSource("report.xml", row_tag="Details")
-table = source.to_arrow()
-
-# Convert to pandas
-df = table.to_pandas()
-print(df.head())
-
-# Or convert to Polars
-import polars as pl
-df_pl = pl.from_arrow(table)
-```
-
-## Using the Source API { #using-the-source-api }
-
-For more control, use a **Source** class directly. Sources give you the
-pipeline `|` operator, caching, and streaming:
-
-```python
-from crxml import CrystalXMLSource
-
-# Create a source, this does not parse yet
-source = CrystalXMLSource("report.xml", row_tag="Details")
-
-# Parse and get a table (cached on first call)
-table = source.to_arrow()
-
-# Convert to pandas
-df = source.to_pandas()
-
-# Convert to Polars
-df_pl = source.to_polars()
-```
-
-The Source parses the file once and caches the result. Subsequent calls to
-`to_arrow()`, `to_pandas()`, etc. reuse the cached table.
+**We will explain every line of this in the following pages.**
 
 ## Recap { #recap }
 

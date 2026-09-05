@@ -1,13 +1,7 @@
 # Sinks { #sinks }
 
-!!! note
-
-    The sinks shown here are available in most adapters but may have
-    different options. Check your adapter's docs.
-
 Sinks materialize pipeline results into tables, DataFrames, or files.
-You can use them as methods on a Source or as standalone functions on a
-Pipeline.
+This page explains each sink and shows how to implement them in your adapter.
 
 ## Source methods { #source-methods }
 
