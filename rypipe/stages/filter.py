@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .lambda_compiler import _analyze_lambda
+
 
 class _ConstantPredicate:
     __slots__ = ("_field", "_op", "_value")
@@ -76,6 +78,55 @@ class _ComparePredicate:
         return bool(fn(record.get(self._field_a), record.get(self._field_b)))
 
 
+class _StartsWithPredicate:
+    """Fusable predicate: r["field"].startswith(value)"""
+    __slots__ = ("_field", "_value")
+
+    def __init__(self, field: str, value: str):
+        self._field = field
+        self._value = value
+
+    def __call__(self, record: dict) -> bool:
+        actual = record.get(self._field)
+        if actual is None:
+            return False
+        return str(actual).startswith(self._value)
+
+
+class _InPredicate:
+    """Fusable predicate: r["field"] in values"""
+    __slots__ = ("_field", "_values")
+
+    def __init__(self, field: str, values: tuple):
+        self._field = field
+        self._values = values
+
+    def __call__(self, record: dict) -> bool:
+        actual = record.get(self._field)
+        return actual in self._values
+
+
+def _build_predicate_from_spec(spec: dict):
+    """Build a predicate callable from a filter spec dict (used for Python fallback)."""
+    if "field" in spec and "op" in spec and "value" in spec:
+        op = spec["op"]
+        if op == "starts_with":
+            return _StartsWithPredicate(spec["field"], spec["value"])
+        return _ConstantPredicate(spec["field"], op, spec["value"])
+    if "field_a" in spec and "op" in spec and "field_b" in spec:
+        return _ComparePredicate(spec["field_a"], spec["op"], spec["field_b"])
+    if "and" in spec:
+        predicates = [_build_predicate_from_spec(s) for s in spec["and"]]
+        return lambda r: all(p(r) for p in predicates)
+    if "or" in spec:
+        predicates = [_build_predicate_from_spec(s) for s in spec["or"]]
+        return lambda r: any(p(r) for p in predicates)
+    if "not" in spec:
+        inner = _build_predicate_from_spec(spec["not"])
+        return lambda r: not inner(r)
+    return None
+
+
 class FilterRows:
     __slots__ = ("_predicate", "_filter_spec")
 
@@ -90,8 +141,16 @@ class FilterRows:
         field_b=None,
     ):
         if predicate is not None:
-            self._predicate = predicate
-            self._filter_spec = None
+            # Try to compile the lambda into a fusable filter spec
+            spec = _analyze_lambda(predicate)
+            if spec is not None:
+                # Lambda was compiled successfully — use the spec for fusion
+                self._filter_spec = spec
+                self._predicate = _build_predicate_from_spec(spec)
+            else:
+                # Unknown pattern — fall back to Python execution
+                self._predicate = predicate
+                self._filter_spec = None
         elif field is not None and op is not None and value is not None:
             self._filter_spec = {"field": field, "op": op, "value": value}
             self._predicate = _ConstantPredicate(field, op, value)

@@ -243,6 +243,10 @@ pub enum FilterPredicate {
         op: CompareOp,
         value: String,
     },
+    /// Keep row if `field_value.starts_with(value)`.
+    StartsWith { field: String, value: String },
+    /// Keep row if `field_value.ends_with(value)`.
+    EndsWith { field: String, value: String },
     /// Keep row if both sub-predicates pass. Short-circuits on the first
     /// failure.
     And(Box<FilterPredicate>, Box<FilterPredicate>),
@@ -321,6 +325,20 @@ impl FilterPredicate {
                     }
                 }
                 false
+            }
+            FilterPredicate::StartsWith { field, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => s.starts_with(value.as_str()),
+                    None => false,
+                }
+            }
+            FilterPredicate::EndsWith { field, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => s.ends_with(value.as_str()),
+                    None => false,
+                }
             }
             FilterPredicate::And(a, b) => {
                 // Evaluate the operand with the earlier field first for
@@ -458,7 +476,9 @@ fn pred_ordinal(
     match pred {
         FilterPredicate::Equal { field, .. }
         | FilterPredicate::NotEqual { field, .. }
-        | FilterPredicate::CompareLiteral { field, .. } => {
+        | FilterPredicate::CompareLiteral { field, .. }
+        | FilterPredicate::StartsWith { field, .. }
+        | FilterPredicate::EndsWith { field, .. } => {
             field_index
                 .get(resolve(field, plan))
                 .copied()

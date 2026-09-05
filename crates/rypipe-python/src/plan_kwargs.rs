@@ -156,9 +156,11 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
     Ok(match op.as_str() {
         "!=" | "ne" => FilterPredicate::NotEqual { field, value },
         "==" | "eq" => FilterPredicate::Equal { field, value },
+        "starts_with" => FilterPredicate::StartsWith { field, value },
+        "ends_with" => FilterPredicate::EndsWith { field, value },
         other => {
             let cop = CompareOp::from_str(other).ok_or_else(|| {
-                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
+                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with";
                 PlanError::new_err(format!("unsupported filter op {other:?}; valid: {valid}"))
             })?;
             FilterPredicate::CompareLiteral { field, op: cop, value }

@@ -174,7 +174,8 @@ stage = FilterRows(field="status", op="==", value="active")
 # Input:  {"name": "Bob",   "status": "inactive"} → dropped
 ```
 
-**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
+**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`,
+`starts_with`, `ends_with`
 
 ### Column comparison { #filterrows-compare }
 
@@ -201,8 +202,9 @@ stage = FilterRows(lambda r: r["name"].startswith("A") and r["amount"] > 100)
 
 !!! warning
 
-    Callable predicates **cannot be fused** into the Rust parse loop. They run
-    in Python over the full table. For best performance, use the keyword form
+    Simple lambdas (e.g., `r["field"] > 100`) are automatically compiled into
+    fusable predicates. Complex lambdas (closures, nested calls) fall back to
+    Python execution. For best performance, use the keyword form
     (`field`/`op`/`value`) whenever possible.
 
 
