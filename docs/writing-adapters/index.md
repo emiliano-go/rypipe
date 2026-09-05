@@ -80,22 +80,22 @@ sinks (`.to_arrow()`, `.to_pandas()`, `.to_polars()`, `.to_parquet()`).
 
 Repack or reimplement these stage classes:
 
-- `CastTypes` — cast column types
-- `FilterRows` — filter rows by predicate
-- `RenameFields` — rename columns
-- `DropFields` — remove columns
+- `CastTypes`, cast column types
+- `FilterRows`, filter rows by predicate
+- `RenameFields`, rename columns
+- `DropFields`, remove columns
 
 ### Sinks (required) { #sinks }
 
 Repack or reimplement these sink functions:
 
-- `collect(pipeline)` — collect to list of dicts
-- `to_arrow(pipeline)` — materialize to pyarrow.Table
-- `to_pandas(pipeline)` — convert to pandas DataFrame
-- `to_polars(pipeline)` — convert to Polars DataFrame
-- `to_parquet(pipeline, path)` — write to Parquet
-- `to_dataframe(pipeline)` — alias for to_pandas
-- `to_csv(pipeline, path)` — write to CSV
+- `collect(pipeline)`, collect to list of dicts
+- `to_arrow(pipeline)`, materialize to pyarrow.Table
+- `to_pandas(pipeline)`, convert to pandas DataFrame
+- `to_polars(pipeline)`, convert to Polars DataFrame
+- `to_parquet(pipeline, path)`, write to Parquet
+- `to_dataframe(pipeline)`, alias for to_pandas
+- `to_csv(pipeline, path)`, write to CSV
 
 ### Registration (required) { #registration }
 
