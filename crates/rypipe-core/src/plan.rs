@@ -13,6 +13,8 @@ pub enum FieldType {
     Date32,
     /// Point in time with an explicit unit.
     Timestamp(TimeUnit),
+    /// Fixed-precision decimal with given scale (default 18).
+    Decimal128(u8),
 }
 
 impl FieldType {
@@ -30,6 +32,11 @@ impl FieldType {
             "timestamp[ms]" => Some(FieldType::Timestamp(TimeUnit::Millisecond)),
             "timestamp[us]" | "timestamp[µs]" => Some(FieldType::Timestamp(TimeUnit::Microsecond)),
             "timestamp[ns]" => Some(FieldType::Timestamp(TimeUnit::Nanosecond)),
+            "decimal128" => Some(FieldType::Decimal128(18)),
+            s if s.starts_with("decimal128(") => {
+                let scale = s.trim_start_matches("decimal128(").trim_end_matches(')').parse::<u8>().ok()?;
+                Some(FieldType::Decimal128(scale))
+            }
             _ => None,
         }
     }

@@ -10,7 +10,7 @@ _PY_TO_RUST_TYPE = {
     bool: "bool",
     date: "date32",
     datetime: "timestamp",
-    Decimal: "float64",
+    Decimal: "decimal128",
     UUID: "string",
 }
 

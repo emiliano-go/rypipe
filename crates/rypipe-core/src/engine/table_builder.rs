@@ -824,6 +824,9 @@ impl TableBuilder {
                             _ => Some(value.clone()),
                         },
                         FieldType::String | FieldType::Dictionary => Some(value.clone()),
+                        FieldType::Decimal128(_) => value.as_str().and_then(|s| {
+                            s.trim().parse::<i128>().ok().map(|n| Value::Int64(n as i64))
+                        }),
                     }
                 };
                 let va = tb
