@@ -684,7 +684,9 @@ impl TableBuilder {
         names: &mut SmallVec<[String; 4]>,
     ) {
         match pred {
-            FilterPredicate::Equal { field, .. } | FilterPredicate::NotEqual { field, .. } => {
+            FilterPredicate::Equal { field, .. }
+            | FilterPredicate::NotEqual { field, .. }
+            | FilterPredicate::CompareLiteral { field, .. } => {
                 let resolved = plan.resolve_field(field).unwrap_or(field);
                 names.push(resolved.to_string());
             }
@@ -951,6 +953,88 @@ impl TableBuilder {
                     _ => PredicateState::Undecided,
                 }
             }
+            FilterPredicate::CompareLiteral { field, op, value } => {
+                let va = tb
+                    .get_buffered_value(field)
+                    .and_then(|v| {
+                        let resolved = tb.plan.resolve_field(field).unwrap_or(field);
+                        match tb.plan.column_type(resolved) {
+                            crate::plan::FieldType::Int64 => match v.as_str() {
+                                Some(s) => lexical::parse::<i64, _>(s.as_bytes())
+                                    .ok()
+                                    .map(crate::value::Value::Int64),
+                                _ => Some(v.clone()),
+                            },
+                            crate::plan::FieldType::Float64 => match v.as_str() {
+                                Some(s) => lexical::parse::<f64, _>(s.as_bytes())
+                                    .ok()
+                                    .map(crate::value::Value::Float64),
+                                _ => Some(v.clone()),
+                            },
+                            crate::plan::FieldType::Boolean => match v.as_str() {
+                                Some(s) => s.parse::<bool>().ok().map(crate::value::Value::Bool),
+                                _ => Some(v.clone()),
+                            },
+                            _ => Some(v.clone()),
+                        }
+                    });
+                let vb = match tb.plan.column_type(
+                    tb.plan.resolve_field(field).unwrap_or(field),
+                ) {
+                    crate::plan::FieldType::Int64 => lexical::parse::<i64, _>(value.as_bytes())
+                        .ok()
+                        .map(crate::value::Value::Int64),
+                    crate::plan::FieldType::Float64 => {
+                        lexical::parse::<f64, _>(value.as_bytes())
+                            .ok()
+                            .map(crate::value::Value::Float64)
+                    }
+                    crate::plan::FieldType::Boolean => {
+                        value.parse::<bool>().ok().map(crate::value::Value::Bool)
+                    }
+                    _ => Some(crate::value::Value::Str(std::borrow::Cow::Borrowed(value))),
+                };
+                match (va, vb) {
+                    (Some(ref a), Some(ref b)) => {
+                        let ord = match (a, b) {
+                            (crate::value::Value::Int64(ai), crate::value::Value::Int64(bi)) => {
+                                Some(ai.cmp(bi))
+                            }
+                            (
+                                crate::value::Value::Float64(af),
+                                crate::value::Value::Float64(bf),
+                            ) => af.partial_cmp(bf),
+                            (crate::value::Value::Int64(ai), crate::value::Value::Float64(bf)) => {
+                                (*ai as f64).partial_cmp(bf)
+                            }
+                            (crate::value::Value::Float64(af), crate::value::Value::Int64(bi)) => {
+                                af.partial_cmp(&(*bi as f64))
+                            }
+                            (crate::value::Value::Str(a), crate::value::Value::Str(b)) => {
+                                Some(a.cmp(b))
+                            }
+                            (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => {
+                                Some(a.cmp(b))
+                            }
+                            _ => None,
+                        };
+                        let pass = ord.is_some_and(|ord| match op {
+                            crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                            crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                            crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                            crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                            crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                            crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                        });
+                        if pass {
+                            PredicateState::Pass
+                        } else {
+                            PredicateState::Fail
+                        }
+                    }
+                    _ => PredicateState::Undecided,
+                }
+            }
             FilterPredicate::And(a, b) => {
                 let sa = Self::eval_predicate(a, tb);
                 let sb = Self::eval_predicate(b, tb);
@@ -1095,8 +1179,8 @@ impl TableBuilder {
                 }
                 None => PredicateState::Pass, // missing => None != Some(value) => Pass
             },
-            FilterPredicate::Compare { .. } => {
-                // Compare with missing => Fail (as per old check where get_typed_value returns None)
+            FilterPredicate::Compare { .. } | FilterPredicate::CompareLiteral { .. } => {
+                // Compare/CompareLiteral with missing => Fail
                 match Self::eval_predicate(pred, tb) {
                     PredicateState::Undecided => PredicateState::Fail,
                     other => other,

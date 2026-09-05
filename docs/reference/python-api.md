@@ -233,10 +233,9 @@ FilterRows(
 )
 ```
 
-**Constant filter operators:** `==`, `eq`, `!=`, `ne`
+**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 
-**Comparison operators:** `>`, `<`, `>=`, `<=`, `==`, `!=`, `gt`, `lt`,
-`ge`, `le`, `eq`, `ne`
+**Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 
 ### FilterRowsAny { #filterrowsany }
 

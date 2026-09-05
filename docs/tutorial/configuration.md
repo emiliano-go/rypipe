@@ -119,12 +119,12 @@ The `filter` parameter accepts a dictionary with these forms:
 
 | Operator | Meaning |
 |----------|---------|
-| `"=="`, `"eq"` | Equal |
-| `"!="`, `"ne"` | Not equal |
-| `">"`, `"gt"` | Greater than |
-| `"<"`, `"lt"` | Less than |
-| `">="`, `"ge"` | Greater or equal |
-| `"<="`, `"le"` | Less or equal |
+| `"=="` | Equal |
+| `"!="` | Not equal |
+| `">"` | Greater than |
+| `"<"` | Less than |
+| `">="` | Greater or equal |
+| `"<="` | Less or equal |
 
 ## Streaming options { #streaming-options}
 

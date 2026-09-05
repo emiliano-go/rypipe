@@ -174,7 +174,7 @@ stage = FilterRows(field="status", op="==", value="active")
 # Input:  {"name": "Bob",   "status": "inactive"} → dropped
 ```
 
-Supported operators: `==`, `eq`, `!=`, `ne`.
+**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 
 ### Column comparison { #filterrows-compare }
 

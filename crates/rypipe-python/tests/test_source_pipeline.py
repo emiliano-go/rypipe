@@ -85,10 +85,16 @@ def _apply_plan(table: pa.Table, plan: dict):
             return pc.invert(inner)
         if "field" in spec:
             field, op, value = spec["field"], spec["op"], spec["value"]
-            m = pc.equal(table.column(field), value)
-            if op not in ("==", "eq"):
-                m = pc.invert(m)
-            return pc.fill_null(m, op in ("==", "eq"))
+            fn_name = {
+                ">": "greater", "gt": "greater",
+                "<": "less", "lt": "less",
+                ">=": "greater_equal", "ge": "greater_equal",
+                "<=": "less_equal", "le": "less_equal",
+                "==": "equal", "eq": "equal",
+                "!=": "not_equal", "ne": "not_equal",
+            }[op]
+            m = getattr(pc, fn_name)(table.column(field), value)
+            return pc.fill_null(m, False)
         field_a, op, field_b = spec["field_a"], spec["op"], spec["field_b"]
         fn_name = {
             ">": "greater",
@@ -296,7 +302,37 @@ def test_source_clear_cache(sample_table):
 
 def test_filter_rows_invalid_constant_op():
     with pytest.raises(ValueError):
-        FilterRows(field="x", op=">", value="1")
+        FilterRows(field="x", op="like", value="1")
+
+
+def test_filter_rows_constant_ordering():
+    """Constant filters now support ordering operators (>, <, >=, <=)."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+        "age": ["30", "25", "35"],
+    }))
+    # age > "28" should keep Alice (30) and Carol (35)
+    rows = collect(src | FilterRows(field="age", op=">", value="28"))
+    assert len(rows) == 2
+    assert {r["name"] for r in rows} == {"Alice", "Carol"}
+
+    # age <= "25" should keep Bob (25)
+    rows = collect(src | FilterRows(field="age", op="<=", value="25"))
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Bob"
+
+
+def test_filter_rows_constant_ordering_fusion():
+    """Ordering constant filters should fuse into the Rust plan."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob"],
+        "age": ["30", "25"],
+    }))
+    pipe = src | FilterRows(field="age", op=">", value="28")
+    # Should produce a fused result (2 rows where age > "28")
+    rows = collect(pipe)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
 
 
 def test_filter_rows_invalid_compare_op():
