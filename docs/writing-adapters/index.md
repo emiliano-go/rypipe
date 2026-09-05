@@ -52,7 +52,7 @@ The engine provides `TableBuilder` as the production
     Adapters **repack the API**: they include their own copies of the pipeline
     stage classes (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) and
     sink functions (`collect`, `to_arrow`, `to_pandas`, `to_polars`,
-    `to_parquet`, `to_dataframe`, `to_csv`) so users never import from
+    `to_parquet`, `to_pandas`, `to_csv`) so users never import from
     **rypipe** directly. This makes the adapter self-contained.
 
 
@@ -94,7 +94,7 @@ Repack or reimplement these sink functions:
 - `to_pandas(pipeline)`, convert to pandas DataFrame
 - `to_polars(pipeline)`, convert to Polars DataFrame
 - `to_parquet(pipeline, path)`, write to Parquet
-- `to_dataframe(pipeline)`, alias for to_pandas
+- `to_pandas(pipeline)`, alias for to_pandas
 - `to_csv(pipeline, path)`, write to CSV
 
 ### Registration (required) { #registration }

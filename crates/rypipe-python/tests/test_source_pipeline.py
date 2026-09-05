@@ -21,7 +21,7 @@ from rypipe import (
     collect,
     to_arrow,
     to_csv,
-    to_dataframe,
+    to_pandas,
     to_polars,
 )
 from rypipe.fusion import plan_split
@@ -243,10 +243,10 @@ def test_pipeline_chain_fusion(sample_table):
     assert rows[0]["full_name"] == "Alice"
 
 
-def test_pipeline_to_dataframe(sample_table, pandas):
+def test_pipeline_to_pandas(sample_table, pandas):
     src = _MockSource(sample_table)
     pipe = src | RenameFields({"name": "full_name"})
-    df = to_dataframe(pipe)
+    df = to_pandas(pipe)
     assert list(df.columns) == ["full_name", "age", "city"]
 
 

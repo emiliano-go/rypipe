@@ -11,7 +11,7 @@ pipeline syntax crxml had for free::
         | DropFields(["internal_id"])
         | FilterRows(field="status", op="==", value="active")
         | CastTypes({"amount": float})
-    ).to_dataframe()
+    ).to_pandas()
 """
 
 from __future__ import annotations
@@ -174,10 +174,6 @@ class Source(ABC):
             return table.to_pandas(types_mapper=pd.ArrowDtype)
         return table.to_pandas()
 
-    def to_dataframe(self, dtype_backend: str = "pyarrow") -> "pd.DataFrame":
-        """Alias for ``to_pandas``."""
-        return self.to_pandas(dtype_backend=dtype_backend)
-
     def to_polars(self):
         """Return a Polars DataFrame."""
         import polars as pl
@@ -216,7 +212,7 @@ class Adapter(Source):
             source
             | RenameFields({"old_name": "new_name"})
             | DropFields(["internal_id"])
-        ).to_dataframe()
+        ).to_pandas()
     """
 
     __slots__ = ()

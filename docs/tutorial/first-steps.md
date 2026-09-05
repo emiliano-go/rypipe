@@ -39,7 +39,7 @@ The Source parses the file once and caches the result. Subsequent calls to
 |--------|---------|-------------|
 | `.to_arrow()` | `pyarrow.Table` | Parse and cache the table |
 | `.to_pandas()` | `pd.DataFrame` | Convert to pandas |
-| `.to_dataframe()` | `pd.DataFrame` | Alias for `.to_pandas()` |
+| `.to_pandas()` | `pd.DataFrame` | Alias for `.to_pandas()` |
 | `.to_polars()` | `pl.DataFrame` | Convert to Polars |
 | `.to_parquet(path)` | - | Write to Parquet |
 | `.clear_cache()` | - | Drop cached table |
@@ -67,7 +67,7 @@ result = (
 table = result.to_arrow()
 
 # Or to a DataFrame
-df = result.to_dataframe()
+df = result.to_pandas()
 ```
 
 Each `|` returns a new `Pipeline`, the original Source is not modified.
@@ -92,7 +92,7 @@ Sinks materialize pipeline results. You can use them as methods on a Source
 or as standalone functions:
 
 ```python
-from crxml import CrystalXMLSource, collect, to_dataframe
+from crxml import CrystalXMLSource, collect, to_pandas
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
@@ -103,7 +103,7 @@ df = source.to_pandas()
 # As standalone functions (on pipelines)
 pipeline = source | FilterRows(field="Status", op="==", value="Active")
 rows = collect(pipeline)
-df = to_dataframe(pipeline)
+df = to_pandas(pipeline)
 ```
 
 See [Sinks](sinks.md#sinks) for the full reference.

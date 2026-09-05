@@ -15,7 +15,7 @@ pipeline API that lets adapters expose chainable sources::
         | DropFields(["temp"])
         | FilterRows(field="status", op="==", value="active")
         | CastTypes({"amount": float})
-    ).to_dataframe()
+    ).to_pandas()
 
 Adapters register themselves so the high-level ``read`` API also works::
 
@@ -46,7 +46,6 @@ from .sinks import (
     collect,
     to_arrow,
     to_csv,
-    to_dataframe,
     to_pandas,
     to_parquet,
     to_polars,
@@ -71,7 +70,6 @@ __all__ = [
     "collect",
     "to_arrow",
     "to_csv",
-    "to_dataframe",
     "to_pandas",
     "to_parquet",
     "to_polars",
