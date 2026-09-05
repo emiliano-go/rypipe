@@ -105,10 +105,14 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 | `RenameFields` | `field_map` | Multiple renames merge into one map. |
 | `DropFields` | `drop_fields` | Merges as a set union. |
 | `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
-| `FilterRows` predicate | `filter` | Constant (`field`/`op`/`value`) with `==`/`!=`, or column-to-column (`field_a`/`op`/`field_b`); both are evaluated per-row during parse. |
+| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`), or compiled lambda (comparisons, `startswith`, `endswith`, `in`, arithmetic, compound AND/OR); all are evaluated per-row during parse. |
 | `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` | `filter` | `And`, `Or`, `Not` trees built from the same leaf shapes; evaluated per-row with short circuiting; fully fusable. |
 
-`FilterRows` is fusable when it uses a constant predicate (`field`, `op`, `value`) with `==` or `!=`, or a column-to-column predicate (`field_a`, `op`, `field_b`). `FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable; they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
+`FilterRows` is fusable when it uses a keyword-form predicate (`field`,
+`op`, `value` or `field_a`, `op`, `field_b`), or when a lambda is
+automatically compiled by the [lambda compiler](./lambda-compiler.md).
+`FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable;
+they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
 
 ## What is not fusable { #what-is-not-fusable }
 

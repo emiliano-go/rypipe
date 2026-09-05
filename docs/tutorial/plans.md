@@ -44,10 +44,10 @@ handles them at parse time:
 | `RenameFields` | Always | `field_mapping` |
 | `DropFields` | Always | `drop_fields` |
 | `CastTypes` | `int`, `float`, `bool` | `field_types` |
-| `FilterRows` | Keyword form (`field`/`op`/`value`) | `filter` |
-| `FilterRowsAny` | All filters are keyword form | `filter` |
-| `FilterRowsAll` | All filters are keyword form | `filter` |
-| `FilterRowsNot` | Inner filter is keyword form | `filter` |
+| `FilterRows` | Keyword form, or compiled lambda (comparisons, `startswith`, `endswith`, `in`, arithmetic, compound AND/OR) | `filter` |
+| `FilterRowsAny` | All inner filters are fusable | `filter` |
+| `FilterRowsAll` | All inner filters are fusable | `filter` |
+| `FilterRowsNot` | Inner filter is fusable | `filter` |
 
 Stages that cannot be expressed as plan kwargs (lambda predicates) are
 **non-fusable**. They run in Python over the parsed data.

@@ -8,7 +8,7 @@ Each page takes one optimization topic and explains the mechanism, the tuning kn
 
 | Page | What you will learn |
 |------|---------------------|
-| [Fusion](./fusion.md) | How `RenameFields`, `DropFields`, `CastTypes`, and constant `FilterRows` are rewritten into a single `ExecutionPlan`; what is fusable and what falls back to Python. |
+| [Fusion](./fusion.md) | How `RenameFields`, `DropFields`, `CastTypes`, and `FilterRows` (keyword form or compiled lambda) are rewritten into a single `ExecutionPlan`; what is fusable and what falls back to Python. |
 | [Execution modes](./execution-modes.md) | `stream`, `columnar`, `parallel`, and `auto`; when each wins on memory, latency, and throughput. |
 | [Memory and chunking](./memory-and-chunking.md) | How `BoundedExecutor` enforces a memory budget; sizing chunks for files larger or smaller than RAM. |
 | [Parallelism](./parallelism.md) | `rayon` internals; the `num_chunks` formula; why too many chunks hurt; measuring speedup. |

@@ -76,7 +76,7 @@ for batch in pipe.iter_record_batches(memory="256MB"):
 
 ## When streaming falls back { #when-streaming-falls-back }
 
-`Pipeline.iter_record_batches` checks `plan_split` `rypipe/fusion.py:14`; if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented: it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` constant).
+`Pipeline.iter_record_batches` checks `plan_split` `rypipe/fusion.py:14`; if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented: it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` with keyword form or compiled lambda).
 
 ## Testing { #testing }
 

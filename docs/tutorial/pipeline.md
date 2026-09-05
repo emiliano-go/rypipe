@@ -184,8 +184,8 @@ stage = FilterRowsNot(FilterRows(field="status", op="==", value="deleted"))
 
 !!! warning
 
-    Combinators only accept fusable `FilterRows` instances (the keyword form
-    with `field`/`field_a`). Callable predicates cannot be combined.
+    Combinators only accept fusable `FilterRows` instances (keyword form
+    or compiled lambdas). Raw callable predicates cannot be combined.
 
 
 ## Chaining multiple stages { #chaining-multiple-stages }
