@@ -80,9 +80,9 @@ impl Splitter for LogSplitter {
 
 The Splitter has two methods:
 
-* `next_record_start` — called repeatedly to find chunk boundaries. The engine
+* `next_record_start`: called repeatedly to find chunk boundaries. The engine
   splits the file at these positions for parallel parsing.
-* `estimate_bytes_per_row` — tells the engine how many rows to expect per
+* `estimate_bytes_per_row`: tells the engine how many rows to expect per
   chunk, so it can size memory budgets.
 
 ## Step 3: Implement the RecordParser { #step-3-implement-the-recordparser}
@@ -140,8 +140,8 @@ impl RecordParser for LogParser {
 
 The RecordParser has two methods:
 
-* `validate` — called once per chunk to check that the bytes are valid UTF-8.
-* `parse_chunk` — the hot path. For each row, call `sink.begin_row()`,
+* `validate`: called once per chunk to check that the bytes are valid UTF-8.
+* `parse_chunk`: the hot path. For each row, call `sink.begin_row()`,
   then `sink.put_field()` for each field, then `sink.end_row()`.
 
 !!! tip
@@ -275,7 +275,7 @@ class LogAdapter:
 def _register() -> None:
     try:
         import rypipe
-    except Exception:  # pragma: no cover — rypipe is optional
+    except Exception:  # pragma: no cover, rypipe is optional
         return
     rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
 
@@ -337,13 +337,13 @@ print(result)
 
 ## Next steps { #next-steps}
 
-* [Pipeline](pipeline.md#pipeline) — how the `|` operator and plan forwarding
+* [Pipeline](pipeline.md#pipeline), how the `|` operator and plan forwarding
   work
-* [Stages](stages.md#stages) — implement `CastTypes`, `FilterRows`, etc.
-* [Sinks](sinks.md#sinks) — implement `collect`, `to_pandas`, `to_csv`
-* [Rust Creation](../writing-adapters/rust-creation.md) — deep dive into
+* [Stages](stages.md#stages), implement `CastTypes`, `FilterRows`, etc.
+* [Sinks](sinks.md#sinks), implement `collect`, `to_pandas`, `to_csv`
+* [Rust Creation](../writing-adapters/rust-creation.md), deep dive into
   Splitter, RecordParser, and ColumnarSink
-* [Schema](../writing-adapters/schema.md) — declare columns for maximum
+* [Schema](../writing-adapters/schema.md), declare columns for maximum
   performance
 
 ## Recap { #recap }

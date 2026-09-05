@@ -21,7 +21,7 @@ result = (
 table = result.to_arrow()
 ```
 
-Each `|` returns a new `Pipeline` — the original Source is not modified.
+Each `|` returns a new `Pipeline`, the original Source is not modified.
 
 ### What **rypipe** does automatically { #what-rypipe-does}
 
@@ -105,7 +105,7 @@ class LogAdapter:
 def _register() -> None:
     try:
         import rypipe
-    except Exception:  # pragma: no cover — rypipe is optional
+    except Exception:  # pragma: no cover, rypipe is optional
         return
     rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
 
@@ -116,7 +116,7 @@ _register()
 !!! note
 
     The adapter's `read()` method returns a `pyarrow.Table`, not a Source.
-    This is by design — `rypipe.read()` calls `adapter.read()` and expects a
+    This is by design: `rypipe.read()` calls `adapter.read()` and expects a
     table. Users who want pipelines use the Source directly.
 
 ## Using the Pipeline { #using-the-pipeline}
