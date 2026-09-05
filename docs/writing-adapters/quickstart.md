@@ -162,7 +162,7 @@ fn _rypipe_log(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 ## Step 5: Create the Python wrapper { #step-5-create-the-python-wrapper }
 
-Follow the crxml formula: a Source subclass, a thin adapter, and repacked
+Follow the [crxml](../crxml-adapter.md) formula: a Source subclass, a thin adapter, and repacked
 stages.
 
 ### `rypipe_log/__init__.py` { #init-py }

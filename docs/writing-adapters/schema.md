@@ -2,7 +2,7 @@
 
 When your format has a known set of columns, declaring them upfront with
 `schema_order` and `field_types` is the single largest performance gain
-available to adapter authors. In the crxml reference adapter, explicit schema
+available to adapter authors. In the [crxml](../crxml-adapter.md) reference adapter, explicit schema
 lifts throughput from 4.2 GB/s to 7.6 GB/s on production data (+80%).
 
 ## Why schema matters { #why-schema-matters }
@@ -104,7 +104,7 @@ fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
 ```
 
 When `schema_order` is set and a field is not in it, `wants` returns `false`,
-meaning no byte scanning, no UTF-8 decoding, and no hash lookup. In crxml,
+meaning no byte scanning, no UTF-8 decoding, and no hash lookup. In [crxml](../crxml-adapter.md),
 this saves ~66% of parse time on `drop_all` workloads.
 
 ### Using `resolve` + `put_field_resolved` { #using-resolve }

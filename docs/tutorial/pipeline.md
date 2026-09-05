@@ -50,7 +50,6 @@ that forwards plan kwargs to the Rust reader.
 ### `rypipe_log/source.py` { #source-py }
 
 ```python
-from __future__ import annotations
 from typing import Any
 
 import _rypipe_log
@@ -94,7 +93,6 @@ to Python execution (10-50x slower).
 The adapter is a thin, stateless wrapper that delegates to the Source:
 
 ```python
-from __future__ import annotations
 from typing import Any
 
 from .source import LogSource

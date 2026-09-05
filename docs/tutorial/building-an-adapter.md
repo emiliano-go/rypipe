@@ -23,10 +23,17 @@ Each line is a row. Fields are comma-separated `key=value` pairs.
 
 ## Step 1: Create the package { #step-1-create-the-package }
 
+An adapter is a separate package that depends on `rypipe-core`. Create the
+package structure and `Cargo.toml`:
+
 ```bash
 mkdir rypipe-log && cd rypipe-log
 mkdir src
 ```
+
+The `Cargo.toml` defines the Rust crate that will be compiled into a Python
+extension module. We depend on `rypipe-core` for the `Splitter` and
+`RecordParser` traits, and `pyo3` for Python bindings:
 
 ### `Cargo.toml` { #cargo-toml }
 
@@ -47,9 +54,15 @@ memchr = "2"
 simdutf8 = "0.1"
 ```
 
+The `cdylib` crate type produces a shared library that Python can import.
+The `abi3` feature enables stable ABI, so one wheel works across Python
+versions.
+
 ## Step 2: Implement the Splitter { #step-2-implement-the-splitter}
 
-The Splitter finds row boundaries. For newline-delimited formats, split on
+The Splitter tells the engine where each row starts. The engine calls
+`next_record_start` repeatedly to split the file into chunks for parallel
+parsing. For newline-delimited formats, the next row starts after the next
 `\n`:
 
 ### `src/lib.rs` (Splitter) { #splitter }
@@ -81,13 +94,18 @@ impl Splitter for LogSplitter {
 The Splitter has two methods:
 
 * `next_record_start`: called repeatedly to find chunk boundaries. The engine
-  splits the file at these positions for parallel parsing.
+  splits the file at these positions for parallel parsing. We use `memchr`
+  for fast newline scanning.
 * `estimate_bytes_per_row`: tells the engine how many rows to expect per
-  chunk, so it can size memory budgets.
+  chunk, so it can size memory budgets. We count newlines in a sample and
+  divide.
 
 ## Step 3: Implement the RecordParser { #step-3-implement-the-recordparser}
 
-The RecordParser extracts field values from each row:
+The RecordParser extracts field values from each row. This is the hot path:
+it is called once per chunk, so it must be fast. For each row, we call
+`sink.begin_row()`, then `sink.put_field()` for each field, then
+`sink.end_row()`:
 
 ### `src/lib.rs` (RecordParser) { #recordparser }
 
@@ -141,8 +159,11 @@ impl RecordParser for LogParser {
 The RecordParser has two methods:
 
 * `validate`: called once per chunk to check that the bytes are valid UTF-8.
-* `parse_chunk`: the hot path. For each row, call `sink.begin_row()`,
-  then `sink.put_field()` for each field, then `sink.end_row()`.
+  We use `simdutf8` for fast validation.
+* `parse_chunk`: the hot path. For each row, call `sink.begin_row()`, then
+  `sink.put_field()` for each field, then `sink.end_row()`. We use
+  `Cow::Borrowed` to borrow the string from the input bytes without
+  allocation.
 
 !!! tip
 
@@ -152,7 +173,9 @@ The RecordParser has two methods:
 
 ## Step 4: Expose to Python { #step-4-expose-to-python}
 
-Add PyO3 bindings:
+Add PyO3 bindings to expose your parser to Python. The `read_log` function
+is an internal function that `LogSource._read_arrow()` calls. Users never
+call it directly, they use `LogSource` instead:
 
 ### `src/lib.rs` (Python bindings) { #python-bindings }
 
@@ -161,7 +184,8 @@ use pyo3::prelude::*;
 use rypipe_core::{ExecutionPlan, Pipeline};
 use rypipe_python::record_batches_to_pyarrow_table;
 
-// Read a log file and return a pyarrow.Table.
+// Internal function: called by LogSource._read_arrow().
+// Users never call this directly.
 #[pyfunction]
 fn read_log(path: String) -> PyResult<PyObject> {
     let plan = ExecutionPlan::new();
@@ -184,13 +208,16 @@ fn _rypipe_log(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 ```
 
-This creates a Python module `_rypipe_log` with a `read_log` function that
-the Python wrapper will call.
+This creates a Python module `_rypipe_log` with an internal `read_log`
+function. The user-facing API is `LogSource`, which calls `read_log`
+internally via `_read_arrow()`.
 
 ## Step 5: Create the Python wrapper { #step-5-create-the-python-wrapper}
 
-Follow the crxml formula: a Source subclass, a thin adapter, and repacked
-stages.
+Follow the [crxml](../crxml-adapter.md) formula: a Source subclass, a thin adapter, and repacked
+stages. The Source subclass gives users the pipeline `|` operator and
+caching. The thin adapter enables `rypipe.read()`. The repacked stages
+make the adapter self-contained.
 
 ### `rypipe_log/__init__.py` { #init-py }
 
@@ -229,10 +256,15 @@ def __dir__():
     return __all__
 ```
 
+The `__init__.py` uses lazy loading: modules are only imported when accessed.
+This avoids loading the Rust extension until it is actually needed.
+
 ### `rypipe_log/source.py` { #source-py }
 
+The Source subclass is the pipeline-capable entry point. It implements
+`_read_arrow()` and forwards plan kwargs from fused stages:
+
 ```python
-from __future__ import annotations
 from typing import Any
 
 import _rypipe_log
@@ -243,9 +275,12 @@ class LogSource(Source):
     """Pipeline-capable source for newline-delimited key=value logs."""
 
     def _read_arrow(self, plan_overrides: dict[str, Any] | None = None) -> Any:
+        # Start with construction-time kwargs (field_mapping, drop_fields, etc.)
         plan = self._build_plan_kwargs()
+        # Fused pipeline stages override construction-time kwargs
         if plan_overrides:
             plan.update(plan_overrides)
+        # Pass the merged plan to the Rust reader
         return _rypipe_log.read_log(str(self._path), **plan)
 ```
 
@@ -253,23 +288,25 @@ class LogSource(Source):
 
     The `_read_arrow` method **must** forward `plan_overrides` to the
     Rust reader. If you ignore them, fused pipeline stages silently fall back
-    to Python execution: 10-50x slower than the Rust path.
+    to Python execution (10-50x slower than the Rust path).
 
-### `rypipe_log/rypipe_adapter.py` { #adapter-py }
+### `rypipe_log/rypipe_adapter.py` { #adapter-py}
+
+The adapter inherits from `rypipe.Adapter`, which handles plan forwarding
+automatically. Subclasses only implement `read()`:
 
 ```python
-from __future__ import annotations
 from typing import Any
 
-from .source import LogSource
+from rypipe import Adapter
 
 
-class LogAdapter:
+class LogAdapter(Adapter):
     """rypipe-compatible adapter for newline-delimited key=value logs."""
 
     def read(self, path: str, **kwargs: Any) -> Any:
         """Parse ``path`` and return a ``pyarrow.Table``."""
-        return LogSource(path, **kwargs).to_arrow()
+        return _rypipe_log.read_log(path, **kwargs)
 
 
 def _register() -> None:
@@ -283,10 +320,20 @@ def _register() -> None:
 _register()
 ```
 
+!!! note
+
+    Complex adapters (like [`crxml`](../crxml-adapter.md)) override
+    `_read_arrow()` instead of `read()` to control engine selection and
+    streaming. See [Adapter design patterns](../advanced/source-pattern.md)
+    for details. The `read()` override is simpler and sufficient for most
+    adapters.
+
 For the full stage implementations (`CastTypes`, `FilterRows`, etc.), see
 [Stages](stages.md#stages).
 
 ## Step 6: Build and test { #step-6-build-and-test}
+
+Build the Rust extension with maturin, then test your adapter:
 
 ### Build { #build }
 
@@ -326,6 +373,11 @@ print(result)
 # age: [30]
 # active: ["true"]
 ```
+
+Pattern 2 (using the Source directly) is the recommended approach. It gives
+you the pipeline `|` operator, caching, and streaming. Pattern 1
+(`rypipe.read()`) is a convenience for one-liner reads but does not support
+pipelines.
 
 ## What just happened { #what-just-happened}
 

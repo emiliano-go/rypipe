@@ -16,7 +16,7 @@ format-specific parsing. You install the adapter you need:
 
 | Format | Adapter package | Extension |
 |--------|----------------|-----------|
-| Crystal Reports XML | `crxml` | `.xml` |
+| Crystal Reports XML | [`crxml`](../crxml-adapter.md) | `.xml` |
 
 ## Quick example { #quick-example }
 

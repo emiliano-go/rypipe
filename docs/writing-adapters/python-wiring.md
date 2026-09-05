@@ -5,7 +5,7 @@ subclass, adapter class, registration, and repacked stages.
 
 ## The crxml formula { #the-crxml-formula }
 
-The reference adapter (**crxml**) defines the standard pattern. Every adapter
+The reference adapter ([**crxml**](../crxml-adapter.md)) defines the standard pattern. Every adapter
 follows this structure:
 
 ```python

@@ -16,6 +16,7 @@ Each page takes one optimization topic and explains the mechanism, the tuning kn
 | [Schema and types](./schema-and-types.md) | Using `schema_order` and `field_types` to skip inference passes, stabilize column order, and enable numeric compare filters. |
 | [I/O tuning](./io-tuning.md) | `mmap` vs buffered reads; `prefault`; OS page cache; storage class considerations. |
 | [Adapter design](./adapter-design.md) | Writing a fast `Splitter` and `RecordParser`; `memchr`; comments, CDATA, and quoted fields; borrowing strings; sparse rows; `sink.wants`. |
+| [Adapter design patterns](./source-pattern.md) | One API with progressive overrides: override `read()` for simple adapters, `_read_arrow()` for advanced. |
 | [Profiling](./profiling.md) | Profiling with `perf`, `cargo flamegraph`, and the `bench_throughput` example; measuring RSS; separating Python and Rust time. |
 | [Anti-patterns](./anti-patterns.md) | Common mistakes that silently remove fusion, increase memory, or waste CPU. |
 | [Case study: crxml](./case-study-crxml.md) | How crxml reaches ~4.2 GB/s by combining the techniques from the other pages. |

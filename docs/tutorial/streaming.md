@@ -142,7 +142,7 @@ writer.close()
 
 Streaming has slightly lower throughput than full-table parsing because
 batches are processed one at a time rather than in parallel. Typical
-numbers for the crxml adapter:
+numbers for the [`crxml`](../crxml-adapter.md) adapter:
 
 | Mode | Throughput | Peak memory |
 |------|-----------|-------------|
@@ -155,6 +155,35 @@ numbers for the crxml adapter:
     Use streaming when your file is larger than ~50% of available RAM. For
     smaller files, the default parallel mode is faster.
 
+
+## Adding streaming to your adapter { #adding-streaming-to-your-adapter }
+
+To support bounded-memory streaming, add `iter_record_batches` to your
+adapter class. This enables `rypipe.iter_record_batches("file.log",
+format="log")`:
+
+### `rypipe_log/rypipe_adapter.py` { #adapter-streaming}
+
+```python
+class LogAdapter:
+    """rypipe-compatible adapter for newline-delimited key=value logs."""
+
+    def read(self, path: str, **kwargs: Any) -> Any:
+        """Parse ``path`` and return a ``pyarrow.Table``."""
+        return LogSource(path, **kwargs).to_arrow()
+
+    def iter_record_batches(
+        self, path: str, memory: str | int = "64MiB",
+        batch_size: int | None = None, **kwargs: Any,
+    ):
+        """Yield ``pyarrow.RecordBatch`` objects with constant memory."""
+        yield from LogSource(path, **kwargs).iter_record_batches(
+            memory=memory, batch_size=batch_size
+        )
+```
+
+This delegates to `LogSource.iter_record_batches()`, which inherits from
+`rypipe.Source` and handles the bounded-memory streaming automatically.
 
 ## Recap { #recap }
 

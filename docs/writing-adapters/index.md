@@ -24,7 +24,7 @@ name=Bob,age=25,active=false
 
 ## The crxml formula { #the-crxml-formula }
 
-The reference adapter (**crxml**) defines the standard pattern. Every adapter
+The reference adapter ([**crxml**](../crxml-adapter.md)) defines the standard pattern. Every adapter
 follows this structure:
 
 ### Rust layer { #rust-layer }
@@ -234,4 +234,4 @@ For a 533 MB file on a Ryzen 5800X:
   package (**Source** + **stages** + **sinks**).
 * The engine handles parallel execution, memory management, and Arrow export.
 * Your parser's job is to make `parse_chunk` fast.
-* Follow the **crxml** formula for a consistent user experience.
+* Follow the [**crxml**](../crxml-adapter.md) formula for a consistent user experience.
