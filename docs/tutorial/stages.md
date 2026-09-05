@@ -31,7 +31,8 @@ table = result.to_arrow()
 
 Under the hood, stages are callables that transform dicts. **rypipe**
 automatically pushes fusable stages (RenameFields, DropFields, CastTypes,
-constant FilterRows) into the Rust parse loop for maximum performance.
+FilterRows with keyword form or compiled lambda) into the Rust parse loop
+for maximum performance.
 Non-fusable stages (lambda predicates) run in Python.
 This is called **plan fusion**. See [Plans](plans.md#plans) for details.
 
@@ -310,7 +311,8 @@ table = result.to_arrow()
 * **RenameFields** renames columns. Always fusable.
 * **DropFields** removes columns. Always fusable.
 * **CastTypes** converts column types. Fusable for `int`, `float`, `bool`.
-* **FilterRows** filters rows. Fusable when using the keyword form.
+* **FilterRows** filters rows. Fusable when using the keyword form or a
+  compiled lambda.
 * **FilterRowsAny**, **FilterRowsAll**, **FilterRowsNot** combine filters.
 * Import stages from the adapter package, not from **rypipe**.
 
