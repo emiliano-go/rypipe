@@ -43,16 +43,16 @@ The engine provides `TableBuilder` as the production
 
 | Component | Purpose |
 |-----------|---------|
-| **`MySource(Source)`** | Pipeline-capable source with `_read_arrow()` and plan forwarding |
-| **`my_adapter.stages/`** | Own copies of `CastTypes`, `FilterRows`, `RenameFields`, `DropFields` |
+| **`LogSource(Source)`** | Pipeline-capable source with `_read_arrow()` and plan forwarding |
+| **`rypipe_log.stages/`** | Re-exports of `CastTypes`, `FilterRows`, `RenameFields`, `DropFields` from `rypipe.stages` |
 | **Registration** | Adapter registered at import time via side-effect import |
 
 !!! note
 
-    Adapters **repack the API**: they include their own copies of the pipeline
-    stage classes (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) and
-    sink functions (`collect`, `to_arrow`, `to_pandas`, `to_polars`,
-    `to_parquet`, `to_pandas`, `to_csv`) so users never import from
+    Adapters **re-export the API**: they re-export pipeline stage classes
+    (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) from
+    `rypipe.stages` and sink functions (`collect`, `to_arrow`, `to_pandas`,
+    `to_polars`, `to_parquet`, `to_csv`) so users never import from
     **rypipe** directly. This makes the adapter self-contained.
 
 
@@ -65,12 +65,12 @@ Every adapter must expose these APIs:
 ```python
 from rypipe import Source
 
-class MySource(Source):
+class LogSource(Source):
     def _read_arrow(self, plan_overrides=None):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
-        return _rypipe_myfmt.read(str(self._path), **plan)
+        return _rypipe_log.read(str(self._path), **plan)
 ```
 
 The Source class gives users the pipeline `|` operator, caching, and all
@@ -78,23 +78,24 @@ sinks (`.to_arrow()`, `.to_pandas()`, `.to_polars()`, `.to_parquet()`).
 
 ### Stages (required) { #stages }
 
-Repack or reimplement these stage classes:
+Re-export these stage classes from `rypipe.stages`:
 
 - `CastTypes`, cast column types
 - `FilterRows`, filter rows by predicate
 - `RenameFields`, rename columns
 - `DropFields`, remove columns
 
+See [Stages](../tutorial/stages.md) for the re-export pattern.
+
 ### Sinks (required) { #sinks }
 
-Repack or reimplement these sink functions:
+Re-export or reimplement these sink functions:
 
 - `collect(pipeline)`, collect to list of dicts
 - `to_arrow(pipeline)`, materialize to pyarrow.Table
 - `to_pandas(pipeline)`, convert to pandas DataFrame
 - `to_polars(pipeline)`, convert to Polars DataFrame
 - `to_parquet(pipeline, path)`, write to Parquet
-- `to_pandas(pipeline)`, alias for to_pandas
 - `to_csv(pipeline, path)`, write to CSV
 
 ### Registration (required) { #registration }
@@ -107,7 +108,7 @@ def _register():
         import rypipe
     except Exception:
         return
-    rypipe.register_adapter("myfmt", MyAdapter(), extensions=[".myfmt"])
+    rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
 
 _register()
 ```
@@ -138,9 +139,9 @@ End users should only import from the adapter package. Here is what a
 user of your adapter sees:
 
 ```python
-from my_adapter import MySource, CastTypes, FilterRows
+from rypipe_log import LogSource, CastTypes, FilterRows
 
-source = MySource("file.myfmt")
+source = LogSource("data.log")
 
 # One-liner
 table = source.to_arrow()
@@ -154,7 +155,7 @@ result = (
 ```
 
 Users never write `from rypipe import CastTypes`: they write
-`from my_adapter import CastTypes`. This is the **crxml formula**.
+`from rypipe_log import CastTypes`. This is the **crxml formula**.
 
 ## How the engine works { #how-the-engine-works }
 

@@ -45,83 +45,9 @@ Python) and ~200 ms (fused into Rust).
 ## Building the Python wrapper { #building-the-python-wrapper }
 
 To support the pipeline `|` operator, your adapter needs a Source subclass
-that forwards plan kwargs to the Rust reader.
-
-### `rypipe_log/source.py` { #source-py }
-
-```python
-from typing import Any
-
-import _rypipe_log
-from rypipe import Source
-
-
-class LogSource(Source):
-    """Pipeline-capable source for newline-delimited key=value logs."""
-
-    def _read_arrow(self, plan_overrides: dict[str, Any] | None = None) -> Any:
-        # Start with construction-time kwargs (field_mapping, drop_fields, etc.)
-        plan = self._build_plan_kwargs()
-        # Fused pipeline stages override construction-time kwargs
-        if plan_overrides:
-            plan.update(plan_overrides)
-        # Pass the merged plan to the Rust reader
-        return _rypipe_log.read_log(str(self._path), **plan)
-```
-
-When a user writes `src | RenameFields(...) | FilterRows(...)`, the pipeline
-collects stages into a plan. When `.to_arrow()` is called, the pipeline calls
-`_read_arrow(plan_overrides=...)` on your source.
-
-`plan_overrides` contains the fused stage kwargs:
-
-```python
-{
-    "field_mapping": {"Name": "name"},
-    "drop_fields": ["InternalId"],
-    "filter": {"field": "Status", "op": "==", value": "Active"},
-    "field_types": {"Amount": "float64"},
-}
-```
-
-You must merge these with your construction kwargs and pass them to your
-Rust reader. If you ignore `plan_overrides`, fused stages silently fall back
-to Python execution (10-50x slower).
-
-### `rypipe_log/rypipe_adapter.py` { #adapter-py}
-
-The adapter is a thin, stateless wrapper that delegates to the Source:
-
-```python
-from typing import Any
-
-from .source import LogSource
-
-
-class LogAdapter:
-    """rypipe-compatible adapter for newline-delimited key=value logs."""
-
-    def read(self, path: str, **kwargs: Any) -> Any:
-        """Parse ``path`` and return a ``pyarrow.Table``."""
-        return LogSource(path, **kwargs).to_arrow()
-
-
-def _register() -> None:
-    try:
-        import rypipe
-    except Exception:  # pragma: no cover, rypipe is optional
-        return
-    rypipe.register_adapter("log", LogAdapter(), extensions=[".log"])
-
-
-_register()
-```
-
-!!! note
-
-    The adapter's `read()` method returns a `pyarrow.Table`, not a Source.
-    This is by design: `rypipe.read()` calls `adapter.read()` and expects a
-    table. Users who want pipelines use the Source directly.
+that forwards plan kwargs to the Rust reader. See
+[Building an Adapter](building-an-adapter.md#building-an-adapter) for the
+complete implementation.
 
 ## Using the Pipeline { #using-the-pipeline}
 

@@ -165,25 +165,105 @@ class Source(ABC):
         """Drop the cached Arrow table to free memory."""
         self._cached_arrow = None
 
-    def to_pandas(self, dtype_backend: str = "pyarrow") -> "pd.DataFrame":
-        """Return a pandas DataFrame."""
+    def to_pandas(
+        self,
+        memory: int | str | None = None,
+        dtype_backend: str = "pyarrow",
+        **kwargs: Any,
+    ) -> "pd.DataFrame":
+        """Return a pandas DataFrame.
+
+        Parameters
+        ----------
+        memory:
+            Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
+            provided, batches are produced via ``iter_record_batches`` and
+            each batch is converted to a DataFrame incrementally.  Peak
+            memory is bounded by ``memory`` + one batch.  Pass ``threads``
+            in ``**kwargs`` for parallel streaming.
+        dtype_backend:
+            ``"pyarrow"`` (default) for Arrow-backed dtypes, ``"numpy"``
+            for NumPy-backed dtypes.
+        **kwargs:
+            Forwarded to ``iter_record_batches`` (e.g. ``threads=16``).
+        """
         import pandas as pd
 
+        if memory is not None:
+            types_mapper = pd.ArrowDtype if dtype_backend == "pyarrow" else None
+            chunks = []
+            for batch in self.iter_record_batches(memory=memory, **kwargs):
+                chunks.append(batch.to_pandas(types_mapper=types_mapper))
+            return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
         table = self.to_arrow()
         if dtype_backend == "pyarrow":
             return table.to_pandas(types_mapper=pd.ArrowDtype)
         return table.to_pandas()
 
-    def to_polars(self):
-        """Return a Polars DataFrame."""
+    def to_polars(self, memory: int | str | None = None, **kwargs: Any):
+        """Return a Polars DataFrame.
+
+        Parameters
+        ----------
+        memory:
+            Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
+            provided, batches are produced via ``iter_record_batches`` and
+            each batch is converted to a DataFrame incrementally.  Peak
+            memory is bounded.  Pass ``threads`` in ``**kwargs`` for
+            parallel streaming.
+        **kwargs:
+            Forwarded to ``iter_record_batches`` (e.g. ``threads=16``).
+        """
         import polars as pl
 
+        if memory is not None:
+            chunks = []
+            for batch in self.iter_record_batches(memory=memory, **kwargs):
+                chunks.append(pl.from_arrow(batch))
+            return pl.concat(chunks) if chunks else pl.DataFrame()
         return pl.from_arrow(self.to_arrow())
 
-    def to_parquet(self, path: Union[str, Path], **kwargs) -> None:
-        """Write the table to Parquet."""
+    def to_parquet(
+        self,
+        path: Union[str, Path],
+        memory: int | str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Write the table to Parquet.
+
+        Parameters
+        ----------
+        path:
+            Output file path.
+        memory:
+            Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
+            provided, batches are produced via ``iter_record_batches`` and
+            written incrementally via ``ParquetWriter``.  Peak memory is
+            bounded.  Pass ``threads`` in ``**kwargs`` for parallel
+            streaming.
+        **kwargs:
+            Forwarded to ``ParquetWriter`` (e.g. ``compression="zstd"``)
+            or to ``iter_record_batches`` (e.g. ``threads=16``).
+        """
         import pyarrow.parquet as pq
 
+        if memory is not None:
+            parquet_keys = {
+                "compression", "compression_level", "row_group_size",
+                "use_dictionary", "write_statistics", "version",
+            }
+            parquet_kwargs = {k: v for k, v in kwargs.items() if k in parquet_keys}
+            iter_kwargs = {k: v for k, v in kwargs.items() if k not in parquet_keys}
+            writer = None
+            for batch in self.iter_record_batches(memory=memory, **iter_kwargs):
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        str(path), batch.schema, **parquet_kwargs
+                    )
+                writer.write_batch(batch)
+            if writer is not None:
+                writer.close()
+            return
         pq.write_table(self.to_arrow(), str(path), **kwargs)
 
     def __or__(self, stage) -> "Pipeline":

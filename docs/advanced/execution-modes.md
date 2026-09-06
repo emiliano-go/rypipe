@@ -115,18 +115,77 @@ Small budgets (`64KB`) are faster single-threaded; use `parallel streaming` for 
 
 ## Auto engine selection { #auto-engine-selection }
 
-The Python `Adapter` layer usually exposes `engine="auto"`. The heuristic is format-specific, but a common default is:
+rypipe provides a `resolve_engine` function that adapters can use for
+`engine="auto"` selection. It considers file size, memory budget, threads,
+and schema to pick the optimal mode:
 
 ```python
-if file_size < 8 * 1024 * 1024:
-    engine = "columnar"
-elif memory_available > 4 * file_size:
-    engine = "parallel"
-else:
-    engine = "stream"
+import rypipe
+
+engine = rypipe.resolve_engine(
+    file_size=1_000_000_000,      # 1 GB
+    memory="64MiB",               # bounded memory
+    threads=16,                   # parallel
+    schema=["col1", "col2"],      # explicit schema
+    has_parallel=True,            # adapter supports parallel
+    has_columnar=True,            # adapter supports columnar
+)
+# Returns: "parallel_streaming"
 ```
 
-Adapters should expose the engine choice explicitly because the best default depends on split safety, row size variance, and downstream use. A format with expensive per-chunk setup (for example, one that must scan for a global header) may prefer columnar for much larger files than a simple newline-delimited format.
+### Heuristic rules { #heuristic-rules }
+
+The algorithm follows these rules in order:
+
+1. **`memory=` provided**: User wants streaming.
+   - If `threads > 1`: return `"parallel_streaming"`
+   - Else: return `"stream"`
+
+2. **`threads > 1`**: User wants parallel.
+   - If file >= 100 MB: return `"parallel_streaming"` (bounded memory)
+   - Else: return `"parallel"` (fits in RAM)
+
+3. **`schema=` provided and file >= 100 MB**: Streaming is 11% faster
+   (no discovery overhead).
+   - Return `"stream"`
+
+4. **Default**:
+   - If file < 8 MB and `has_columnar`: return `"columnar"`
+   - If file >= 8 MB and `has_parallel`: return `"parallel"`
+   - Else: return `"stream"`
+
+### Adapters using resolve_engine { #adapters-using-resolve-engine }
+
+```python
+class MySource(Source):
+    def __init__(self, path, *, engine="auto", **kwargs):
+        self._engine = engine
+        self._engine_resolved = None
+        super().__init__(path, **kwargs)
+    
+    def _resolve_engine(self, goal: str) -> str:
+        if self._engine != "auto":
+            return self._engine
+        
+        if self._engine_resolved is not None:
+            return self._engine_resolved
+        
+        import rypipe
+        self._engine_resolved = rypipe.resolve_engine(
+            file_size=self._path.stat().st_size,
+            memory=self._memory,
+            threads=self._threads,
+            schema=self._schema or None,
+            has_parallel=_HAS_PARALLEL,
+            has_columnar=_HAS_COLUMNAR,
+        )
+        return self._engine_resolved
+```
+
+Adapters should expose the engine choice explicitly because the best default
+depends on split safety, row size variance, and downstream use. A format with
+expensive per-chunk setup (for example, one that must scan for a global header)
+may prefer columnar for much larger files than a simple newline-delimited format.
 
 ## Trade-offs { #trade-offs }
 

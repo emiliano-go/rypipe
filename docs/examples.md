@@ -70,11 +70,20 @@ source.to_parquet("report.parquet")
 ### Memory-bounded stream { #memory-bounded-stream }
 
 ```python
-import rypipe
+from crxml import CrystalXMLSource
 
-# Adapter decides how to honor the memory budget. { #adapter-decides-how-to-honor-the-memory-budget }
-stream = rypipe.read_stream("huge.xml", format="crxml", memory="256MiB")
-for batch in stream.to_batches(max_chunksize=4096):
+# Streaming to a DataFrame (bounded memory)
+src = CrystalXMLSource("huge.xml", row_tag="Row")
+df = src.to_pandas(memory="256MiB")
+
+# Streaming to Parquet (bounded memory)
+src.to_parquet("output.parquet", memory="256MiB")
+
+# Parallel streaming (higher throughput on multi-core)
+df = src.to_pandas(memory="256MiB", threads=16)
+
+# Advanced: batch-level control via iter_record_batches
+for batch in src.iter_record_batches(memory="256MiB"):
     process(batch.to_pylist())
 ```
 

@@ -50,24 +50,50 @@ for batch in iter {
 
 ## Python API { #python-api }
 
-```python
-import pyarrow.parquet as pq, rypipe
+### User-facing (sink-level streaming) { #user-facing }
 
-# High-level: rypipe handles adapter lookup + streaming { #high-level-rypipe-handles-adapter-lookup-streaming }
+```python
+from crxml import CrystalXMLSource
+
+src = CrystalXMLSource("50GB.xml", row_tag="Details")
+
+# Streaming DataFrame
+df = src.to_pandas(memory="64MiB")
+
+# Streaming Parquet
+src.to_parquet("output.parquet", memory="64MiB")
+
+# Streaming Polars
+df = src.to_polars(memory="64MiB")
+
+# Parallel streaming (higher throughput)
+df = src.to_pandas(memory="64MiB", threads=16)
+
+# Pipeline streaming
+from crxml import DropFields, FilterRows
+pipe = src | DropFields(["Field22"]) | FilterRows(field="Level", op="==", value="3")
+df = pipe.to_pandas(memory="256MiB")
+```
+
+### Advanced (batch-level control) { #advanced }
+
+```python
+import pyarrow.parquet as pq
+
+# High-level: rypipe handles adapter lookup + streaming
 writer = pq.ParquetWriter("out.parquet", schema)
 for batch in rypipe.iter_record_batches("50GB.xml", format="crxml", memory="64KB", batch_size=1, row_tag="Details"):
     writer.write_batch(batch)
 writer.close()
 
-# Direct via crxml { #direct-via-crxml }
+# Direct via crxml
 from crxml import CrystalXMLSource
 src = CrystalXMLSource("50GB.xml", row_tag="Details")
 for batch in src.iter_record_batches(memory="64KB"):
     writer.write_batch(batch)
 
-# Pipeline { #pipeline }
-from crxml import DropFields, FilterRows
-pipe = CrystalXMLSource("50GB.xml", row_tag="Details") | DropFields(["Field22"]) | FilterRows(field="Level", op="==", value="3")
+# Pipeline
+pipe = src | DropFields(["Field22"]) | FilterRows(field="Level", op="==", value="3")
 for batch in pipe.iter_record_batches(memory="256MB"):
     writer.write_batch(batch)
 ```
