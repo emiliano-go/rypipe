@@ -113,6 +113,43 @@ rypipe.register_adapter(
 ) -> None
 ```
 
+## rypipe.resolve_engine() { #rypipe-resolve-engine }
+
+Resolve the best engine mode based on file characteristics and user options.
+Adapters use this for `engine="auto"` selection.
+
+```python
+rypipe.resolve_engine(
+    file_size,                # int: file size in bytes (required)
+    *,                        # keyword-only from here
+    memory=None,              # int | str | None: memory budget (e.g. "64MiB")
+    threads=None,             # int | None: number of threads
+    schema=None,              # list[str] | None: explicit column names
+    has_parallel=True,        # bool: adapter has parallel support
+    has_columnar=True,        # bool: adapter has columnar support
+) -> str
+```
+
+Returns one of: `"columnar"`, `"parallel"`, `"stream"`, `"parallel_streaming"`.
+
+### Heuristic rules { #resolve-engine-heuristic }
+
+1. **`memory=` provided**: streaming mode.
+   - `threads > 1` -> `"parallel_streaming"`
+   - else -> `"stream"`
+
+2. **`threads > 1`**: parallel mode.
+   - file >= 100 MB -> `"parallel_streaming"`
+   - else -> `"parallel"`
+
+3. **`schema=` provided and file >= 100 MB**: streaming is 11% faster.
+   - -> `"stream"`
+
+4. **Default**:
+   - file < 8 MB and `has_columnar` -> `"columnar"`
+   - file >= 8 MB and `has_parallel` -> `"parallel"`
+   - else -> `"stream"`
+
 After registration, `rypipe.read("file.ext")` auto-detects the extension.
 
 ## Source { #source }
@@ -150,9 +187,9 @@ def _read_arrow(self, plan_overrides: dict | None = None) -> pyarrow.Table:
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `.to_arrow()` | `pyarrow.Table` | Parse and cache the table. |
-| `.to_pandas(dtype_backend="pyarrow")` | `pd.DataFrame` | Convert to pandas. |
-| `.to_polars()` | `pl.DataFrame` | Convert to Polars. |
-| `.to_parquet(path, **kwargs)` | `None` | Write to Parquet. |
+| `.to_pandas(memory=None, dtype_backend="pyarrow")` | `pd.DataFrame` | Convert to pandas. Pass `memory=` for streaming. |
+| `.to_polars(memory=None)` | `pl.DataFrame` | Convert to Polars. Pass `memory=` for streaming. |
+| `.to_parquet(path, memory=None, **kwargs)` | `None` | Write to Parquet. Pass `memory=` for streaming. |
 | `.schema()` | `list[str]` | Column names from first row. |
 | `.clear_cache()` | `None` | Drop cached table. |
 | `.iter_arrow_batches(batch_size=None)` | `Iterator[RecordBatch]` | Yield batches. |
@@ -163,8 +200,13 @@ def _read_arrow(self, plan_overrides: dict | None = None) -> pyarrow.Table:
 ### to_pandas() details { #to-pandas-details }
 
 ```python
+# Standard (materializes full table)
 source.to_pandas(dtype_backend="pyarrow")  # Arrow-backed dtypes (default)
 source.to_pandas(dtype_backend="numpy")    # NumPy-backed dtypes
+
+# Streaming (bounded memory)
+source.to_pandas(memory="64MiB")
+source.to_pandas(memory="64MiB", threads=16)  # parallel streaming
 ```
 
 When `dtype_backend="pyarrow"` (default), string columns use
@@ -174,13 +216,17 @@ pandas strings.
 
 ### to_parquet() details { #to-parquet-details }
 
-Passes all kwargs through to `pyarrow.parquet.write_table`:
+Passes Parquet kwargs through to `pyarrow.parquet.ParquetWriter`:
 
 ```python
 source.to_parquet("output.parquet")
 source.to_parquet("output.parquet", compression="snappy")
 source.to_parquet("output.parquet", compression="zstd", compression_level=9)
 source.to_parquet("output.parquet", row_group_size=100_000)
+
+# Streaming (bounded memory)
+source.to_parquet("output.parquet", memory="64MiB")
+source.to_parquet("output.parquet", memory="64MiB", threads=16)  # parallel
 ```
 
 Common options:
@@ -221,6 +267,15 @@ class Pipeline:
 
     def iter_record_batches(self, memory="64MiB", batch_size=None) -> Iterator[RecordBatch]:
         """Stream batches with constant memory."""
+
+    def to_pandas(self, memory=None, dtype_backend="pyarrow", **kwargs) -> pd.DataFrame:
+        """Convert to pandas. Pass memory= for streaming."""
+
+    def to_polars(self, memory=None, **kwargs) -> pl.DataFrame:
+        """Convert to Polars. Pass memory= for streaming."""
+
+    def to_parquet(self, path, memory=None, **kwargs) -> None:
+        """Write to Parquet. Pass memory= for streaming."""
 ```
 
 ## Stages { #stages }

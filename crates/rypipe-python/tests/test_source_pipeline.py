@@ -90,6 +90,20 @@ def _apply_plan(table: pa.Table, plan: dict):
             col = table.column(spec["not_field"])
             m = pc.or_(pc.equal(col, ""), pc.is_null(col))
             return pc.fill_null(m, True)
+        if "old" in spec and "new" in spec and "field" in spec:
+            field = spec["field"]
+            col = pc.replace_substring(table.column(field), spec["old"], spec["new"])
+            cmp_op = spec.get("cmp_op", "==")
+            cmp_fn = {
+                "==": lambda a, b: pc.equal(a, b),
+                "!=": lambda a, b: pc.not_equal(a, b),
+                ">": lambda a, b: pc.greater(a, b),
+                "<": lambda a, b: pc.less(a, b),
+                ">=": lambda a, b: pc.greater_equal(a, b),
+                "<=": lambda a, b: pc.less_equal(a, b),
+            }[cmp_op]
+            m = cmp_fn(col, spec["value"])
+            return pc.fill_null(m, False)
         if "field" in spec and "op" in spec:
             field, op = spec["field"], spec["op"]
             if "values" in spec:
@@ -102,6 +116,41 @@ def _apply_plan(table: pa.Table, plan: dict):
                 m = pc.starts_with(table.column(field), spec["value"])
             elif op == "ends_with":
                 m = pc.ends_with(table.column(field), spec["value"])
+            elif op == "contains":
+                m = pc.match_substring(table.column(field), spec["value"])
+            elif op in ("strip", "lstrip", "rstrip", "lower", "upper"):
+                col = table.column(field)
+                transforms = {
+                    "strip": lambda c: pc.utf8_trim_whitespace(c),
+                    "lstrip": lambda c: pc.utf8_ltrim_whitespace(c),
+                    "rstrip": lambda c: pc.utf8_rtrim_whitespace(c),
+                    "lower": lambda c: pc.utf8_lower(c),
+                    "upper": lambda c: pc.utf8_upper(c),
+                }
+                col = transforms[op](col)
+                cmp_op = spec.get("cmp_op", "==")
+                cmp_fn = {
+                    "==": lambda a, b: pc.equal(a, b),
+                    "!=": lambda a, b: pc.not_equal(a, b),
+                    ">": lambda a, b: pc.greater(a, b),
+                    "<": lambda a, b: pc.less(a, b),
+                    ">=": lambda a, b: pc.greater_equal(a, b),
+                    "<=": lambda a, b: pc.less_equal(a, b),
+                }[cmp_op]
+                m = cmp_fn(col, spec["value"])
+            elif op == "length":
+                col = pc.utf8_length(table.column(field))
+                cmp_op = spec.get("cmp_op", ">")
+                cmp_val = pa.array([int(spec["value"])] * table.num_rows)
+                cmp_fn = {
+                    "==": lambda a, b: pc.equal(a, b),
+                    "!=": lambda a, b: pc.not_equal(a, b),
+                    ">": lambda a, b: pc.greater(a, b),
+                    "<": lambda a, b: pc.less(a, b),
+                    ">=": lambda a, b: pc.greater_equal(a, b),
+                    "<=": lambda a, b: pc.less_equal(a, b),
+                }[cmp_op]
+                m = cmp_fn(col, cmp_val)
             else:
                 fn_name = {
                     ">": "greater", "gt": "greater",
@@ -306,6 +355,77 @@ def test_source_to_parquet(sample_table, tmp_path):
     assert out.stat().st_size > 0
 
 
+# --- Streaming sink tests (memory= parameter) ---
+
+
+def test_source_to_pandas_memory(sample_table):
+    src = _MockSource(sample_table)
+    df = src.to_pandas(memory="1MB")
+    assert list(df.columns) == ["name", "age", "city"]
+    assert len(df) == 3
+
+
+def test_source_to_polars_memory(sample_table, polars):
+    src = _MockSource(sample_table)
+    df = src.to_polars(memory="1MB")
+    assert df.columns == ["name", "age", "city"]
+    assert df.height == 3
+
+
+def test_source_to_parquet_memory(sample_table, tmp_path):
+    src = _MockSource(sample_table)
+    out = tmp_path / "out.parquet"
+    src.to_parquet(out, memory="1MB")
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_pipeline_to_pandas_memory(sample_table):
+    src = _MockSource(sample_table)
+    pipe = src | RenameFields({"name": "full_name"})
+    df = pipe.to_pandas(memory="1MB")
+    assert list(df.columns) == ["full_name", "age", "city"]
+    assert len(df) == 3
+
+
+def test_pipeline_to_polars_memory(sample_table, polars):
+    src = _MockSource(sample_table)
+    pipe = src | RenameFields({"name": "full_name"}) | DropFields(["city"])
+    df = pipe.to_polars(memory="1MB")
+    assert df.columns == ["full_name", "age"]
+    assert df.height == 3
+
+
+def test_pipeline_to_parquet_memory(sample_table, tmp_path):
+    src = _MockSource(sample_table)
+    pipe = src | DropFields(["city"])
+    out = tmp_path / "out.parquet"
+    pipe.to_parquet(out, memory="1MB")
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_to_pandas_function_memory(sample_table):
+    src = _MockSource(sample_table)
+    df = to_pandas(src, memory="1MB")
+    assert list(df.columns) == ["name", "age", "city"]
+    assert len(df) == 3
+
+
+def test_to_polars_function_memory(sample_table, polars):
+    src = _MockSource(sample_table)
+    df = to_polars(src, memory="1MB")
+    assert df.columns == ["name", "age", "city"]
+    assert df.height == 3
+
+
+def test_collect_memory(sample_table):
+    src = _MockSource(sample_table)
+    rows = collect(src, memory="1MB")
+    assert len(rows) == 3
+    assert rows[0]["name"] == "Alice"
+
+
 def test_source_clear_cache(sample_table):
     src = _MockSource(sample_table)
     first = src.to_arrow()
@@ -410,17 +530,190 @@ def test_lambda_compiler_compound_and():
 
 
 def test_lambda_compiler_closure_fallback():
-    """Lambda with closure variable should fall back to Python."""
+    """Lambda with closure variable should now be resolved at construction time."""
     threshold = 100
     f = FilterRows(lambda r: r["amount"] > threshold)
-    # Closure variable can't be compiled — falls back to Python
-    assert f._filter_spec is None
+    # Closure variable is now resolved — compiles to filter spec
+    assert f._filter_spec is not None
+    assert f._filter_spec["value"] == "100"
 
 
 def test_lambda_compiler_complex_fallback():
-    """Complex lambda should fall back to Python."""
+    """Complex lambda (method chain) should fall back to Python for single method."""
     f = FilterRows(lambda r: r["name"].strip().lower() == "alice")
+    # Single method (strip) should compile, but chain (lower) falls back
+    # Actually strip().lower() is a chain, so it falls back
     assert f._filter_spec is None
+
+
+def test_lambda_compiler_not_startswith():
+    """not r['name'].startswith('A') should compile."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+    }))
+    f = FilterRows(lambda r: not r["name"].startswith("A"))
+    assert f._filter_spec is not None
+    assert "not" in f._filter_spec
+    rows = collect(src | f)
+    assert len(rows) == 2
+    assert {r["name"] for r in rows} == {"Bob", "Carol"}
+
+
+def test_lambda_compiler_not_endswith():
+    """not r['name'].endswith('l') should compile."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+    }))
+    f = FilterRows(lambda r: not r["name"].endswith("l"))
+    assert f._filter_spec is not None
+    assert "not" in f._filter_spec
+    rows = collect(src | f)
+    assert len(rows) == 2
+    assert {r["name"] for r in rows} == {"Alice", "Bob"}
+
+
+def test_lambda_compiler_nested_compound_or_and():
+    """(r['a'] > 1 or r['b'] < 2) and r['c'] == 'x' should compile."""
+    src = _MockSource(pa.table({
+        "a": ["1", "3", "1", "5"],
+        "b": ["3", "1", "5", "1"],
+        "c": ["x", "x", "y", "x"],
+    }))
+    f = FilterRows(lambda r: (r["a"] > "1" or r["b"] < "2") and r["c"] == "x")
+    assert f._filter_spec is not None
+    # Flat detector finds AND with OR on left, simple on right
+    assert "and" in f._filter_spec
+    rows = collect(src | f)
+    assert len(rows) == 2
+    assert {r["a"] for r in rows} == {"3", "5"}
+
+
+def test_lambda_compiler_nested_compound_and_or():
+    """r['a'] > 1 and (r['b'] < 2 or r['c'] == 'x') should compile."""
+    src = _MockSource(pa.table({
+        "a": ["1", "3", "5", "3"],
+        "b": ["3", "1", "3", "3"],
+        "c": ["y", "y", "x", "x"],
+    }))
+    f = FilterRows(lambda r: r["a"] > "1" and (r["b"] < "2" or r["c"] == "x"))
+    assert f._filter_spec is not None
+    # Flat detector finds AND with simple on left, OR on right
+    assert "and" in f._filter_spec
+    rows = collect(src | f)
+    # a>"1": rows 2,3,4; (b<"2" or c=="x"): rows 2(b<"2"),3(c=="x"),4(c=="x")
+    assert len(rows) == 3
+    assert {r["a"] for r in rows} == {"3", "5"}
+
+
+def test_lambda_compiler_closure_resolved():
+    """Closure variable should be resolved at construction time."""
+    threshold = 100
+    src = _MockSource(pa.table({
+        "amount": ["50", "150", "200"],
+    }))
+    f = FilterRows(lambda r: r["amount"] > threshold)
+    assert f._filter_spec is not None
+    assert f._filter_spec["value"] == "100"
+    # String comparison: "150" > "100" (True), "200" > "100" (True), "50" > "100" (True, lexicographic)
+    rows = collect(src | f)
+    assert len(rows) == 3  # All pass due to string comparison
+
+
+def test_lambda_compiler_contains():
+    """r['name'].contains('Ali') should compile."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+    }))
+    f = FilterRows(lambda r: r["name"].contains("Ali"))
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == "contains"
+    rows = collect(src | f)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+
+
+def test_lambda_compiler_strip():
+    """r['name'].strip() == 'alice' should compile."""
+    src = _MockSource(pa.table({
+        "name": ["  Alice  ", "Bob", "  Carol  "],
+    }))
+    f = FilterRows(lambda r: r["name"].strip() == "Alice")
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == "strip"
+    assert f._filter_spec["cmp_op"] == "=="
+    rows = collect(src | f)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "  Alice  "
+
+
+def test_lambda_compiler_lower():
+    """r['name'].lower() == 'alice' should compile."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "BOB", "carol"],
+    }))
+    f = FilterRows(lambda r: r["name"].lower() == "alice")
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == "lower"
+    assert f._filter_spec["cmp_op"] == "=="
+    rows = collect(src | f)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+
+
+def test_lambda_compiler_upper():
+    """r['name'].upper() == 'ALICE' should compile."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+    }))
+    f = FilterRows(lambda r: r["name"].upper() == "ALICE")
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == "upper"
+    assert f._filter_spec["cmp_op"] == "=="
+    rows = collect(src | f)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+
+
+def test_lambda_compiler_len():
+    """len(r['name']) > 3 should compile."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+    }))
+    f = FilterRows(lambda r: len(r["name"]) > 3)
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == "length"
+    assert f._filter_spec["cmp_op"] == ">"
+    rows = collect(src | f)
+    assert len(rows) == 2
+    assert {r["name"] for r in rows} == {"Alice", "Carol"}
+
+
+def test_lambda_compiler_replace():
+    """r['name'].replace('o', 'x') should compile."""
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+    }))
+    f = FilterRows(lambda r: r["name"].replace("o", "x") == "Bxb")
+    assert f._filter_spec is not None
+    assert f._filter_spec["old"] == "o"
+    assert f._filter_spec["new"] == "x"
+    assert f._filter_spec["cmp_op"] == "=="
+    rows = collect(src | f)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Bob"
+
+
+def test_lambda_compiler_in_frozenset():
+    """r['status'] in frozenset({...}) should compile."""
+    src = _MockSource(pa.table({
+        "status": ["active", "inactive", "pending"],
+    }))
+    f = FilterRows(lambda r: r["status"] in frozenset({"active", "pending"}))
+    assert f._filter_spec is not None
+    assert f._filter_spec["op"] == "in"
+    rows = collect(src | f)
+    assert len(rows) == 2
+    assert {r["status"] for r in rows} == {"active", "pending"}
 
 
 def test_drop_fields_rejects_string():

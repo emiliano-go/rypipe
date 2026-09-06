@@ -122,7 +122,7 @@ provides:
 and `iter_record_batches()` for true streaming:
 
 ```python
-from rypipe import Adapter
+from rypipe import Adapter, resolve_engine
 
 class CrystalXMLSource(Adapter):
     def __init__(self, path, *, row_tag="Row", engine="auto",
@@ -139,7 +139,7 @@ class CrystalXMLSource(Adapter):
             plan.update(plan_overrides)
 
         engine = self._resolve_engine(plan)
-        if engine == "bounded":
+        if engine == "parallel_streaming":
             return _core.read_to_columnar_bounded(
                 str(self._path), self._row_tag, self._memory, **plan
             )
@@ -151,6 +151,19 @@ class CrystalXMLSource(Adapter):
             return _core.read_to_columnar(
                 str(self._path), self._row_tag, **plan
             )
+
+    def _resolve_engine(self, plan: dict) -> str:
+        if self._engine != "auto":
+            return self._engine
+
+        return resolve_engine(
+            file_size=self._path.stat().st_size,
+            memory=self._memory,
+            threads=self._threads or None,
+            schema=self._schema or None,
+            has_parallel=_HAS_PARALLEL,
+            has_columnar=_HAS_COLUMNAR,
+        )
 
     def iter_record_batches(self, memory="64MiB", batch_size=None, **kwargs):
         yield from _core.iter_record_batches(

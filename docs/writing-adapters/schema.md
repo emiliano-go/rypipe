@@ -37,7 +37,7 @@ let plan = ExecutionPlan::new()
 
 ```python
 # Python: pass schema as a list of column names { #python-pass-schema-as-a-list-of-column-names }
-source = MyAdapter("data.log", schema=["id", "timestamp", "amount", "status"])
+source = LogSource("data.log", schema=["id", "timestamp", "amount", "status"])
 ```
 
 ### `field_types`: typed arrays during parse { #field_types }
@@ -57,7 +57,7 @@ let plan = ExecutionPlan::new()
 
 ```python
 # Python: map column names to type strings for direct parsing { #python-map-column-names-to-type-strings-for-direct-parsing }
-source = MyAdapter(
+source = LogSource(
     "data.log",
     schema=["id", "amount", "timestamp"],
     field_types={"id": "int64", "amount": "float64", "timestamp": "timestamp[us]"},
@@ -147,7 +147,7 @@ sink.put_field("amount", Value::Float64(value));
 
 ```python
 result = (
-    MyAdapter(
+    LogSource(
         "data.log",
         schema=["id", "amount", "status"],
         field_types={"id": "int64", "amount": "float64"},
@@ -211,15 +211,15 @@ In your Python adapter, accept `schema` and `field_types` kwargs and pass
 them to the Rust reader:
 
 ```python
-class MyAdapter(rypipe.Adapter):
-    def read(self, path, *, schema=None, field_types=None, **kwargs):
+class LogSource(Source):
+    def _read_arrow(self, path, *, schema=None, field_types=None, **kwargs):
         # Forward schema kwargs to the Rust core
         plan_kwargs = {}
         if schema:
             plan_kwargs["schema"] = schema
         if field_types:
             plan_kwargs["field_types"] = field_types
-        return _my_rust_core.read_file(path, **plan_kwargs, **kwargs)
+        return _rypipe_log.read(path, **plan_kwargs, **kwargs)
 ```
 
 ### Step 2: Build the plan in Rust { #step-2-build-plan }

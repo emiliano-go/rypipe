@@ -9,9 +9,9 @@ pipeline operator works, and what **rypipe** does behind the scenes.
 Here is the complete code we will explain:
 
 ```python
-from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows
+from rypipe_log import LogSource, RenameFields, CastTypes, FilterRows
 
-source = CrystalXMLSource("report.xml", row_tag="Details")
+source = LogSource("report.log")
 
 df = (
     source
@@ -26,17 +26,13 @@ print(df)
 ## Step 1: Create a Source { #step-1-create-a-source }
 
 ```python
-from crxml import CrystalXMLSource
+from rypipe_log import LogSource
 
-source = CrystalXMLSource("report.xml", row_tag="Details")
+source = LogSource("report.log")
 ```
 
 A **Source** is a handle over one input file. It does not parse the file yet.
 It stores the path and configuration, and waits for you to ask for data.
-
-The `row_tag="Details"` argument is adapter-specific: it tells the **crxml**
-adapter which XML element represents a row. Each adapter accepts its own
-kwargs; check your adapter's documentation for what it supports.
 
 ### What a Source gives you { #what-a-source-gives-you }
 
@@ -54,7 +50,7 @@ kwargs; check your adapter's documentation for what it supports.
 ## Step 2: Parse with to_arrow() { #step-2-parse-with-to_arrow}
 
 ```python
-source = CrystalXMLSource("report.xml", row_tag="Details")
+source = LogSource("report.log")
 table = source.to_arrow()
 ```
 
@@ -137,5 +133,5 @@ See [Sinks](sinks.md#sinks) for the full reference.
 * **Sinks** (`.to_pandas()`, `.to_arrow()`) materialize results.
 * **rypipe** pushes fusable stages into the Rust parse loop automatically.
 
-**Next:** [Building an Adapter](building-an-adapter.md#building-an-adapter),
-the basic scaffolding.
+**Next:** [Pipeline](pipeline.md#pipeline), the pipeline operator and
+adapter wiring.

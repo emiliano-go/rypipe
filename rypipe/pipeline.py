@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, Iterator, Optional
+from pathlib import Path
+from typing import Any, Callable, Iterable, Iterator, Optional, Union
 
 
 Stage = Callable[[Iterable[dict]], Iterable[dict]]
@@ -132,3 +133,68 @@ class Pipeline:
                 pass
         # Fallback: materialize then split
         yield from self.iter_arrow_batches(batch_size=batch_size)
+
+    def to_pandas(
+        self,
+        memory: int | str | None = None,
+        dtype_backend: str = "pyarrow",
+        **kwargs: Any,
+    ):
+        """Return a pandas DataFrame.
+
+        Parameters
+        ----------
+        memory:
+            Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
+            provided, batches are produced via ``iter_record_batches`` and
+            each batch is converted to a DataFrame incrementally.  Pass
+            ``threads`` in ``**kwargs`` for parallel streaming.
+        dtype_backend:
+            ``"pyarrow"`` (default) for Arrow-backed dtypes.
+        **kwargs:
+            Forwarded to ``iter_record_batches`` (e.g. ``threads=16``).
+        """
+        from .sinks import to_pandas
+
+        return to_pandas(self, memory=memory, dtype_backend=dtype_backend, **kwargs)
+
+    def to_polars(self, memory: int | str | None = None, **kwargs: Any):
+        """Return a Polars DataFrame.
+
+        Parameters
+        ----------
+        memory:
+            Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
+            provided, batches are produced via ``iter_record_batches`` and
+            each batch is converted to a DataFrame incrementally.  Pass
+            ``threads`` in ``**kwargs`` for parallel streaming.
+        **kwargs:
+            Forwarded to ``iter_record_batches`` (e.g. ``threads=16``).
+        """
+        from .sinks import to_polars
+
+        return to_polars(self, memory=memory, **kwargs)
+
+    def to_parquet(
+        self,
+        path: Union[str, Path],
+        memory: int | str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Write the pipeline to a Parquet file.
+
+        Parameters
+        ----------
+        path:
+            Output file path.
+        memory:
+            Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
+            provided, batches are produced via ``iter_record_batches`` and
+            written incrementally via ``ParquetWriter``.  Pass ``threads``
+            in ``**kwargs`` for parallel streaming.
+        **kwargs:
+            Forwarded to ``ParquetWriter`` or ``iter_record_batches``.
+        """
+        from .sinks import to_parquet
+
+        to_parquet(self, path, memory=memory, **kwargs)

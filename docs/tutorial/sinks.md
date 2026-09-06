@@ -30,6 +30,12 @@ Returns a pandas DataFrame with PyArrow-backed dtypes by default:
 df = src.to_pandas()
 ```
 
+Pass `memory=` for bounded-memory streaming:
+
+```python
+df = src.to_pandas(memory="64MiB")
+```
+
 ### to_polars() { #to-polars }
 
 Returns a Polars DataFrame:
@@ -38,12 +44,24 @@ Returns a Polars DataFrame:
 df = src.to_polars()
 ```
 
+Pass `memory=` for bounded-memory streaming:
+
+```python
+df = src.to_polars(memory="64MiB")
+```
+
 ### to_parquet() { #to-parquet}
 
 Writes the table to a Parquet file:
 
 ```python
 src.to_parquet("output.parquet")
+```
+
+Pass `memory=` for bounded-memory streaming:
+
+```python
+src.to_parquet("output.parquet", memory="64MiB")
 ```
 
 ### clear_cache() { #clear-cache}
@@ -61,7 +79,7 @@ When working with a Pipeline (the result of `src | stage`), use the
 standalone sink functions from the adapter:
 
 ```python
-from rypipe_log import LogSource, FilterRows, collect
+from rypipe_log import LogSource, FilterRows
 
 src = LogSource("test.log")
 pipeline = src | FilterRows(field="status", op="==", value="active")
@@ -75,6 +93,12 @@ Collects all rows into a list of dicts:
 from rypipe_log import collect
 
 rows = collect(pipeline)
+```
+
+Pass `memory=` for bounded-memory streaming:
+
+```python
+rows = collect(pipeline, memory="64MiB")
 ```
 
 ### to_arrow() (function) { #to-arrow-function }
@@ -97,6 +121,12 @@ from rypipe_log import to_pandas
 df = to_pandas(pipeline)
 ```
 
+Pass `memory=` for bounded-memory streaming:
+
+```python
+df = to_pandas(pipeline, memory="64MiB")
+```
+
 ### to_polars() (function) { #to-polars-function }
 
 Materializes a pipeline to a Polars DataFrame:
@@ -105,6 +135,12 @@ Materializes a pipeline to a Polars DataFrame:
 from rypipe_log import to_polars
 
 df = to_polars(pipeline)
+```
+
+Pass `memory=` for bounded-memory streaming:
+
+```python
+df = to_polars(pipeline, memory="64MiB")
 ```
 
 ### to_csv() (function) { #to-csv-function }
@@ -127,6 +163,12 @@ from rypipe_log import to_parquet
 to_parquet(pipeline, "output.parquet")
 ```
 
+Pass `memory=` for bounded-memory streaming:
+
+```python
+to_parquet(pipeline, "output.parquet", memory="64MiB")
+```
+
 ## Which sink should I use? { #which-sink}
 
 | Goal | Method |
@@ -137,12 +179,20 @@ to_parquet(pipeline, "output.parquet")
 | Write to Parquet | `.to_parquet(path)` or `to_parquet(pipeline, path)` |
 | Write to CSV | `to_csv(pipeline, path)` |
 | Get a list of dicts | `collect(pipeline)` |
+| Stream to DataFrame | `.to_pandas(memory=...)` or `to_pandas(..., memory=...)` |
+| Stream to Parquet | `.to_parquet(path, memory=...)` or `to_parquet(pipeline, path, memory=...)` |
 
 !!! tip
 
     When you have a Source, prefer the Source methods (`.to_pandas()`, etc.)
     over the standalone functions. Source methods reuse the cached table and
     avoid re-parsing.
+
+!!! tip
+
+    Pass `memory=` to any sink for bounded-memory streaming. Pass `threads=`
+    for parallel streaming on multi-core machines. See
+    [Streaming](streaming.md#streaming) for details.
 
 ## Repacking sinks for your adapter { #repacking-sinks-for-your-adapter }
 
@@ -179,6 +229,8 @@ Or reimplement them from scratch for full control.
   `to_polars()`, `to_csv()`, `to_parquet()`.
 * Source methods reuse the cached table. Standalone functions re-parse if
   the pipeline hasn't been materialized yet.
+* Pass `memory=` for bounded-memory streaming. Pass `threads=` for parallel
+  streaming.
 
 **Next:** [Streaming](streaming.md#streaming), processing large files with bounded
 memory.

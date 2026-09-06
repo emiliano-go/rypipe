@@ -43,7 +43,7 @@ pure allocation overhead.
 
 ```python
 # Bad: engine must scan the file to find column names { #bad-engine-must-scan-the-file-to-find-column-names }
-src = MySource("data.log")
+src = LogSource("data.log")
 table = src.to_arrow()
 ```
 
@@ -59,9 +59,9 @@ Discovery pass doubles I/O and all values land as strings.
 
 ```python
 # Bad: fused stages fall back to Python { #bad-fused-stages-fall-back-to-python }
-class MySource(Source):
+class LogSource(Source):
     def _read_arrow(self, **kwargs):
-        return my_rust_read(str(self._path))  # ignores kwargs!
+        return _rypipe_log.read(str(self._path))  # ignores kwargs!
 ```
 
 Fused stages (rename, filter) fall back to Python over a full table,
@@ -70,12 +70,12 @@ Fused stages (rename, filter) fall back to Python over a full table,
 **The fix:**
 
 ```python
-class MySource(Source):
+class LogSource(Source):
     def _read_arrow(self, *, plan_overrides=None, **kwargs):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
-        return my_rust_read(str(self._path), **plan)
+        return _rypipe_log.read(str(self._path), **plan)
 ```
 
 **Impact:** 10-50x for filtered/rename workloads.

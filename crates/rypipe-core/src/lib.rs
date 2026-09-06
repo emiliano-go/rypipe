@@ -13,6 +13,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(feature = "alloc-stats")]
 pub mod alloc_stats;
 pub mod arrow_export;
+pub mod auto;
 #[cfg(feature = "bench")]
 pub mod bench;
 pub mod block_masks;
@@ -35,6 +36,7 @@ pub mod streaming;
 pub mod value;
 
 pub use arrow_export::apply_compare_filter;
+pub use auto::{resolve_engine, AutoConfig, EngineMode};
 pub use bounded::MemoryBudget;
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 pub use decoder::{split_points_to_ranges, ColumnarSink, RecordParser, Splitter};

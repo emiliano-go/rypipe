@@ -60,6 +60,7 @@ __all__ = [
     "read_stream",
     "read_batches",
     "register_adapter",
+    "resolve_engine",
     "RenameFields",
     "DropFields",
     "CastTypes",
@@ -84,6 +85,7 @@ ParseError = _rypipe.ParseError
 XmlError = _rypipe.XmlError
 PlanError = _rypipe.PlanError
 MergeError = _rypipe.MergeError
+resolve_engine = _rypipe.resolve_engine
 
 # Map common extensions to adapter names. Adapters must register themselves
 # under these names for auto-detection to work.

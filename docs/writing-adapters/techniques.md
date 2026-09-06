@@ -28,7 +28,7 @@ declare it with `schema_order` and `field_types`:
 # Python: tell the engine exactly which columns exist and their types. { #python-tell-the-engine-exactly-which-columns-exist-and-their-types }
 # This skips column discovery, stabilizes column order, and enables { #this-skips-column-discovery-stabilizes-column-order-and-enables }
 # typed Arrow arrays (no intermediate strings). { #typed-arrow-arrays }
-src = MySource("data.log", schema=["id", "name", "amount"],
+src = LogSource("data.log", schema=["id", "name", "amount"],
                field_types={"id": "int64", "amount": "float64"})
 ```
 
