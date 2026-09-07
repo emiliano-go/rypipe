@@ -1,40 +1,41 @@
 # rypipe Documentation
 
-> Format-agnostic columnar engine. Parse row-oriented byte streams into Apache Arrow record batches with a Rust core, Python bindings, parallel scheduling, memory-bounded execution, and query pushdown.
+> Format-agnostic columnar ingestion engine. Rust core, Python bindings, parallel scheduling, memory-bounded execution, and Arrow export.
 
 ## Overview
 - [rypipe](https://rypipe.emiliano-go.com/): Format-agnostic columnar engine that turns byte streams into Arrow record batches
 
 ## Tutorial
 - [Tutorial index](https://rypipe.emiliano-go.com/tutorial/): Install rypipe + an adapter, read your first file
-- [First Steps](https://rypipe.emiliano-go.com/tutorial/first-steps/): rypipe.read() in depth — format inference, kwargs, schema hints
+- [First Steps](https://rypipe.emiliano-go.com/tutorial/first-steps/): rypipe.read() in depth; format inference, kwargs, schema hints
 - [Pipeline](https://rypipe.emiliano-go.com/tutorial/pipeline/): Chain stages with the | operator
-- [Stages](https://rypipe.emiliano-go.com/tutorial/stages/): CastTypes, FilterRows, RenameFields, DropFields reference
+- [Stages](https://rypipe.emiliano-go.com/tutorial/stages/): Re-export and use CastTypes, FilterRows, RenameFields, DropFields
+- [Plans](https://rypipe.emiliano-go.com/tutorial/plans/): Execution plans, pushdown, and filter predicates
 - [Sinks](https://rypipe.emiliano-go.com/tutorial/sinks/): to_arrow, to_pandas, to_polars, to_parquet, to_csv
 - [Streaming](https://rypipe.emiliano-go.com/tutorial/streaming/): iter_record_batches with bounded memory
 - [Configuration](https://rypipe.emiliano-go.com/tutorial/configuration/): All rypipe.read() kwargs and Source constructor options
-
-## API Reference
-- [Python API](https://rypipe.emiliano-go.com/reference/python-api/): rypipe.read, Source, Adapter, Pipeline, stages, sinks, exceptions
-- [Rust API](https://rypipe.emiliano-go.com/reference/rust-api/): Splitter, RecordParser, ColumnarSink, ExecutionPlan, Pipeline, Value
+- [Building an Adapter](https://rypipe.emiliano-go.com/tutorial/building-an-adapter/): End-to-end adapter tutorial
 
 ## Writing Adapters
-- [Writing Adapters overview](https://rypipe.emiliano-go.com/writing-adapters/): The crxml formula — Source, Adapter, stages, registration
+- [Writing Adapters overview](https://rypipe.emiliano-go.com/writing-adapters/): The crxml formula; Source, Adapter, stages, registration
 - [Quick Start](https://rypipe.emiliano-go.com/writing-adapters/quickstart/): Build a working adapter in 15 minutes
-- [Python Wiring](https://rypipe.emiliano-go.com/writing-adapters/python-wiring/): Source subclass, adapter class, registration, repacked stages
+- [Python Wiring](https://rypipe.emiliano-go.com/writing-adapters/python-wiring/): Source subclass, adapter class, registration, re-exported stages
 - [Rust Creation](https://rypipe.emiliano-go.com/writing-adapters/rust-creation/): Splitter, RecordParser, ColumnarSink implementation guide
 - [Schema](https://rypipe.emiliano-go.com/writing-adapters/schema/): Schema declaration for maximum performance
 - [Techniques](https://rypipe.emiliano-go.com/writing-adapters/techniques/): Performance optimizations for production adapters
 - [Anti-patterns](https://rypipe.emiliano-go.com/writing-adapters/anti-patterns/): Common mistakes to avoid
+- [Splitter](https://rypipe.emiliano-go.com/writing-adapters/splitter/): The Splitter trait; finding row boundaries
+- [Parser](https://rypipe.emiliano-go.com/writing-adapters/parser/): The RecordParser trait; extracting field values
+- [Sink](https://rypipe.emiliano-go.com/writing-adapters/sink/): The ColumnarSink trait; accumulating typed columns
+- [Scan primitives](https://rypipe.emiliano-go.com/writing-adapters/scan/): Portable byte-search primitives
+- [Skip regions](https://rypipe.emiliano-go.com/writing-adapters/skip-regions/): Marking regions to skip during parsing
+- [Chunk planning](https://rypipe.emiliano-go.com/writing-adapters/chunk-planning/): Estimating rows per chunk for balanced parallelism
 - [Examples](https://rypipe.emiliano-go.com/writing-adapters/examples/): Worked CSV, JSONL, and TSV adapters
-
-## Examples
-- [Examples](https://rypipe.emiliano-go.com/examples/): Python and Rust API recipes for reading, pipelines, adapters, and sinks
-- [crxml adapter](https://rypipe.emiliano-go.com/crxml-adapter/): Real-world adapter example; Crystal Reports XML parser built on rypipe-core
 
 ## Advanced
 - [Advanced overview](https://rypipe.emiliano-go.com/advanced/): Roadmap and checklist for the advanced section
 - [Pushdown fusion](https://rypipe.emiliano-go.com/advanced/fusion/): How stages collapse into an ExecutionPlan
+- [Stage protocol](https://rypipe.emiliano-go.com/advanced/stage-protocol/): The stage protocol, why re-exporting works, when to re-implement
 - [Execution modes](https://rypipe.emiliano-go.com/advanced/execution-modes/): Stream, columnar, parallel, and auto engine selection
 - [Memory and chunking](https://rypipe.emiliano-go.com/advanced/memory-and-chunking/): Memory budgets and chunk sizing
 - [Parallelism](https://rypipe.emiliano-go.com/advanced/parallelism/): rayon internals and measuring speedup
@@ -42,12 +43,36 @@
 - [Schema and types](https://rypipe.emiliano-go.com/advanced/schema-and-types/): schema_order, field_types, and numeric compare filters
 - [I/O tuning](https://rypipe.emiliano-go.com/advanced/io-tuning/): mmap vs buffered reads and storage classes
 - [Adapter design](https://rypipe.emiliano-go.com/advanced/adapter-design/): Splitter, RecordParser, memchr, and sink.wants
+- [Adapter design patterns](https://rypipe.emiliano-go.com/advanced/source-pattern/): Common adapter patterns and when to use them
 - [Profiling](https://rypipe.emiliano-go.com/advanced/profiling/): perf, flamegraph, and RSS measurement
 - [Anti-patterns](https://rypipe.emiliano-go.com/advanced/anti-patterns/): Common mistakes that hurt throughput and memory
 - [Case study: crxml](https://rypipe.emiliano-go.com/advanced/case-study-crxml/): How crxml reaches multi-GB/s throughput
+- [Streaming with constant memory](https://rypipe.emiliano-go.com/advanced/streaming/): Streaming execution with bounded memory
+
+## Architecture
+- [Architecture Overview](https://rypipe.emiliano-go.com/architecture/): Splitting, row extraction, typed builders, and engine design
+- [Engine](https://rypipe.emiliano-go.com/architecture/engine/): TableBuilder; row handling, dirty tracking, column dispatch
+- [Columnar storage](https://rypipe.emiliano-go.com/architecture/columnar/): StrColumn, ColumnBuilder variants, dictionary, promotions
+- [Execution plan](https://rypipe.emiliano-go.com/architecture/plan/): ExecutionPlan, FieldType, FilterPredicate trees
+- [Decoder API](https://rypipe.emiliano-go.com/architecture/decoder/): Splitter, RecordParser, ColumnarSink traits
+- [Execution](https://rypipe.emiliano-go.com/architecture/execution/): Pipeline, Parallel, Bounded, InputBuffer
+- [Data flow](https://rypipe.emiliano-go.com/architecture/data-flow/): Diagrams for single, parallel, bounded modes
+- [Storage and export](https://rypipe.emiliano-go.com/architecture/storage/): Arrow export, null handling, compare filter
+- [Schema](https://rypipe.emiliano-go.com/architecture/schema/): FrozenSchema, DiscoveryOpts, layout_signature caching
+- [Optimizations](https://rypipe.emiliano-go.com/architecture/optimizations/): Every optimization and why it matters
+- [Lambda compiler](https://rypipe.emiliano-go.com/architecture/lambda-compiler/): Compiling Python lambdas to native filters
+
+## Reference
+- [Python API](https://rypipe.emiliano-go.com/reference/python-api/): rypipe.read, Source, Adapter, Pipeline, stages, sinks, exceptions
+- [Rust API](https://rypipe.emiliano-go.com/reference/rust-api/): Splitter, RecordParser, ColumnarSink, ExecutionPlan, Pipeline, Value
+
+## Examples
+- [Examples](https://rypipe.emiliano-go.com/examples/): Python and Rust API recipes for reading, pipelines, adapters, and sinks
+- [crxml adapter](https://rypipe.emiliano-go.com/crxml-adapter/): Real-world adapter example; Crystal Reports XML parser built on rypipe-core
 
 ## Internals
-- [Architecture](https://rypipe.emiliano-go.com/architecture/): Splitting, row extraction, typed builders, and engine design
 - [Performance](https://rypipe.emiliano-go.com/performance/): Parallel scheduling, memory budgets, and optimization notes
+- [Why Python?](https://rypipe.emiliano-go.com/why-python/): Why rypipe uses Python bindings instead of pure Rust
+- [Contributing](https://rypipe.emiliano-go.com/contributing/): How to contribute to rypipe
 
 For the full documentation in a single file, see [llms-full.txt](https://rypipe.emiliano-go.com/llms-full.txt).

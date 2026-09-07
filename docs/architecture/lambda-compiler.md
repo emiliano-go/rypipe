@@ -27,14 +27,30 @@ predicate. If not, the lambda runs in Python as before.
 
 ## Supported patterns { #supported-patterns }
 
-| Pattern | Example | Bytecode signature | Compiled to |
-|---------|---------|-------------------|-------------|
-| field op literal | `r["amount"] > 100` | `LOAD_FAST(r)` → `LOAD_CONST(field)` → `LOAD_CONST(value)` → `COMPARE_OP(op)` | `CompareLiteral` |
-| field_a op field_b | `r["price"] > r["cost"]` | Two `LOAD_FAST(r)` → `LOAD_CONST` sequences | `Compare` |
-| field.startswith("x") | `r["name"].startswith("A")` | `LOAD_ATTR(startswith)` → `CALL` | `StartsWith` |
-| field.endswith("x") | `r["name"].endswith("z")` | `LOAD_ATTR(endswith)` → `CALL` | `EndsWith` |
-| compound AND | `r["a"] > 1 and r["b"] < 2` | `COPY`/`TO_BOOL`/`POP_JUMP_IF_FALSE` | `And(CompareLiteral, CompareLiteral)` |
-| cast + compare | `int(r["age"]) > 30` | `LOAD_GLOBAL(int)` → `CALL` → `COMPARE_OP` | Not yet supported |
+| Pattern | Example | Compiled to |
+|---------|---------|-------------|
+| field op literal | `r["amount"] > 100` | `CompareLiteral` |
+| field_a op field_b | `r["price"] > r["cost"]` | `Compare` |
+| field.startswith("x") | `r["name"].startswith("A")` | `StartsWith` |
+| field.endswith("x") | `r["name"].endswith("z")` | `EndsWith` |
+| field.contains("x") | `r["name"].contains("ali")` | `Contains` |
+| field.strip() op "x" | `r["name"].strip() == "Alice"` | `Strip` |
+| field.lower() op "x" | `r["name"].lower() == "alice"` | `Lower` |
+| field.upper() op "x" | `r["name"].upper() == "ALICE"` | `Upper` |
+| field.replace(a,b) op "x" | `r["name"].replace("o","x") == "Bxb"` | `Replace` |
+| len(field) op N | `len(r["name"]) > 3` | `Length` |
+| field in tuple/list | `r["s"] in ("a","b")` | `In` |
+| field in frozenset | `r["s"] in frozenset({"a","b"})` | `In` |
+| not field | `not r["active"]` | `NotField` |
+| not field.startswith("x") | `not r["name"].startswith("A")` | `Not(StartsWith)` |
+| not field.endswith("x") | `not r["name"].endswith("z")` | `Not(EndsWith)` |
+| True/False | `lambda r: True` | `Always` |
+| and | `r["a"] > 1 and r["b"] < 2` | `And(...)` |
+| or | `r["a"] > 1 or r["b"] < 2` | `Or(...)` |
+| nested compound | `(r["a"] > 1 or r["b"] < 2) and r["c"] == "x"` | `And(Or(...), ...)` |
+| closure constant | `threshold=100; r["x"] > threshold` | `CompareLiteral` (captured at construction) |
+| cast + compare | `int(r["age"]) > 30` | `CompareLiteral` (typed) |
+| arithmetic | `r["x"] * 2 > 100` | `ArithmeticCompare` |
 
 ### How pattern detection works { #pattern-detection }
 
@@ -69,55 +85,54 @@ version differences in bytecode encoding.
 
 The compiler detects common patterns but cannot handle everything:
 
-### Closures { #closures }
+### Closures with non-constant values { #closures }
 
 ```python
-threshold = 100
-FilterRows(lambda r: r["amount"] > threshold)  # falls back to Python
+import datetime
+now = datetime.now()
+FilterRows(lambda r: r["timestamp"] > now)  # falls back to Python
 ```
 
-The value `threshold` is loaded via `LOAD_GLOBAL`, not `LOAD_CONST`. The
-compiler cannot resolve it at construction time.
+The compiler resolves closures at construction time, but only for constant
+types (int, float, str, bool). Complex objects like datetime are not resolved.
 
-### Nested function calls (beyond cast) { #nested-calls }
+### Method chains { #method-chains }
 
 ```python
 FilterRows(lambda r: r["name"].strip().lower() == "alice")  # falls back
 ```
 
-Method chains with multiple calls are not detected. Simple casts like
-`int(r["age"]) > 30` are fully supported.
+Single method calls are supported (`strip()`, `lower()`, `upper()`), but
+chains with multiple calls are not. Use keyword form for multi-step transforms.
 
-### Complex compound logic { #complex-boolean-logic }
+### Deeply nested compound logic { #nested-compound }
 
-Single-level AND, OR, and NOT are supported. Mixed or nested compound
-expressions fall back to Python:
+Single-level nesting is supported:
 
 ```python
-# Supported (single-level):
-FilterRows(lambda r: r["a"] > 1 and r["b"] < 2)
-FilterRows(lambda r: r["status"] == "a" or r["status"] == "b")
-FilterRows(lambda r: not r["active"])
-
-# Falls back (nested/mixed):
+# Supported:
 FilterRows(lambda r: (r["a"] > 1 or r["b"] < 2) and r["c"] == "x")
+
+# Falls back (3+ levels):
+FilterRows(lambda r: (r["a"] > 1 and r["b"] < 2) or (r["c"] == "x" and r["d"] > 0))
 ```
 
-Use keyword combinators for complex logic:
+Use keyword combinators for deeply nested logic:
 
 ```python
-from my_adapter import FilterRowsAny, FilterRowsNot
+from my_adapter import FilterRowsAny, FilterRowsAll, FilterRowsNot
 
 FilterRowsAny(
-    FilterRows(field="a", op=">", value="1"),
-    FilterRows(field="b", op="<", value="2"),
+    FilterRowsAll(
+        FilterRows(field="a", op=">", value="1"),
+        FilterRows(field="b", op="<", value="2"),
+    ),
+    FilterRowsAll(
+        FilterRows(field="c", op="==", value="x"),
+        FilterRows(field="d", op=">", value="0"),
+    ),
 )
 ```
-
-### Other string methods { #string-methods }
-
-Only `startswith` and `endswith` are supported. Other string methods
-(`strip`, `lower`, `contains`, etc.) fall back to Python.
 
 ## What happens when compilation fails { #compilation-fallback}
 
@@ -155,9 +170,9 @@ f = FilterRows(lambda r: r["amount"] > 100)
 print(f._filter_spec)
 # {'field': 'amount', 'op': '>', 'value': '100'}  ← compiled
 
-f2 = FilterRows(lambda r: r["name"].strip() == "alice")
+f2 = FilterRows(lambda r: r["name"].strip().lower() == "alice")
 print(f2._filter_spec)
-# None  ← fell back to Python
+# None  ← fell back to Python (method chain)
 ```
 
 ## Recap { #recap }
@@ -165,13 +180,16 @@ print(f2._filter_spec)
 * The lambda compiler analyzes bytecode at `FilterRows` construction time.
 * Common patterns are compiled to fusable filter specs:
   - Field comparisons: `r["field"] > 100`, `r["a"] > r["b"]`
-  - String methods: `r["name"].startswith("A")`, `r["name"].endswith("z")`
-  - Membership: `r["status"] in ("active", "pending")`
-  - Truthiness: `not r["active"]`
-  - Compound logic: `a and b`, `a or b`
+  - String methods: `r["name"].startswith("A")`, `r["name"].endswith("z")`, `r["name"].contains("x")`
+  - String transforms: `r["name"].strip()`, `.lower()`, `.upper()`, `.replace()`
+  - Length: `len(r["name"]) > 3`
+  - Membership: `r["status"] in ("active", "pending")`, `r["s"] in frozenset({...})`
+  - Truthiness: `not r["active"]`, `not r["name"].startswith("A")`
+  - Compound logic: `a and b`, `a or b`, nested `(a or b) and c`
   - Cast + compare: `int(r["age"]) > 30`
   - Arithmetic: `r["amount"] * 2 > 100`
+  - Closures: `threshold=100; r["x"] > threshold` (captured at construction)
   - Constants: `lambda r: True`, `lambda r: False`
-* Unknown patterns (closures, nested method chains) fall back to Python.
+* Unknown patterns (method chains, non-constant closures) fall back to Python.
 * The compiler is a best-effort optimization: if it cannot detect a pattern,
   the lambda still works correctly, just slower.
