@@ -157,6 +157,27 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         });
     }
 
+    // Replace: field + old + new + cmp_op + value
+    if f.contains("old")? && f.contains("new")? {
+        let field: String = f.get_item("field")?.unwrap().extract()?;
+        let old: String = f.get_item("old")?.unwrap().extract()?;
+        let new: String = f.get_item("new")?.unwrap().extract()?;
+        let value = f
+            .get_item("value")?
+            .ok_or_else(|| PlanError::new_err("replace filter must include 'value' key"))?
+            .extract::<String>()?;
+        let cmp_op_str = if let Some(cmp) = f.get_item("cmp_op")? {
+            cmp.extract::<String>()?
+        } else {
+            op.clone()
+        };
+        let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
+            let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
+            PlanError::new_err(format!("unsupported compare op {cmp_op_str:?}; valid: {valid}"))
+        })?;
+        return Ok(FilterPredicate::Replace { field, old, new, op: cop, value });
+    }
+
     // Collection membership: field + op + values
     if f.contains("values")? {
         let field: String = f.get_item("field")?.unwrap().extract()?;
@@ -188,9 +209,39 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         "==" | "eq" => FilterPredicate::Equal { field, value },
         "starts_with" => FilterPredicate::StartsWith { field, value },
         "ends_with" => FilterPredicate::EndsWith { field, value },
+        "contains" => FilterPredicate::Contains { field, value },
+        "strip" | "lstrip" | "rstrip" | "lower" | "upper" => {
+            let cmp_op_str = if let Some(cmp) = f.get_item("cmp_op")? {
+                cmp.extract::<String>()?
+            } else {
+                "=".to_string()
+            };
+            let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
+                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
+                PlanError::new_err(format!("unsupported compare op {cmp_op_str:?}; valid: {valid}"))
+            })?;
+            match op.as_str() {
+                "strip" | "lstrip" | "rstrip" => FilterPredicate::Strip { field, op: cop, value },
+                "lower" => FilterPredicate::Lower { field, op: cop, value },
+                "upper" => FilterPredicate::Upper { field, op: cop, value },
+                _ => unreachable!(),
+            }
+        }
+        "length" => {
+            let cmp_op_str = if let Some(cmp) = f.get_item("cmp_op")? {
+                cmp.extract::<String>()?
+            } else {
+                ">".to_string()
+            };
+            let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
+                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
+                PlanError::new_err(format!("unsupported compare op {cmp_op_str:?}; valid: {valid}"))
+            })?;
+            FilterPredicate::Length { field, op: cop, value }
+        }
         other => {
             let cop = CompareOp::from_str(other).ok_or_else(|| {
-                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with";
+                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with, contains, strip, lower, upper, length";
                 PlanError::new_err(format!("unsupported filter op {other:?}; valid: {valid}"))
             })?;
             FilterPredicate::CompareLiteral {
