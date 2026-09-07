@@ -11,6 +11,20 @@ a complete adapter for a newline-delimited `key=value` log format.
 
 ## Step 1: Create the package { #step-1-create-the-package }
 
+### Scaffold with cargo-generate (optional) { #scaffold-with-cargo-generate }
+
+To skip the manual setup, generate the package from the built-in template:
+
+```bash
+cargo generate emiliano-go/rypipe template
+```
+
+This creates `src/lib.rs`, `Cargo.toml`, `pyproject.toml`, and a README with
+the correct dependencies already wired. Skip to [Step 2](#step-2-implement-the-splitter) if you
+used the template; otherwise continue with the manual setup below.
+
+### Manual setup { #manual-setup }
+
 ```bash
 mkdir rypipe-log && cd rypipe-log
 mkdir src
