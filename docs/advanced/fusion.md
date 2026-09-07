@@ -110,7 +110,7 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 
 `FilterRows` is fusable when it uses a keyword-form predicate (`field`,
 `op`, `value` or `field_a`, `op`, `field_b`), or when a lambda is
-automatically compiled by the [lambda compiler](./lambda-compiler.md).
+automatically compiled by the [lambda compiler](../architecture/lambda-compiler.md).
 `FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable;
 they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
 

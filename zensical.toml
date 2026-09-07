@@ -90,6 +90,7 @@ name = "rypipe on PyPI"
 "Advanced" = [
     "advanced/index.md",
     { "Pushdown fusion" = "advanced/fusion.md" },
+    { "Stage protocol" = "advanced/stage-protocol.md" },
     { "Execution modes" = "advanced/execution-modes.md" },
     { "Memory and chunking" = "advanced/memory-and-chunking.md" },
     { "Parallelism" = "advanced/parallelism.md" },

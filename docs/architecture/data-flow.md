@@ -208,7 +208,7 @@ unified schema (D null-filled in chunks 0,2,3).
 
 Merge path: extend sequentially:
 - merged starts empty
-- extend(chunk0): columns [A,B,C], rows 120K
+- extend(chunk0): columns `A,B,C`, rows 120K
 - extend(chunk1): D is new → backfill 120K nulls, then append 120K values
 - extend(chunk2): all columns exist, just append
 - extend(chunk3): all columns exist, just append
