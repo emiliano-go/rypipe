@@ -201,6 +201,30 @@ stage = FilterRows(field="status", op="==", value="active")
 
 Supported operators: `==`, `!=`, `>`, `<`, `>=`, `<=`.
 
+### Null check { #filterrows-null }
+
+Keep rows where a field is null or missing:
+
+```python
+stage = FilterRows(field="email", is_null=True)
+
+# Input:  {"name": "Alice", "email": "a@b.com"}  dropped
+# Input:  {"name": "Bob"}                         kept (no email key)
+```
+
+### Type check { #filterrows-type }
+
+Keep rows where a field matches a specific type:
+
+```python
+stage = FilterRows(field="amount", is_type="float64")
+
+# Input:  {"amount": 3.14}    kept (float64)
+# Input:  {"amount": "hello"} dropped (string)
+```
+
+Supported types: `string`, `int64`, `float64`, `bool`, `date32`, `timestamp`, `decimal128`.
+
 ### Column comparison { #filterrows-compare }
 
 Compares two fields in the same record:
