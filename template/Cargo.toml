@@ -1,0 +1,19 @@
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "{{description}}"
+repository = "https://github.com/user/{{project-name}}"
+
+[lib]
+name = "_{{project-name}}"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+rypipe-core = { version = "2.2" }
+mimalloc = { version = "0.1", default-features = false }
+
+[dev-dependencies]
+proptest = "1"
