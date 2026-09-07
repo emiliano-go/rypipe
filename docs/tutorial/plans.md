@@ -44,7 +44,7 @@ can analyze:
 | `RenameFields` | Always | `field_mapping` |
 | `DropFields` | Always | `drop_fields` |
 | `CastTypes` | `int`, `float`, `bool` | `field_types` |
-| `FilterRows` | Keyword form, or compiled lambda (comparisons, `startswith`, `endswith`, `in`, arithmetic, compound AND/OR) | `filter` |
+| `FilterRows` | Keyword form, or compiled lambda (comparisons, `startswith`, `endswith`, `contains`, `strip`, `lower`, `upper`, `replace`, `len()`, `in`, arithmetic, `is_null`, `is_type`, compound AND/OR) | `filter` |
 | `FilterRowsAny` | All inner filters are fusable | `filter` |
 | `FilterRowsAll` | All inner filters are fusable | `filter` |
 | `FilterRowsNot` | Inner filter is fusable | `filter` |

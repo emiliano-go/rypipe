@@ -195,6 +195,34 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         });
     }
 
+    // Null check: field + op="is_null"
+    if op == "is_null" {
+        let field = f
+            .get_item("field")?
+            .ok_or_else(|| PlanError::new_err("is_null filter must include 'field' key"))?
+            .extract::<String>()?;
+        return Ok(FilterPredicate::IsNull { field });
+    }
+
+    // Type check: field + op="is_type" + value (type name)
+    if op == "is_type" {
+        let field = f
+            .get_item("field")?
+            .ok_or_else(|| PlanError::new_err("is_type filter must include 'field' key"))?
+            .extract::<String>()?;
+        let type_str = f
+            .get_item("value")?
+            .ok_or_else(|| PlanError::new_err("is_type filter must include 'value' key"))?
+            .extract::<String>()?;
+        let field_type = FieldType::from_str(&type_str).ok_or_else(|| {
+            let valid = "string, int64, float64, bool, dictionary, date32, timestamp";
+            PlanError::new_err(format!(
+                "unknown field type '{type_str}' in is_type filter; valid types: {valid}"
+            ))
+        })?;
+        return Ok(FilterPredicate::IsType { field, field_type });
+    }
+
     // Constant filter: field + op + value
     let field = f
         .get_item("field")?
@@ -241,7 +269,7 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         }
         other => {
             let cop = CompareOp::from_str(other).ok_or_else(|| {
-                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with, contains, strip, lower, upper, length";
+                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with, contains, strip, lower, upper, length, is_null, is_type";
                 PlanError::new_err(format!("unsupported filter op {other:?}; valid: {valid}"))
             })?;
             FilterPredicate::CompareLiteral {
