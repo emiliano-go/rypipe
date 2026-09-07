@@ -533,7 +533,7 @@ def test_lambda_compiler_closure_fallback():
     """Lambda with closure variable should now be resolved at construction time."""
     threshold = 100
     f = FilterRows(lambda r: r["amount"] > threshold)
-    # Closure variable is now resolved — compiles to filter spec
+    # Closure variable is now resolved; compiles to filter spec
     assert f._filter_spec is not None
     assert f._filter_spec["value"] == "100"
 
