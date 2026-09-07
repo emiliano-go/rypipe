@@ -134,8 +134,12 @@ impl Iterator for StreamingBatchIterator {
                         } else {
                             "worker panicked".to_string()
                         };
-                        return Some(Err(crate::Error::Merge(format!(
-                            "streaming worker panicked: {msg}"
+                        return Some(Err(crate::Error::Parser(format!(
+                            "streaming worker panicked: {msg}. \
+                             This usually indicates a bug in the parser (e.g., returning \
+                             Cow::Borrowed that outlives the input chunk, or an unwrap() \
+                             on None/Err during parsing). Check your RecordParser::parse_chunk \
+                             implementation for incorrect lifetime handling or missing error checks."
                         ))));
                     }
                 }

@@ -94,8 +94,12 @@ impl ParallelExecutor {
                     } else {
                         "unknown panic".to_string()
                     };
-                    Err(crate::Error::Merge(format!(
-                        "worker panicked during parallel parse: {msg}"
+                    Err(crate::Error::Parser(format!(
+                        "worker panicked during parallel parse: {msg}. \
+                         This usually indicates a bug in the parser (e.g., returning \
+                         Cow::Borrowed that outlives the input chunk, or an unwrap() \
+                         on None/Err during parsing). Check your RecordParser::parse_chunk \
+                         implementation for incorrect lifetime handling or missing error checks."
                     )))
                 });
                 // Record chunk timing for get_par_profile()
