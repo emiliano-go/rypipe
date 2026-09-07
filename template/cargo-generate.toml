@@ -1,0 +1,7 @@
+[template]
+cargo_generate_version = ">=0.10.0"
+description = "A rypipe adapter crate with Python bindings"
+ignore = []
+
+[template有条件]
+project-name = { prompt = "Project name", default = "my-adapter" }
