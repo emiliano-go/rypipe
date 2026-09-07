@@ -295,6 +295,52 @@ pub enum FilterPredicate {
         cmp_op: CompareOp,
         cmp_value: String,
     },
+    /// Keep row if `field_value.strip()` satisfies the comparison.
+    Strip {
+        field: String,
+        op: CompareOp,
+        value: String,
+    },
+    /// Keep row if `field_value.to_lowercase()` satisfies the comparison.
+    Lower {
+        field: String,
+        op: CompareOp,
+        value: String,
+    },
+    /// Keep row if `field_value.to_uppercase()` satisfies the comparison.
+    Upper {
+        field: String,
+        op: CompareOp,
+        value: String,
+    },
+    /// Keep row if `field_value.replace(old, new)` satisfies the comparison.
+    Replace {
+        field: String,
+        old: String,
+        new: String,
+        op: CompareOp,
+        value: String,
+    },
+    /// Keep row if `field_value.len()` satisfies the comparison (numeric).
+    Length {
+        field: String,
+        op: CompareOp,
+        value: String,
+    },
+    /// Keep row if `field_value.contains(value)`.
+    Contains {
+        field: String,
+        value: String,
+    },
+    /// Keep row if the field is null or missing.
+    IsNull {
+        field: String,
+    },
+    /// Keep row if the field is of the given type (e.g., Int64, Float64, String).
+    IsType {
+        field: String,
+        field_type: FieldType,
+    },
     /// Keep row if both sub-predicates pass. Short-circuits on the first
     /// failure.
     And(Box<FilterPredicate>, Box<FilterPredicate>),
@@ -436,6 +482,76 @@ impl FilterPredicate {
                     return apply_op(*cmp_op, result.partial_cmp(&cmp_f64));
                 }
                 false
+            }
+            FilterPredicate::Strip { field, op, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => {
+                        let transformed = s.trim().to_string();
+                        apply_op(*op, transformed.as_str().partial_cmp(value.as_str()))
+                    }
+                    None => false,
+                }
+            }
+            FilterPredicate::Lower { field, op, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => {
+                        let transformed = s.to_lowercase();
+                        apply_op(*op, transformed.as_str().partial_cmp(value.as_str()))
+                    }
+                    None => false,
+                }
+            }
+            FilterPredicate::Upper { field, op, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => {
+                        let transformed = s.to_uppercase();
+                        apply_op(*op, transformed.as_str().partial_cmp(value.as_str()))
+                    }
+                    None => false,
+                }
+            }
+            FilterPredicate::Replace { field, old, new, op, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => {
+                        let transformed = s.replace(old.as_str(), new.as_str());
+                        apply_op(*op, transformed.as_str().partial_cmp(value.as_str()))
+                    }
+                    None => false,
+                }
+            }
+            FilterPredicate::Length { field, op, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => {
+                        let len = s.len() as f64;
+                        let cmp_val = value.parse::<f64>().unwrap_or(0.0);
+                        apply_op(*op, len.partial_cmp(&cmp_val))
+                    }
+                    None => false,
+                }
+            }
+            FilterPredicate::Contains { field, value } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => s.contains(value.as_str()),
+                    None => false,
+                }
+            }
+            FilterPredicate::IsNull { field } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                actual.is_none()
+            }
+            FilterPredicate::IsType { field, field_type } => {
+                let resolved = resolve(field, plan);
+                let col = get_column(columns, field_index, resolved);
+                match col {
+                    None => false,
+                    Some(c) => c.is_type_at(row_index, field_type),
+                }
             }
             FilterPredicate::And(a, b) => {
                 // Evaluate the operand with the earlier field first for
@@ -579,7 +695,15 @@ fn pred_ordinal(
         | FilterPredicate::In { field, .. }
         | FilterPredicate::NotIn { field, .. }
         | FilterPredicate::NotField { field, .. }
-        | FilterPredicate::ArithmeticCompare { field, .. } => field_index
+        | FilterPredicate::ArithmeticCompare { field, .. }
+        | FilterPredicate::Strip { field, .. }
+        | FilterPredicate::Lower { field, .. }
+        | FilterPredicate::Upper { field, .. }
+        | FilterPredicate::Replace { field, .. }
+        | FilterPredicate::Length { field, .. }
+        | FilterPredicate::Contains { field, .. }
+        | FilterPredicate::IsNull { field, .. }
+        | FilterPredicate::IsType { field, .. } => field_index
             .get(resolve(field, plan))
             .copied()
             .unwrap_or(usize::MAX),

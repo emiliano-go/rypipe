@@ -1024,6 +1024,87 @@ impl ColumnBuilder {
         }
     }
 
+    /// Check if the value at `index` is of the given type.
+    /// Returns true if the column variant matches the requested type and the value is not null.
+    /// For String columns, this checks if the value can be parsed as the requested type.
+    pub(crate) fn is_type_at(&self, index: usize, field_type: &crate::plan::FieldType) -> bool {
+        use crate::plan::FieldType as FT;
+        match (self, field_type) {
+            // Direct type matches
+            (ColumnBuilder::String(v), FT::String) => v.get(index).is_some(),
+            (ColumnBuilder::Int64(v), FT::Int64) => v.get(index).is_some(),
+            (ColumnBuilder::Float64(v), FT::Float64) => v.get(index).is_some(),
+            (ColumnBuilder::Boolean(v), FT::Boolean) => v.get(index).is_some(),
+            (ColumnBuilder::Date32(v), FT::Date32) => v.get(index).is_some(),
+            (ColumnBuilder::Timestamp(u1, _), FT::Timestamp(u2)) => {
+                // Check if the timestamp unit matches and value exists
+                u1 == u2 && self.get_typed_value(index).is_some()
+            }
+            (ColumnBuilder::Decimal128(_, v), FT::Decimal128(_)) => v.get(index).is_some(),
+            (ColumnBuilder::Dictionary { codes, .. }, FT::Dictionary) => codes.get(index).is_some(),
+            // Dictionary can be treated as String
+            (ColumnBuilder::Dictionary { codes, .. }, FT::String) => codes.get(index).is_some(),
+            // Int64 can be treated as Float64 (lossy but valid)
+            (ColumnBuilder::Int64(v), FT::Float64) => v.get(index).is_some(),
+            // Float64 cannot be safely treated as Int64
+            // String columns: check if value can be parsed as the requested type
+            (ColumnBuilder::String(v), FT::Int64) => {
+                v.get(index).is_some_and(|s| s.parse::<i64>().is_ok())
+            }
+            (ColumnBuilder::String(v), FT::Float64) => {
+                v.get(index).is_some_and(|s| s.parse::<f64>().is_ok())
+            }
+            (ColumnBuilder::String(v), FT::Boolean) => {
+                v.get(index).is_some_and(|s| {
+                    matches!(s.to_lowercase().as_str(), "true" | "false" | "1" | "0" | "yes" | "no")
+                })
+            }
+            (ColumnBuilder::String(v), FT::Date32) => {
+                v.get(index).is_some_and(|s| crate::columnar::parse_date32(s).is_some())
+            }
+            (ColumnBuilder::String(v), FT::Timestamp(_)) => {
+                v.get(index).is_some_and(|s| {
+                    // Try to parse as timestamp (various formats)
+                    s.parse::<i64>().is_ok() || crate::columnar::parse_date32(s).is_some()
+                })
+            }
+            (ColumnBuilder::String(v), FT::Decimal128(_)) => {
+                v.get(index).is_some_and(|s| {
+                    s.trim().parse::<i128>().is_ok() || s.parse::<f64>().is_ok()
+                })
+            }
+            (ColumnBuilder::String(v), FT::Dictionary) => v.get(index).is_some(),
+            // Int64 columns: check if value can be parsed as other types
+            (ColumnBuilder::Int64(v), FT::String) => v.get(index).is_some(),
+            (ColumnBuilder::Int64(v), FT::Boolean) => {
+                v.get(index).is_some_and(|n| matches!(n, 0 | 1))
+            }
+            // Float64 columns: check if value can be parsed as other types
+            (ColumnBuilder::Float64(v), FT::String) => v.get(index).is_some(),
+            (ColumnBuilder::Float64(v), FT::Int64) => {
+                v.get(index).is_some_and(|f| f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64)
+            }
+            (ColumnBuilder::Float64(v), FT::Boolean) => {
+                v.get(index).is_some_and(|f| matches!(f, 0.0 | 1.0))
+            }
+            // Boolean columns
+            (ColumnBuilder::Boolean(v), FT::String) => v.get(index).is_some(),
+            (ColumnBuilder::Boolean(v), FT::Int64) => v.get(index).is_some(),
+            (ColumnBuilder::Boolean(v), FT::Float64) => v.get(index).is_some(),
+            // Date32 columns
+            (ColumnBuilder::Date32(v), FT::String) => v.get(index).is_some(),
+            (ColumnBuilder::Date32(v), FT::Int64) => v.get(index).is_some(),
+            // Timestamp columns
+            (ColumnBuilder::Timestamp(_, v), FT::String) => v.get(index).is_some(),
+            (ColumnBuilder::Timestamp(_, v), FT::Int64) => v.get(index).is_some(),
+            // Decimal128 columns
+            (ColumnBuilder::Decimal128(_, v), FT::String) => v.get(index).is_some(),
+            (ColumnBuilder::Decimal128(_, v), FT::Int64) => v.get(index).is_some(),
+            (ColumnBuilder::Decimal128(_, v), FT::Float64) => v.get(index).is_some(),
+            _ => false,
+        }
+    }
+
     /// Merge all values from `other` into `self`, consuming `other`; values are
     /// moved, never cloned. Both must be the same variant.
     pub(crate) fn extend_owned(&mut self, other: ColumnBuilder) -> Result<()> {

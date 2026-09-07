@@ -692,7 +692,15 @@ impl TableBuilder {
             | FilterPredicate::In { field, .. }
             | FilterPredicate::NotIn { field, .. }
             | FilterPredicate::NotField { field, .. }
-            | FilterPredicate::ArithmeticCompare { field, .. } => {
+            | FilterPredicate::ArithmeticCompare { field, .. }
+            | FilterPredicate::Strip { field, .. }
+            | FilterPredicate::Lower { field, .. }
+            | FilterPredicate::Upper { field, .. }
+            | FilterPredicate::Replace { field, .. }
+            | FilterPredicate::Length { field, .. }
+            | FilterPredicate::Contains { field, .. }
+            | FilterPredicate::IsNull { field, .. }
+            | FilterPredicate::IsType { field, .. } => {
                 let resolved = plan.resolve_field(field).unwrap_or(field);
                 names.push(resolved.to_string());
             }
@@ -1139,6 +1147,163 @@ impl TableBuilder {
                 }
                 None => PredicateState::Undecided,
             },
+            FilterPredicate::Strip { field, op, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    let transformed = actual.trim().to_string();
+                    match transformed.as_str().partial_cmp(value.as_str()) {
+                        Some(ord) => {
+                            let pass = match op {
+                                crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                                crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                            };
+                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                        }
+                        None => PredicateState::Fail,
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::Lower { field, op, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    let transformed = actual.to_lowercase();
+                    match transformed.as_str().partial_cmp(value.as_str()) {
+                        Some(ord) => {
+                            let pass = match op {
+                                crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                                crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                            };
+                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                        }
+                        None => PredicateState::Fail,
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::Upper { field, op, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    let transformed = actual.to_uppercase();
+                    match transformed.as_str().partial_cmp(value.as_str()) {
+                        Some(ord) => {
+                            let pass = match op {
+                                crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                                crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                            };
+                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                        }
+                        None => PredicateState::Fail,
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::Replace { field, old, new, op, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    let transformed = actual.replace(old.as_str(), new.as_str());
+                    match transformed.as_str().partial_cmp(value.as_str()) {
+                        Some(ord) => {
+                            let pass = match op {
+                                crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                                crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                            };
+                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                        }
+                        None => PredicateState::Fail,
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::Length { field, op, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    let len = actual.len() as f64;
+                    let cmp_val = value.parse::<f64>().unwrap_or(0.0);
+                    match len.partial_cmp(&cmp_val) {
+                        Some(ord) => {
+                            let pass = match op {
+                                crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
+                                crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+                            };
+                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                        }
+                        None => PredicateState::Fail,
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::Contains { field, value } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if actual.contains(value.as_str()) {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::IsNull { field } => match tb.get_buffered_str(field) {
+                Some(_) => PredicateState::Fail,
+                None => PredicateState::Pass,
+            },
+            FilterPredicate::IsType { field, field_type } => {
+                // Check the plan's declared type first (fast path)
+                let resolved = tb.plan.resolve_field(field).unwrap_or(field);
+                let declared = tb.plan.column_type(resolved);
+                if declared == *field_type {
+                    // Declared type matches: pass if value exists
+                    if tb.get_buffered_value(field).is_some() {
+                        return PredicateState::Pass;
+                    }
+                }
+                // For String columns, check if the buffered value can be parsed
+                if let Some(val) = tb.get_buffered_value(field) {
+                    match field_type {
+                        crate::plan::FieldType::Int64 => {
+                            if let Some(s) = val.as_str() {
+                                if s.parse::<i64>().is_ok() {
+                                    return PredicateState::Pass;
+                                }
+                            }
+                        }
+                        crate::plan::FieldType::Float64 => {
+                            if let Some(s) = val.as_str() {
+                                if s.parse::<f64>().is_ok() {
+                                    return PredicateState::Pass;
+                                }
+                            }
+                        }
+                        crate::plan::FieldType::Boolean => {
+                            if let Some(s) = val.as_str() {
+                                if matches!(s.to_lowercase().as_str(), "true" | "false" | "1" | "0" | "yes" | "no") {
+                                    return PredicateState::Pass;
+                                }
+                            }
+                        }
+                        crate::plan::FieldType::String | crate::plan::FieldType::Dictionary => {
+                            return PredicateState::Pass;
+                        }
+                        _ => {}
+                    }
+                }
+                PredicateState::Fail
+            }
             FilterPredicate::And(a, b) => {
                 let sa = Self::eval_predicate(a, tb);
                 let sb = Self::eval_predicate(b, tb);
@@ -1290,7 +1455,15 @@ impl TableBuilder {
             | FilterPredicate::In { .. }
             | FilterPredicate::NotIn { .. }
             | FilterPredicate::NotField { .. }
-            | FilterPredicate::ArithmeticCompare { .. } => match Self::eval_predicate(pred, tb) {
+            | FilterPredicate::ArithmeticCompare { .. }
+            | FilterPredicate::Strip { .. }
+            | FilterPredicate::Lower { .. }
+            | FilterPredicate::Upper { .. }
+            | FilterPredicate::Replace { .. }
+            | FilterPredicate::Length { .. }
+            | FilterPredicate::Contains { .. }
+            | FilterPredicate::IsNull { .. }
+            | FilterPredicate::IsType { .. } => match Self::eval_predicate(pred, tb) {
                 PredicateState::Undecided => PredicateState::Fail,
                 other => other,
             },
@@ -2077,6 +2250,54 @@ mod tests {
         let engine = parse_bytes(b"X=1.5\n", plan);
         if let ColumnBuilder::Float64(v) = engine.get_column("X").unwrap() {
             assert!((v.get(0).unwrap() - 1.5).abs() < 1e-9);
+        } else {
+            panic!("expected Float64 builder");
+        }
+    }
+
+    #[test]
+    fn test_is_null_filter() {
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::IsNull {
+            field: "X".to_string(),
+        });
+        let engine = parse_bytes(b"X=hello\nY=world\nX=fallback\n", plan);
+        assert_eq!(engine.num_rows(), 1);
+        let col = engine.get_column("Y").unwrap();
+        assert_eq!(col.as_str_vec(), vec![Some("world".into())]);
+    }
+
+    #[test]
+    fn test_is_type_filter_int64() {
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("X".to_string(), FieldType::Int64);
+        plan.filter = Some(FilterPredicate::IsType {
+            field: "X".to_string(),
+            field_type: FieldType::Int64,
+        });
+        let engine = parse_bytes(b"X=42\nX=bad\nX=100\n", plan);
+        assert_eq!(engine.num_rows(), 2);
+        if let ColumnBuilder::Int64(v) = engine.get_column("X").unwrap() {
+            assert_eq!(v.get(0), Some(42));
+            assert_eq!(v.get(1), Some(100));
+        } else {
+            panic!("expected Int64 builder");
+        }
+    }
+
+    #[test]
+    fn test_is_type_filter_float64() {
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("X".to_string(), FieldType::Float64);
+        plan.filter = Some(FilterPredicate::IsType {
+            field: "X".to_string(),
+            field_type: FieldType::Float64,
+        });
+        let engine = parse_bytes(b"X=1.5\nX=bad\nX=2.5\n", plan);
+        assert_eq!(engine.num_rows(), 2);
+        if let ColumnBuilder::Float64(v) = engine.get_column("X").unwrap() {
+            assert!((v.get(0).unwrap() - 1.5).abs() < 1e-9);
+            assert!((v.get(1).unwrap() - 2.5).abs() < 1e-9);
         } else {
             panic!("expected Float64 builder");
         }

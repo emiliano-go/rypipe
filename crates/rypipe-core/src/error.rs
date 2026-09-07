@@ -22,6 +22,14 @@ pub enum Error {
     /// Arrow array/batch construction failure.
     #[error("Arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
+
+    /// Parser misbehavior: the parser returned invalid data.
+    #[error("parser error: {0}")]
+    Parser(String),
+
+    /// Lifetime violation: the parser returned a borrowed value that outlives the input.
+    #[error("lifetime error: {0}")]
+    Lifetime(String),
 }
 
 /// Shorthand result type used throughout the crate.

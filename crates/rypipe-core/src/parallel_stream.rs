@@ -124,19 +124,34 @@ fn discover_schema<P: crate::decoder::RecordParser>(
     let t0 = std::time::Instant::now();
     // Explicit schema already handled by caller; this is auto-discovery.
     let opts = DiscoveryOpts::default();
-    let order: Vec<String> = if (bytes.len() as u64) < opts.full_scan_threshold {
+
+    // Escape hatch: if auto-schema is disabled, return empty schema
+    // and let the engine fall back to full parsing
+    if opts.disable_auto_schema {
+        let elapsed = t0.elapsed().as_nanos() as u64;
+        DISCOVERY_NS.store(elapsed, Ordering::Relaxed);
+        let _ = splitter;
+        return (FrozenSchema::from_plan(&[], plan), Vec::new());
+    }
+
+    let file_size = bytes.len() as u64;
+
+    // Dynamic sizing: scale window count and size by file size
+    let n = crate::schema::dynamic_window_count(file_size);
+    let wbytes = crate::schema::dynamic_window_size(file_size);
+
+    let order: Vec<String> = if file_size < opts.full_scan_threshold || n == 0 {
+        // Small file or dynamic sizing says full scan
         let mut sink = DiscoverySink::new();
         let _ = parser.parse_chunk_generic(bytes, &mut sink);
         sink.into_order()
     } else {
         use rayon::prelude::*;
-        let n = opts.windows;
-        let wbytes = opts.window_bytes;
-        // Parallelise windows: 16×2 MiB independent parses (~19 ms serial → ~2 ms on 16t)
+        // Parallelise windows: n×wbytes independent parses
         let per_window: Vec<Vec<String>> = (0..n)
             .into_par_iter()
             .map(|i| {
-                let start = (bytes.len() as u64 * i as u64 / n as u64) as usize;
+                let start = (file_size * i as u64 / n as u64) as usize;
                 let end = (start + wbytes).min(bytes.len());
                 if start >= end {
                     return Vec::new();
@@ -152,6 +167,17 @@ fn discover_schema<P: crate::decoder::RecordParser>(
         let mut merged = Vec::new();
         for mut v in per_window {
             for name in v.drain(..) {
+                if seen.insert(name.clone()) {
+                    merged.push(name);
+                }
+            }
+        }
+        // Always scan the tail to catch late-appearing columns
+        if opts.always_scan_tail {
+            let tail_start = bytes.len().saturating_sub(wbytes);
+            let mut tail_sink = DiscoverySink::new();
+            let _ = parser.parse_chunk_generic(&bytes[tail_start..], &mut tail_sink);
+            for name in tail_sink.into_order() {
                 if seen.insert(name.clone()) {
                     merged.push(name);
                 }
@@ -490,7 +516,13 @@ impl ParallelStreamingExecutor {
         }
         for h in handles {
             h.join()
-                .map_err(|_| crate::Error::Merge("worker panicked".into()))??;
+                .map_err(|_| crate::Error::Parser(format!(
+                    "worker panicked during parallel parse. \
+                     This usually indicates a bug in the parser (e.g., returning \
+                     Cow::Borrowed that outlives the input chunk, or an unwrap() \
+                     on None/Err during parsing). Check your RecordParser::parse_chunk \
+                     implementation for incorrect lifetime handling or missing error checks."
+                )))??;
         }
         Ok(())
     }
@@ -583,8 +615,12 @@ impl Iterator for ParallelStreamingBatchIterator {
                         } else {
                             "worker panicked".to_string()
                         };
-                        return Some(Err(crate::Error::Merge(format!(
-                            "parallel streaming worker panicked: {msg}"
+                        return Some(Err(crate::Error::Parser(format!(
+                            "parallel streaming worker panicked: {msg}. \
+                             This usually indicates a bug in the parser (e.g., returning \
+                             Cow::Borrowed that outlives the input chunk, or an unwrap() \
+                             on None/Err during parsing). Check your RecordParser::parse_chunk \
+                             implementation for incorrect lifetime handling or missing error checks."
                         ))));
                     }
                 }
@@ -603,6 +639,7 @@ mod tests {
     use crate::plan::ExecutionPlan;
     use crate::schema::{clear_schema_cache, schema_cache_stats};
     use crate::value::Value;
+    use arrow::array::Array;
 
     /// Minimal parser: newline-separated rows of `key=value\t...` tokens.
     #[derive(Clone, Debug, Default)]
@@ -684,5 +721,301 @@ mod tests {
         let s4 = discover_schema_for_bytes(bytes, &splitter, &parser, &renamed);
         assert_eq!(names(&s4), vec!["x", "b"]);
         assert_eq!(schema_cache_stats(), (2, 2));
+    }
+
+    #[test]
+    fn tail_scan_catches_late_columns() {
+        // Create data where column "late" only appears in the last few rows.
+        // With 16 windows of 2 MiB each, the last window starts at ~94%.
+        // Column "late" appears only in the last ~5% of the data.
+        let mut data = Vec::new();
+        // First 90%: only columns "a" and "b"
+        for i in 0..900 {
+            data.extend_from_slice(format!("a={i}\tb=val{i}\n").as_bytes());
+        }
+        // Last 10%: introduce column "late"
+        for i in 900..1000 {
+            data.extend_from_slice(format!("a={i}\tb=val{i}\tlate=new{i}\n").as_bytes());
+        }
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(&data, &splitter, &parser, &plan);
+
+        // Column "late" must be discovered
+        let cols = names(&schema);
+        assert!(cols.contains(&"a"), "column 'a' missing");
+        assert!(cols.contains(&"b"), "column 'b' missing");
+        assert!(cols.contains(&"late"), "column 'late' missing from tail scan");
+
+        // Verify all values are preserved by parsing the full data
+        let mut builder = crate::engine::TableBuilder::with_plan(1024, Arc::new(plan.clone()));
+        builder.ensure_schema(&schema).unwrap();
+        parser.parse_chunk(&data, &mut builder).unwrap();
+        let batch = builder.finish().unwrap();
+
+        assert_eq!(batch.num_rows(), 1000);
+        assert_eq!(batch.num_columns(), 3);
+
+        // Check that the "late" column has values in the last 100 rows
+        let late_col = batch.column_by_name("late").expect("late column missing");
+        let late_arr = late_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("late column not string array");
+        // First 900 rows should be null for "late"
+        for i in 0..900 {
+            assert!(
+                late_arr.is_null(i),
+                "row {i}: expected null for 'late', got {:?}",
+                late_arr.value(i)
+            );
+        }
+        // Last 100 rows should have values
+        for i in 900..1000 {
+            assert!(
+                !late_arr.is_null(i),
+                "row {i}: expected value for 'late', got null"
+            );
+            assert!(
+                late_arr.value(i).starts_with("new"),
+                "row {i}: expected 'new{i}', got {:?}",
+                late_arr.value(i)
+            );
+        }
+    }
+
+    #[test]
+    fn all_columns_discovered_no_data_loss() {
+        // Test that all columns from a file are discovered, even with sparse data
+        let mut data = Vec::new();
+        // Mix of columns across rows
+        let rows: Vec<&[u8]> = vec![
+            b"a=1\tb=2\tc=3\n",
+            b"b=5\td=6\n",
+            b"a=7\tc=8\te=9\n",
+            b"f=10\n",
+            b"a=11\tb=12\tc=13\td=14\te=15\tf=16\n",
+        ];
+        for row in &rows {
+            data.extend_from_slice(row);
+        }
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(&data, &splitter, &parser, &plan);
+
+        // All 6 columns must be discovered
+        let cols = names(&schema);
+        assert_eq!(cols.len(), 6, "expected 6 columns, got {:?}", cols);
+        assert!(cols.contains(&"a"));
+        assert!(cols.contains(&"b"));
+        assert!(cols.contains(&"c"));
+        assert!(cols.contains(&"d"));
+        assert!(cols.contains(&"e"));
+        assert!(cols.contains(&"f"));
+
+        // Parse all data and verify values
+        let mut builder = crate::engine::TableBuilder::with_plan(1024, Arc::new(plan.clone()));
+        builder.ensure_schema(&schema).unwrap();
+        parser.parse_chunk(&data, &mut builder).unwrap();
+        let batch = builder.finish().unwrap();
+
+        assert_eq!(batch.num_rows(), 5);
+        assert_eq!(batch.num_columns(), 6);
+
+        // Verify specific values
+        let a_col = batch.column_by_name("a").unwrap();
+        let a_arr = a_col.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        assert_eq!(a_arr.value(0), "1");
+        assert_eq!(a_arr.value(2), "7");
+        assert_eq!(a_arr.value(4), "11");
+    }
+
+    #[test]
+    fn dynamic_sizing_discovers_same_columns() {
+        // Verify that dynamic window sizing discovers the same columns
+        // as the fixed 16-window approach
+        let mut data = Vec::new();
+        // Create data with columns spread across the file
+        for i in 0..1000 {
+            if i < 100 {
+                // First 10%: columns a, b
+                data.extend_from_slice(format!("a={i}\tb={i}\n").as_bytes());
+            } else if i < 500 {
+                // Middle 40%: columns a, b, c
+                data.extend_from_slice(format!("a={i}\tb={i}\tc={i}\n").as_bytes());
+            } else if i < 900 {
+                // Next 40%: columns a, b, c, d
+                data.extend_from_slice(format!("a={i}\tb={i}\tc={i}\td={i}\n").as_bytes());
+            } else {
+                // Last 10%: columns a, b, c, d, e (late column)
+                data.extend_from_slice(format!("a={i}\tb={i}\tc={i}\td={i}\te={i}\n").as_bytes());
+            }
+        }
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(&data, &splitter, &parser, &plan);
+
+        // All 5 columns must be discovered
+        let cols = names(&schema);
+        assert_eq!(cols.len(), 5, "expected 5 columns, got {:?}", cols);
+        assert!(cols.contains(&"a"));
+        assert!(cols.contains(&"b"));
+        assert!(cols.contains(&"c"));
+        assert!(cols.contains(&"d"));
+        assert!(cols.contains(&"e"));
+
+        // Parse and verify
+        let mut builder = crate::engine::TableBuilder::with_plan(1024, Arc::new(plan.clone()));
+        builder.ensure_schema(&schema).unwrap();
+        parser.parse_chunk(&data, &mut builder).unwrap();
+        let batch = builder.finish().unwrap();
+
+        assert_eq!(batch.num_rows(), 1000);
+        assert_eq!(batch.num_columns(), 5);
+    }
+
+    #[test]
+    fn column_order_consistent_across_file_sizes() {
+        // Verify that column order is consistent regardless of file size
+        // This ensures no data reordering issues
+        let make_data = |n: usize| -> Vec<u8> {
+            let mut data = Vec::new();
+            for i in 0..n {
+                data.extend_from_slice(format!("x={i}\ty={i}\tz={i}\n").as_bytes());
+            }
+            data
+        };
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+
+        // Test with different file sizes
+        let sizes = vec![10, 100, 1000];
+        let mut first_order: Option<Vec<String>> = None;
+
+        for size in sizes {
+            let data = make_data(size);
+            let schema = discover_schema_for_bytes(&data, &splitter, &parser, &plan);
+            let cols: Vec<String> = schema.column_names().iter().map(|s| s.to_string()).collect();
+
+            if let Some(ref order) = first_order {
+                assert_eq!(
+                    &cols, order,
+                    "column order changed for size {size}: {cols:?} vs {order:?}"
+                );
+            } else {
+                first_order = Some(cols);
+            }
+        }
+    }
+
+    #[test]
+    fn esoteric_sparse_schema_one_column_per_row() {
+        // Each row has a unique column name - extremely sparse
+        let mut data = Vec::new();
+        for i in 0..100 {
+            data.extend_from_slice(format!("col_{i}={i}\n").as_bytes());
+        }
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(&data, &splitter, &parser, &plan);
+
+        // All 100 columns should be discovered
+        let cols = names(&schema);
+        assert_eq!(cols.len(), 100, "expected 100 columns, got {:?}", cols.len());
+    }
+
+    #[test]
+    fn esoteric_empty_rows() {
+        // File with many empty rows interspersed
+        let mut data = Vec::new();
+        for i in 0..50 {
+            data.extend_from_slice(format!("a={i}\n").as_bytes());
+            data.extend_from_slice(b"\n"); // empty row
+            data.extend_from_slice(b"\n"); // another empty row
+            data.extend_from_slice(format!("b={i}\n").as_bytes());
+        }
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(&data, &splitter, &parser, &plan);
+
+        let cols = names(&schema);
+        assert!(cols.contains(&"a"), "column 'a' missing");
+        assert!(cols.contains(&"b"), "column 'b' missing");
+    }
+
+    #[test]
+    fn esoteric_single_character_columns() {
+        // Very short column names
+        let data = b"a=1\tb=2\tc=3\nd=4\te=5\n";
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(data, &splitter, &parser, &plan);
+
+        let cols = names(&schema);
+        assert_eq!(cols.len(), 5);
+        assert!(cols.contains(&"a"));
+        assert!(cols.contains(&"e"));
+    }
+
+    #[test]
+    fn esoteric_unicode_column_names() {
+        // Unicode characters in column names
+        let data = "名前=Alice\t年齢=30\n名前=Bob\t年齢=25\n".as_bytes();
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(data, &splitter, &parser, &plan);
+
+        let cols = names(&schema);
+        assert_eq!(cols.len(), 2);
+        assert!(cols.contains(&"名前"));
+        assert!(cols.contains(&"年齢"));
+    }
+
+    #[test]
+    fn esoteric_very_long_column_names() {
+        // Very long column names (100+ chars)
+        let long_name = "a".repeat(200);
+        let data = format!("{long_name}=1\tb=2\n{long_name}=3\tc=4\n");
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(data.as_bytes(), &splitter, &parser, &plan);
+
+        let cols = names(&schema);
+        assert_eq!(cols.len(), 3);
+        assert!(cols.contains(&long_name.as_str()));
+    }
+
+    #[test]
+    fn esoteric_duplicate_columns_in_row() {
+        // Same column appears multiple times in a row
+        let data = b"a=1\ta=2\ta=3\tb=4\n";
+
+        let splitter = NullSplitter;
+        let parser = NameValueParser;
+        let plan = ExecutionPlan::new();
+        let schema = discover_schema_for_bytes(data, &splitter, &parser, &plan);
+
+        let cols = names(&schema);
+        assert_eq!(cols.len(), 2, "expected 2 unique columns, got {:?}", cols);
+        assert!(cols.contains(&"a"));
+        assert!(cols.contains(&"b"));
     }
 }
