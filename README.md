@@ -44,6 +44,15 @@ implementing two small traits: `Splitter` and `RecordParser`.
 `rypipe` itself does **not** ship parsers. Those live in separate adapter
 packages. Install the engine plus the adapters you need.
 
+### Origin: crxml
+
+rypipe was originally developed as the ingestion engine for `crxml`, a
+Crystal Reports XML adapter. The engine's design, performance characteristics,
+and API were shaped by real-world production use with crxml. We use crxml
+as the primary example throughout the documentation because it demonstrates
+the full power of the framework: complex nested schemas, large files,
+parallel processing, and advanced filtering.
+
 ## Quick start
 
 ```bash
@@ -74,9 +83,11 @@ df = source.to_pandas()
 - **One runtime, many formats.** XML, JSON, CSV, and any future format share
   the same parallel scheduler, memory-bounded executor, and pushdown
   infrastructure. An adapter is two small traits, not a full engine.
+  crxml (Crystal Reports XML) is the reference adapter that proved this model.
 
 - **Performance without compromise.** Parallel ~4.5 GB/s, single-thread ~1 GB/s.
   Zero-copy Arrow export. Predicate-first evaluation. Layout prediction via memcmp.
+  Performance numbers are measured against crxml workloads.
 
 - **Correctness by construction.** Differential testing, fuzz targets, property
   tests, and a tier-ladder profiler.
@@ -108,6 +119,7 @@ df = source.to_pandas()
 |-------|---------|
 | `rypipe-core` | Pure Rust engine: `Value`, `ExecutionPlan`, `TableBuilder`, `Pipeline`, parallel/bounded drivers, Arrow export |
 | `rypipe-python` | PyO3 bindings for adapter packages; exposes the `rypipe` package |
+| `rypipe-test` | Property-based testing helpers and fixtures for adapter development |
 
 ## Documentation
 
