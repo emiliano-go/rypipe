@@ -1,0 +1,14 @@
+[package]
+name = "rypipe-test"
+version = "2.2.0"
+edition = "2021"
+license = "MIT"
+description = "Property-based testing helpers and fixtures for rypipe adapters"
+repository = "https://github.com/emiliano-go/rypipe"
+authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
+
+[dependencies]
+rypipe-core = { path = "../rypipe-core" }
+proptest = "1"
+memchr = "2"
+arrow = { version = "55.2", default-features = false }
