@@ -130,11 +130,42 @@ def _build_predicate_from_spec(spec: dict):
         return lambda r: val
     if "field" in spec and "op" in spec:
         op = spec["op"]
+        if op == "is_null":
+            return _IsNullPredicate(spec["field"])
+        if op == "is_type":
+            return _IsTypePredicate(spec["field"], spec["value"])
         if "value" in spec:
             if op == "starts_with":
                 return _StartsWithPredicate(spec["field"], spec["value"])
             if op == "ends_with":
                 return _EndsWithPredicate(spec["field"], spec["value"])
+            if op == "contains":
+                field, value = spec["field"], spec["value"]
+                return lambda r: value in str(r.get(field, ""))
+            if op in ("strip", "lstrip", "rstrip", "lower", "upper"):
+                field, value, cmp_op = spec["field"], spec["value"], spec.get("cmp_op", "==")
+                cmp_fns = {
+                    "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
+                    ">": lambda a, b: a > b, "<": lambda a, b: a < b,
+                    ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
+                }
+                cmp_fn = cmp_fns.get(cmp_op, cmp_fns["=="])
+                transforms = {
+                    "strip": lambda s: s.strip(), "lstrip": lambda s: s.lstrip(),
+                    "rstrip": lambda s: s.rstrip(), "lower": lambda s: s.lower(),
+                    "upper": lambda s: s.upper(),
+                }
+                transform = transforms[op]
+                return lambda r: cmp_fn(transform(str(r.get(field, ""))), value)
+            if op == "length":
+                field, value, cmp_op = spec["field"], spec["value"], spec.get("cmp_op", ">")
+                cmp_fns = {
+                    "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
+                    ">": lambda a, b: a > b, "<": lambda a, b: a < b,
+                    ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
+                }
+                cmp_fn = cmp_fns.get(cmp_op, cmp_fns[">"])
+                return lambda r: cmp_fn(float(len(str(r.get(field, "")))), float(value))
             if "arith_op" in spec:
                 # Arithmetic compare: field * arith_value op cmp_value
                 arith_op = spec["arith_op"]
@@ -158,6 +189,15 @@ def _build_predicate_from_spec(spec: dict):
                 cmp_fn = cmp_fns[op]
                 field = spec["field"]
                 return lambda r: cmp_fn(arith_fn(float(r.get(field, 0)), arith_val), float(cmp_val))
+            if "old" in spec and "new" in spec:
+                field, old, new, cmp_op, value = spec["field"], spec["old"], spec["new"], spec.get("cmp_op", "=="), spec["value"]
+                cmp_fns = {
+                    "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
+                    ">": lambda a, b: a > b, "<": lambda a, b: a < b,
+                    ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
+                }
+                cmp_fn = cmp_fns.get(cmp_op, cmp_fns["=="])
+                return lambda r: cmp_fn(str(r.get(field, "")).replace(old, new), value)
             return _ConstantPredicate(spec["field"], op, spec["value"])
         if "values" in spec:
             return _InPredicate(spec["field"], spec["values"], negate=(op == "not_in"))
@@ -178,6 +218,63 @@ def _build_predicate_from_spec(spec: dict):
     return None
 
 
+class _IsNullPredicate:
+    """Fusable predicate: r["field"] is None or missing"""
+    __slots__ = ("_field",)
+
+    def __init__(self, field: str):
+        self._field = field
+
+    def __call__(self, record: dict) -> bool:
+        return record.get(self._field) is None
+
+
+class _IsTypePredicate:
+    """Fusable predicate: r["field"] is of the given type"""
+    __slots__ = ("_field", "_field_type")
+
+    _VALID_TYPES = frozenset({
+        "string", "int64", "float64", "bool", "boolean",
+        "dictionary", "date32", "timestamp", "decimal128",
+    })
+
+    def __init__(self, field: str, field_type: str):
+        if field_type.lower() not in self._VALID_TYPES:
+            raise ValueError(
+                f"FilterRows: unsupported type {field_type!r}; "
+                f"valid types: {', '.join(sorted(self._VALID_TYPES))}"
+            )
+        self._field = field
+        self._field_type = field_type.lower()
+
+    def __call__(self, record: dict) -> bool:
+        val = record.get(self._field)
+        if val is None:
+            return False
+        # Type checking based on Python type
+        if self._field_type in ("int64", "integer"):
+            return isinstance(val, int) and not isinstance(val, bool)
+        elif self._field_type in ("float64", "float"):
+            return isinstance(val, float)
+        elif self._field_type in ("bool", "boolean"):
+            return isinstance(val, bool)
+        elif self._field_type in ("string", "str"):
+            return isinstance(val, str)
+        elif self._field_type == "dictionary":
+            # Dictionary is an implementation detail; treat as string for Python
+            return isinstance(val, str)
+        elif self._field_type == "date32":
+            # Date32 is stored as int in Rust; in Python it could be various types
+            return isinstance(val, (int, str))
+        elif self._field_type == "timestamp":
+            # Timestamp is stored as int in Rust; in Python it could be various types
+            return isinstance(val, (int, str))
+        elif self._field_type == "decimal128":
+            # Decimal128 is stored as int in Rust; in Python it could be various types
+            return isinstance(val, (int, float, str))
+        return False
+
+
 class FilterRows:
     __slots__ = ("_predicate", "_filter_spec")
 
@@ -190,18 +287,26 @@ class FilterRows:
         value=None,
         field_a=None,
         field_b=None,
+        is_null=False,
+        is_type=None,
     ):
         if predicate is not None:
             # Try to compile the lambda into a fusable filter spec
             spec = _analyze_lambda(predicate)
             if spec is not None:
-                # Lambda was compiled successfully — use the spec for fusion
+                # Lambda was compiled successfully; use the spec for fusion
                 self._filter_spec = spec
                 self._predicate = _build_predicate_from_spec(spec)
             else:
-                # Unknown pattern — fall back to Python execution
+                # Unknown pattern; fall back to Python execution
                 self._predicate = predicate
                 self._filter_spec = None
+        elif is_null and field is not None:
+            self._filter_spec = {"field": field, "op": "is_null"}
+            self._predicate = _IsNullPredicate(field)
+        elif is_type is not None and field is not None:
+            self._filter_spec = {"field": field, "op": "is_type", "value": is_type}
+            self._predicate = _IsTypePredicate(field, is_type)
         elif field is not None and op is not None and value is not None:
             self._filter_spec = {"field": field, "op": op, "value": value}
             self._predicate = _ConstantPredicate(field, op, value)
@@ -212,9 +317,11 @@ class FilterRows:
             raise ValueError(
                 "FilterRows requires either a callable predicate or "
                 "keyword arguments (field+op+value for constant filter, "
-                "or field_a+op+field_b for column comparison). "
+                "field_a+op+field_b for column comparison, "
+                "field+is_null for null check, or field+is_type for type check). "
                 f"Got predicate={predicate!r}, field={field!r}, op={op!r}, "
-                f"value={value!r}, field_a={field_a!r}, field_b={field_b!r}"
+                f"value={value!r}, field_a={field_a!r}, field_b={field_b!r}, "
+                f"is_null={is_null!r}, is_type={is_type!r}"
             )
 
     def apply(self, record: dict) -> dict | None:
