@@ -40,6 +40,12 @@ pub struct DiscoveryOpts {
     pub windows: usize,
     /// Bytes per window.
     pub window_bytes: usize,
+    /// Whether to always scan the tail of the file to catch late-appearing columns.
+    pub always_scan_tail: bool,
+    /// Disable auto-discovery entirely. When true, no schema discovery is
+    /// performed and the engine falls back to full parsing. This is an escape
+    /// hatch for esoteric formats where discovery may be unreliable.
+    pub disable_auto_schema: bool,
 }
 
 impl Default for DiscoveryOpts {
@@ -48,7 +54,34 @@ impl Default for DiscoveryOpts {
             full_scan_threshold: 128 * 1024 * 1024, // 128 MiB
             windows: 16,
             window_bytes: 2 * 1024 * 1024, // 2 MiB
+            always_scan_tail: true,
+            disable_auto_schema: false,
         }
+    }
+}
+
+/// Compute dynamic window count based on file size.
+///
+/// Smaller files use fewer windows (or full scan), larger files use more
+/// to improve coverage of rare columns.
+pub fn dynamic_window_count(file_size: u64) -> usize {
+    if file_size < 128 * 1024 * 1024 {
+        0 // full scan
+    } else if file_size < 1024 * 1024 * 1024 {
+        16 // 32 MiB total at 2 MiB/window
+    } else if file_size < 10 * 1024 * 1024 * 1024 {
+        32 // 128 MiB total at 4 MiB/window
+    } else {
+        64 // 256 MiB total at 4 MiB/window
+    }
+}
+
+/// Compute dynamic window size based on file size.
+pub fn dynamic_window_size(file_size: u64) -> usize {
+    if file_size < 1024 * 1024 * 1024 {
+        2 * 1024 * 1024 // 2 MiB for files < 1 GiB
+    } else {
+        4 * 1024 * 1024 // 4 MiB for files >= 1 GiB
     }
 }
 
@@ -324,5 +357,38 @@ mod tests {
         assert!(builder.column_names().contains(&"X".to_string()));
         assert!(builder.column_names().contains(&"Y".to_string()));
         assert!(builder.column_names().contains(&"Z".to_string()));
+    }
+
+    #[test]
+    fn test_dynamic_window_count() {
+        // Small file: full scan
+        assert_eq!(dynamic_window_count(50 * 1024 * 1024), 0);
+        // Medium file: 16 windows
+        assert_eq!(dynamic_window_count(500 * 1024 * 1024), 16);
+        // Large file: 32 windows
+        assert_eq!(dynamic_window_count(2 * 1024 * 1024 * 1024), 32);
+        // Very large file: 64 windows
+        assert_eq!(dynamic_window_count(20 * 1024 * 1024 * 1024), 64);
+    }
+
+    #[test]
+    fn test_dynamic_window_size() {
+        // Small file: 2 MiB windows
+        assert_eq!(dynamic_window_size(500 * 1024 * 1024), 2 * 1024 * 1024);
+        // Large file: 4 MiB windows
+        assert_eq!(dynamic_window_size(2 * 1024 * 1024 * 1024), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_disable_auto_schema_default() {
+        let opts = DiscoveryOpts::default();
+        assert!(!opts.disable_auto_schema, "auto_schema should be enabled by default");
+    }
+
+    #[test]
+    fn test_disable_auto_schema_escape_hatch() {
+        let mut opts = DiscoveryOpts::default();
+        opts.disable_auto_schema = true;
+        assert!(opts.disable_auto_schema, "auto_schema should be disabled");
     }
 }
