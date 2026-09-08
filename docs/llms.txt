@@ -7,30 +7,28 @@
 
 ## Tutorial
 - [Tutorial index](https://rypipe.emiliano-go.com/tutorial/): Install rypipe + an adapter, read your first file
-- [First Steps](https://rypipe.emiliano-go.com/tutorial/first-steps/): rypipe.read() in depth; format inference, kwargs, schema hints
-- [Pipeline](https://rypipe.emiliano-go.com/tutorial/pipeline/): Chain stages with the | operator
-- [Stages](https://rypipe.emiliano-go.com/tutorial/stages/): Re-export and use CastTypes, FilterRows, RenameFields, DropFields
-- [Plans](https://rypipe.emiliano-go.com/tutorial/plans/): Execution plans, pushdown, and filter predicates
-- [Sinks](https://rypipe.emiliano-go.com/tutorial/sinks/): to_arrow, to_pandas, to_polars, to_parquet, to_csv
+- [First Steps](https://rypipe.emiliano-go.com/tutorial/first-steps/): Create a Source, get a DataFrame, chain your first stage
+- [Pipeline](https://rypipe.emiliano-go.com/tutorial/pipeline/): Chain stages with the | operator; plans and fusion
+- [Stages](https://rypipe.emiliano-go.com/tutorial/stages/): CastTypes, FilterRows, RenameFields, DropFields, combinators
+- [Sinks](https://rypipe.emiliano-go.com/tutorial/sinks/): to_arrow, to_pandas, to_polars, to_parquet, collect, to_csv
 - [Streaming](https://rypipe.emiliano-go.com/tutorial/streaming/): iter_record_batches with bounded memory
-- [Configuration](https://rypipe.emiliano-go.com/tutorial/configuration/): All rypipe.read() kwargs and Source constructor options
-- [Building an Adapter](https://rypipe.emiliano-go.com/tutorial/building-an-adapter/): End-to-end adapter tutorial
+- [Configuration](https://rypipe.emiliano-go.com/tutorial/configuration/): rypipe.read() options and Source constructor options
 
-## Writing Adapters
-- [Writing Adapters overview](https://rypipe.emiliano-go.com/writing-adapters/): The crxml formula; Source, Adapter, stages, registration
-- [Quick Start](https://rypipe.emiliano-go.com/writing-adapters/quickstart/): Build a working adapter in 15 minutes
-- [Python Wiring](https://rypipe.emiliano-go.com/writing-adapters/python-wiring/): Source subclass, adapter class, registration, re-exported stages
-- [Rust Creation](https://rypipe.emiliano-go.com/writing-adapters/rust-creation/): Splitter, RecordParser, ColumnarSink implementation guide
-- [Schema](https://rypipe.emiliano-go.com/writing-adapters/schema/): Schema declaration for maximum performance
-- [Techniques](https://rypipe.emiliano-go.com/writing-adapters/techniques/): Performance optimizations for production adapters
-- [Anti-patterns](https://rypipe.emiliano-go.com/writing-adapters/anti-patterns/): Common mistakes to avoid
-- [Splitter](https://rypipe.emiliano-go.com/writing-adapters/splitter/): The Splitter trait; finding row boundaries
-- [Parser](https://rypipe.emiliano-go.com/writing-adapters/parser/): The RecordParser trait; extracting field values
-- [Sink](https://rypipe.emiliano-go.com/writing-adapters/sink/): The ColumnarSink trait; accumulating typed columns
-- [Scan primitives](https://rypipe.emiliano-go.com/writing-adapters/scan/): Portable byte-search primitives
-- [Skip regions](https://rypipe.emiliano-go.com/writing-adapters/skip-regions/): Marking regions to skip during parsing
-- [Chunk planning](https://rypipe.emiliano-go.com/writing-adapters/chunk-planning/): Estimating rows per chunk for balanced parallelism
-- [Examples](https://rypipe.emiliano-go.com/writing-adapters/examples/): Worked CSV, JSONL, and TSV adapters
+## Building an Adapter
+- [Building an Adapter overview](https://rypipe.emiliano-go.com/building-adapters/): The crxml formula; Source, Adapter, stages, registration
+- [Walkthrough](https://rypipe.emiliano-go.com/building-adapters/walkthrough/): Build a complete working adapter, step by step
+- [Python Wiring](https://rypipe.emiliano-go.com/building-adapters/python-wiring/): Source subclass, adapter class, registration, re-exported stages and sinks, kwargs, engine selection, streaming
+- [Rust Creation](https://rypipe.emiliano-go.com/building-adapters/rust-creation/): Splitter, RecordParser, ColumnarSink implementation guide
+- [Schema](https://rypipe.emiliano-go.com/building-adapters/schema/): Schema declaration for maximum performance
+- [Techniques](https://rypipe.emiliano-go.com/building-adapters/techniques/): Performance optimizations for production adapters
+- [Anti-patterns](https://rypipe.emiliano-go.com/building-adapters/anti-patterns/): Common mistakes to avoid
+- [Splitter](https://rypipe.emiliano-go.com/building-adapters/splitter/): The Splitter trait; finding row boundaries
+- [Parser](https://rypipe.emiliano-go.com/building-adapters/parser/): The RecordParser trait; extracting field values
+- [Sink](https://rypipe.emiliano-go.com/building-adapters/sink/): The ColumnarSink trait; accumulating typed columns
+- [Scan primitives](https://rypipe.emiliano-go.com/building-adapters/scan/): Portable byte-search primitives
+- [Skip regions](https://rypipe.emiliano-go.com/building-adapters/skip-regions/): Marking regions to skip during parsing
+- [Chunk planning](https://rypipe.emiliano-go.com/building-adapters/chunk-planning/): Estimating rows per chunk for balanced parallelism
+- [Examples](https://rypipe.emiliano-go.com/building-adapters/examples/): Worked CSV, JSONL, and TSV adapters
 
 ## Advanced
 - [Advanced overview](https://rypipe.emiliano-go.com/advanced/): Roadmap and checklist for the advanced section
