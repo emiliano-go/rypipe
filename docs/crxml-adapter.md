@@ -123,15 +123,18 @@ class CrystalXMLAdapter:
 rypipe.register_adapter("crxml", CrystalXMLAdapter(), extensions=[".xml"])
 ```
 
-Importing `crxml` now makes the adapter available automatically:
+This runs automatically when the package is imported, so end users only
+ever import `crxml` itself:
 
 ```python
-import rypipe
+from crxml import CrystalXMLSource
 
-table = rypipe.read("report.xml", format="crxml", row_tag="Row")
+table = CrystalXMLSource("report.xml", row_tag="Row").to_arrow()
 ```
 
-The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from `CrystalXMLSource` are passed through, so users get the full engine feature set through the generic `rypipe` API.
+The same `row_tag`, `field_types`, `filter`, and `memory` options from
+`CrystalXMLSource` give users the full engine feature set through the
+adapter's own API.
 
 ## Why it is fast { #why-it-is-fast }
 
@@ -153,7 +156,7 @@ The same `row_tag`, `field_types`, `filter`, `memory`, and `chunks` options from
 5. **Skip dropped fields in the scanner**: check `wants`/`resolve` *before* visiting `<Value>` children: `field_element` `scanner.rs:210` byte-jumps to `</Field>` via `Finder` (drop_all 4183 MB/s, 66% win).
 6. **Reuse the scanner for both engines**: columnar `scan_chunk` `scanner.rs:54` and streaming `scan_one_row` `scanner.rs:81` share `parse_row` `scanner.rs:73`, so one optimization benefits `stream`/`columnar`/`parallel`/`bounded`.
 7. **Measure first**: `perf` `scan_open_tag` 8.3% + `field_element` 8.6% + `push_field_resolved` 2.76% vs `rep_movs` 3% tells you `mmap` is 3% but scanner is 35%: focus there. `benchmarks/bench_extended.py` (104 benchmarks/file) covers all engines×sinks×pushdowns×chunk/bounded/batch/pipeline.
-8. **Register with `rypipe`**: thin `CrystalXMLAdapter` keeps `rypipe.read(format="crxml")` while Rust stays fast.
+8. **Register with the framework**: a thin `CrystalXMLAdapter` registers the format on `import crxml`, so users get a self-contained package while Rust stays fast.
 
 ## Source { #source }
 
