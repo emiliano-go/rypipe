@@ -46,9 +46,22 @@ On network storage, mmap can trigger many small page faults over a high-latency 
 
 In bounded stream mode, the input buffer is dropped before the parse phase begins. This releases mapped pages before downstream work starts. Combined with `prefault=False`, this keeps peak memory close to the parse budget even when the file is much larger than RAM.
 
+## Transparent decompression { #transparent-decompression }
+
+`InputBuffer::open` sniffs the leading magic bytes of the file before choosing an input mode. When it detects a supported codec, the file is transparently decompressed into an owned buffer and every execution mode operates on the decompressed bytes. No adapter work is required.
+
+| Codec | Magic bytes | Cargo feature |
+|-------|-------------|---------------|
+| gzip | `1f 8b` | `gzip` |
+| zstd | `28 b5 2f fd` | `zstd` |
+| lz4 (frame) | `04 22 4d 18` | `lz4` |
+
+Detection is by content, not by file extension. Because decompression produces an owned `Vec<u8>`, `use_mmap` and `prefault` have no effect on compressed inputs, and peak memory includes the full decompressed size. For very large compressed files, plan the memory budget accordingly.
+
 ## Summary { #summary }
 
 - Use `mmap` + `prefault=True` for cached or RAM-resident files.
 - Use `mmap` + `prefault=False` for large streaming files.
 - Use buffered reads for network or portable deployments.
+- Compressed inputs (gzip, zstd, lz4) decompress transparently into memory.
 - Match the parser throughput to storage bandwidth; do not over-parallelize an I/O-bound workload.
