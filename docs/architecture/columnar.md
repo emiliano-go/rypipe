@@ -102,6 +102,7 @@ Flat contiguous array. Zero-copy Arrow export via `to_arrow()` which moves
 ### Push paths { #push-paths }
 
 `push_value(Value<'_>)` is called for every field:
+
 - `Value::Str(s)` → `push_str(Some(s))` → parse according to column type
 - `Value::Int64(i)` into Int64 is native, into Float64 widens
 - Cross-type mismatches become `None`
@@ -142,6 +143,7 @@ This avoids the serial merge path while keeping the fast export path.
 ### Merging and promotion { #merging-and-promotion }
 
 `extend_owned(other)` merges by consuming other. Both must be same variant:
+
 - String via `StrColumn::append` (base shift)
 - Numeric via `Vec::append`
 - Timestamp checks `unit_a == unit_b` else `Error::Merge`
