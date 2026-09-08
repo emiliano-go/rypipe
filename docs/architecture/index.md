@@ -122,6 +122,7 @@ See [Schema](./schema.md) for the detailed architecture of schema handling.
 ## State and ownership { #state-and-ownership }
 
 `TableBuilder` owns three parallel structures:
+
 - `columns: Vec<ColumnBuilder>` (dense storage)
 - `field_index: HashMap<String, usize>` (name to Vec index)
 - `column_order: Vec<String>` (output order)
@@ -135,6 +136,7 @@ so the same pipeline can be reused across files and execution modes.
 ## Testing strategy { #testing-strategy }
 
 Every optimization has a test that verifies correctness:
+
 - Splitter tests: monotonic points, coverage, comment/CDATA rejection.
 - Engine tests: extend, last-write-wins, rename, drop, filter, typed columns.
 - Columnar tests: push/pop, split_off, arrow export, dictionary upgrade.
