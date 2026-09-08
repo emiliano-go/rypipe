@@ -76,3 +76,26 @@ returns `false` in O(1).
 When regions exist, the cost is O(window × num_openers) per candidate. For
 typical XML/CSV with 1-2 openers and 64 KiB windows, this is negligible
 compared to the chunk-planning cost.
+
+## Build and test { #build-and-test }
+
+The correctness property to test: no split point ever lands inside a skip
+region. This test uses a CSV-style splitter whose `skip_regions` treats
+double quotes as regions, on input containing a quoted field with an
+embedded newline:
+
+```console
+$ cargo test skip_regions
+running 1 test
+test skip_region_tests::skip_regions_reject_splits_inside_quotes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+A plain newline splitter accepts a bogus boundary at the `y` inside
+`"x\ny"`; with `skip_regions` the candidate is rejected and the engine
+falls back to one safe chunk (`[0, len]`). Note that with same-byte
+openers and closers (quotes), the rejection is conservative: the
+candidate right after the closing quote is dropped too, because the
+backward scan reads the closing quote as an opener. Prefer distinct
+opener/closer pairs (like `<!--` and `-->`) when your format allows it.
