@@ -145,6 +145,7 @@ else `Sequential`.
 ### Compression detection { #compression-detection }
 
 Reads first 4 bytes, matches magic:
+
 - `1f 8b` → gzip (feature `gzip`)
 - `28 b5 2f fd` → zstd (feature `zstd`)
 - `04 22 4d 18` → lz4 frame (feature `lz4`)
