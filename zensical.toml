@@ -59,31 +59,29 @@ name = "rypipe on PyPI"
 "Tutorial" = [
     "tutorial/index.md",
     { "First Steps" = "tutorial/first-steps.md" },
-    { "Building an Adapter" = "tutorial/building-an-adapter.md" },
     { "Pipeline" = "tutorial/pipeline.md" },
     { "Stages" = "tutorial/stages.md" },
-    { "Plans" = "tutorial/plans.md" },
     { "Sinks" = "tutorial/sinks.md" },
     { "Streaming" = "tutorial/streaming.md" },
     { "Configuration" = "tutorial/configuration.md" },
 ]
 
 [[project.nav]]
-"Writing Adapters" = [
-    "writing-adapters/index.md",
-    { "Quick start" = "writing-adapters/quickstart.md" },
-    { "Python wiring" = "writing-adapters/python-wiring.md" },
-    { "Rust creation" = "writing-adapters/rust-creation.md" },
-    { "Schema" = "writing-adapters/schema.md" },
-    { "Techniques" = "writing-adapters/techniques.md" },
-    { "Anti-patterns" = "writing-adapters/anti-patterns.md" },
-    { "Splitter" = "writing-adapters/splitter.md" },
-    { "Parser" = "writing-adapters/parser.md" },
-    { "Sink" = "writing-adapters/sink.md" },
-    { "Scan primitives" = "writing-adapters/scan.md" },
-    { "Skip regions" = "writing-adapters/skip-regions.md" },
-    { "Chunk planning" = "writing-adapters/chunk-planning.md" },
-    { "Examples" = "writing-adapters/examples.md" },
+"Building an Adapter" = [
+    "building-adapters/index.md",
+    { "Walkthrough" = "building-adapters/walkthrough.md" },
+    { "Python wiring" = "building-adapters/python-wiring.md" },
+    { "Rust creation" = "building-adapters/rust-creation.md" },
+    { "Splitter" = "building-adapters/splitter.md" },
+    { "Parser" = "building-adapters/parser.md" },
+    { "Sink" = "building-adapters/sink.md" },
+    { "Schema" = "building-adapters/schema.md" },
+    { "Scan primitives" = "building-adapters/scan.md" },
+    { "Skip regions" = "building-adapters/skip-regions.md" },
+    { "Chunk planning" = "building-adapters/chunk-planning.md" },
+    { "Techniques" = "building-adapters/techniques.md" },
+    { "Anti-patterns" = "building-adapters/anti-patterns.md" },
+    { "Examples" = "building-adapters/examples.md" },
 ]
 
 [[project.nav]]
@@ -92,6 +90,7 @@ name = "rypipe on PyPI"
     { "Pushdown fusion" = "advanced/fusion.md" },
     { "Stage protocol" = "advanced/stage-protocol.md" },
     { "Execution modes" = "advanced/execution-modes.md" },
+    { "Streaming" = "advanced/streaming.md" },
     { "Memory and chunking" = "advanced/memory-and-chunking.md" },
     { "Parallelism" = "advanced/parallelism.md" },
     { "Dictionary encoding" = "advanced/dictionary-encoding.md" },
