@@ -128,14 +128,48 @@ Override this for a measurable speedup on hot paths.
 
 ### Push method hierarchy (cost model) { #push-method-hierarchy }
 
-| Method | Cost | When to use |
-|--------|------|-------------|
-| `put_field_at(slot, value)` | ~5 ns | After `expect_slot` match, fastest, no resolution |
-| `put_field_resolved(name, value)` | ~10 ns | After `resolve()`: skips rename lookup |
-| `resolve_and_put(name, value)` | ~15 ns | Default, single resolve + push |
-| `put_field(name, value)` | ~20 ns | Slowest, full resolve + push |
+The `ColumnarSink` trait offers several ways to emit a field, from most to
+least work per call:
 
-Use the fastest method your context allows.
+| Method | Resolution work | When to use |
+|--------|-----------------|-------------|
+| `put_field_at(slot, value)` | None | After an `expect_slot` match; the slot is known |
+| `put_field_resolved(name, value)` | None | After a successful `resolve(name)` |
+| `resolve_and_put(name, value)` | One resolve | Convenience: resolve, then push if wanted |
+| `put_field(name, value)` | Full resolve + push | Default path |
+
+Raw-name variants (`resolve_raw`, `resolve_and_put_raw`) do the same jobs
+for parsers that hold field names as `&[u8]` and want to avoid a UTF-8
+conversion per field. `put_row(&[(name, value)])` emits a whole row in one
+call when the parser already has all fields collected.
+
+Use the cheapest method your context allows.
+
+### The slot and scan fast paths { #slot-and-scan-fast-paths }
+
+For maximum throughput, the sink exposes a cooperative protocol that lets a
+scanner skip work the engine does not need:
+
+- `needs_value()` returning `false` puts the scanner in locate-only mode:
+  it reports field positions via `resolve()` without extracting values.
+  Schema discovery uses this.
+- `needs_resolve()` returning `false` tells the scanner it can push values
+  without resolving names at all.
+- `wants(name)` lets the parser skip dropped or projected-out fields.
+- `wanted_mask()` exposes the wanted set as a bitmask for very wide rows.
+- `expect_slot(ordinal)` / `record_slot(ordinal, slot, raw_name)` /
+  `layout_broken(ordinal)` / `reset_child_ordinal()` implement a positional
+  slot protocol: when every row has the same field layout, the parser can
+  match fields by ordinal and push with `put_field_at`, skipping name
+  resolution entirely. If the layout changes mid-file, the parser reports
+  it through `layout_broken` and falls back to name-based pushes.
+- `row_satisfied()` returning `true` tells the parser the current row
+  already fails or passes everything downstream needs, so it can byte-jump
+  to the next row without extracting the remaining fields. This is the
+  optimization behind crxml's fastest benchmark numbers.
+
+All of these have default implementations, so a simple parser can ignore
+them and opt in one at a time.
 
 ## Error handling { #error-handling }
 
@@ -223,16 +257,36 @@ if sink.wants("internal_id") {
 
 For expensive extractions (deep XML paths, regex captures), this is a major win. Always check `wants` before doing work that the engine will discard.
 
-## `parse_tail` fallback { #parse_tail-fallback }
+## Split regions and chunk floors { #split-regions-and-chunk-floors }
 
-Chunks can start or end inside a row. A robust adapter has a fallback path that rescans from the nearest safe row start. crxml uses `parse_tail` to handle orphan close-tags at chunk boundaries without a serial pre-pass.
+Two splitter-related pieces are easy to miss:
+
+- `skip_regions()` returns a `SkipRegionFinder` (with `openers()`,
+  `closer_for(opener)`, and an optional `window()`) that describes regions
+  where a candidate boundary must be rejected, such as comments, CDATA
+  sections, or quoted strings. The engine checks candidates with
+  `in_skip_region`, so a `<Row` inside a comment never becomes a split
+  point.
+- `plan_chunk_count` (used by the default `find_split_points`) keeps the
+  chunk count in `[threads, 1024]` and enforces `MIN_CHUNK_BYTES` (2 MiB),
+  so tiny inputs do not collapse into per-row chunks.
+
+## Chunk-boundary rows { #parse_tail-fallback }
+
+Chunks can start or end inside a row. A robust adapter does not need a
+serial pre-pass to handle this: the splitter only emits boundaries at valid
+row starts, and the engine discards the incomplete trailing row of each
+chunk during `TableBuilder::normalize()`. Your parser just returns when it
+runs out of complete records, as shown in
+[Partial trailing rows](#partial-trailing-rows).
 
 ## Summary { #summary }
 
 - Split cheaply with `memchr`; defer full decoding.
-- Skip comments, CDATA, quotes, and strings to avoid false boundaries.
+- Declare skip regions (comments, CDATA, quotes) so false boundaries are rejected.
 - Borrow UTF-8 slices into the engine.
 - Emit sparse rows and respect `sink.wants`.
-- Handle trailing partial rows cleanly.
+- Opt into the sink fast paths (`put_field_at` slots, locate-only scans, `row_satisfied`) when profiles justify them.
+- Handle trailing partial rows cleanly; the engine discards the incomplete row.
 - Return `Err` for malformed input; never panic in `parse_chunk`.
-- Use the fastest push method your context allows (`put_field_at` > `put_field_resolved` > `resolve_and_put` > `put_field`).
+- Use the cheapest push method your context allows (`put_field_at` > `put_field_resolved` > `resolve_and_put` > `put_field`).
