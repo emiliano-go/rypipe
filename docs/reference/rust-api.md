@@ -1,7 +1,7 @@
 # Rust API Reference { #rust-api }
 
 This page is a reference for the **rypipe-core** Rust API. For a tutorial,
-see [Writing Adapters](../writing-adapters/index.md).
+see [Writing Adapters](../building-adapters/index.md).
 
 ## Crate structure { #crate-structure }
 
@@ -274,3 +274,18 @@ pub fn record_batch_to_pyarrow(
 | `XmlError` | `ParseError` | XML-specific parse error. |
 | `PlanError` | `PyException` | Invalid plan kwargs. |
 | `MergeError` | `PyException` | Schema mismatch between chunks. |
+
+### Error enum { #error }
+
+`rypipe_core::Error` is the `thiserror` enum returned by every fallible
+engine API:
+
+| Variant | Payload | Raised when |
+|---------|---------|-------------|
+| `Utf8` | `simdutf8::basic::Utf8Error` | Input bytes are not valid UTF-8. |
+| `Io` | `std::io::Error` | Read, seek, or mmap failure. |
+| `Plan` | `String` | Invalid or inconsistent execution plan. |
+| `Merge` | `String` | Chunk merge conflict (column type mismatch). |
+| `Arrow` | `arrow::error::ArrowError` | Arrow array/batch construction failure. |
+| `Parser` | `String` | The parser returned invalid data. |
+| `Lifetime` | `String` | The parser returned a borrowed value that outlives the input. |
