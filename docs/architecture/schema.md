@@ -4,7 +4,7 @@ This page documents the internal architecture of schema handling in rypipe.
 It covers `FrozenSchema`, `DiscoveryOpts`, the schema cache, `ensure_schema`,
 and the fast/merge export paths.
 
-For the adapter-author guide, see [Schema](../writing-adapters/schema.md).
+For the adapter-author guide, see [Schema](../building-adapters/schema.md).
 
 ## Overview { #overview }
 
