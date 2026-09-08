@@ -10,19 +10,22 @@ Pushdown fusion is the process by which the Python `Pipeline` rewrites a chain o
 ## A fused pipeline { #a-fused-pipeline }
 
 ```python
-from crxml import RenameFields, DropFields, FilterRows, CastTypes
+# Stages are imported from the adapter package; they are the same
+# classes the framework's stage protocol defines.
+from crxml import CrystalXMLSource, RenameFields, DropFields, FilterRows, CastTypes, to_dataframe
 
-source = MyAdapter("data.log")
-result = (
+source = CrystalXMLSource("report.xml", row_tag="Details")
+
+df = to_dataframe(
     source
     | RenameFields({"old_name": "new_name"})
     | DropFields(["internal_id"])
     | FilterRows(field="status", op="==", value="active")
     | CastTypes({"amount": float})
-).to_arrow()
+)
 ```
 
-When the pipeline reaches `to_arrow()`, the stage list is collapsed into one plan. The Rust parser:
+When the pipeline is materialized, the stage list is collapsed into one plan. The Rust parser:
 
 - renames `old_name` to `new_name` as fields arrive;
 - skips `internal_id` entirely (it is not allocated);
@@ -83,7 +86,7 @@ pub struct ExecutionPlan {
 }
 ```
 
-The plan is built by `_build_plan_kwargs()` on the Python side and consumed by `TableBuilder` on the Rust side.
+The plan is built by `_build_plan_kwargs()` on the Python side and consumed by `TableBuilder` on the Rust side. The Python-facing kwargs accepted by `rypipe-python` entry points are: `field_mapping`, `drop_fields`, `filter`, `field_types`, `dictionary_columns`, `schema` (mapped to `schema_order`), `auto_dict`, `auto_dict_threshold` (mapped to `dict_threshold`), and `auto_dict_max_size` (mapped to `dict_max_size`).
 
 ## Field resolution order { #field-resolution-order }
 
@@ -123,7 +126,7 @@ Non-fusable stages still work, but they run over the Arrow table after the engin
 - `FilterRows` wrapping a callable predicate (runtime-computed values).
 - Custom stages that do not implement `_plan_kwargs()`.
 
-When a non-fusable stage is present, the pipeline automatically falls back to a row stream or table transform path. The fusable prefix still runs in Rust; only the suffix runs in Python.
+When non-fusable stages are present, `plan_split` still extracts every fusable stage (regardless of position) into the plan; the remaining stages run over the parsed Arrow batches in Python, with any trailing generic stages applied last over the dict stream.
 
 ## Inspecting `plan_overrides` in an adapter { #inspecting-plan_overrides-in-an-adapter }
 
@@ -131,16 +134,20 @@ Adapters that subclass `rypipe.Source` receive fused plan kwargs through `_read_
 
 ```python
 class MySource(Source):
-    def _read_arrow(self, *, plan_overrides=None, **kwargs):
-        plan_overrides = plan_overrides or {}
-        print(plan_overrides)
+    def _read_arrow(self, plan_overrides=None):
+        plan = self._build_plan_kwargs()
+        if plan_overrides:
+            plan.update(plan_overrides)
+        print(plan)
         # {
+        #   "use_mmap": True,
+        #   "auto_dict": False,
         #   "field_mapping": {"old_name": "new_name"},
         #   "drop_fields": ["internal_id"],
         #   "filter": {"field": "status", "op": "==", "value": "active"},
         #   "field_types": {"amount": "float64"},
         # }
-        return my_rust_read(path=self.path, **plan_overrides, **kwargs)
+        return my_rust_read(str(self._path), **plan)
 ```
 
 The Rust side merges these kwargs into an `ExecutionPlan` with `execution_plan_from_kwargs` from `rypipe-python`, or constructs the plan manually:
