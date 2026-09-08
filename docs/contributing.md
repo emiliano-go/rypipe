@@ -76,7 +76,7 @@ with:
 If you've built an adapter for a new format, we'd love to list it! Open a
 PR adding your adapter to the table in `docs/index.md`.
 
-See the [Writing Adapters](./writing-adapters/index.md) guide for how to
+See the [Writing Adapters](./building-adapters/index.md) guide for how to
 build an adapter package.
 
 ### Improving documentation { #improving-documentation }
