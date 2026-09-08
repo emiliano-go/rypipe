@@ -82,7 +82,7 @@ produces a native `python` link conflict in Cargo.
 Full guides live at [rypipe.emiliano-go.com](https://rypipe.emiliano-go.com/),
 including [architecture](https://rypipe.emiliano-go.com/architecture/),
 the [Rust API](https://rypipe.emiliano-go.com/rust-api/), and
-[writing a format adapter](https://rypipe.emiliano-go.com/writing-adapters/).
+[writing a format adapter](https://rypipe.emiliano-go.com/building-adapters/).
 
 ## License
 
