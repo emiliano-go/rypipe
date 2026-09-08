@@ -106,7 +106,7 @@ let batch = Pipeline::new(CrystalXmlSplitter, CrystalXmlParser)
 ## Guides { #guides }
 
 - [Tutorial](./tutorial/): install, first read, pipeline, stages, sinks, streaming.
-- [Writing Adapters](./writing-adapters/): add a new format (Splitter, RecordParser, Source, registration).
+- [Writing Adapters](./building-adapters/): add a new format (Splitter, RecordParser, Source, registration).
 - [Architecture](./architecture/): how the engine works internally.
 - [Advanced](./advanced/): fusion, execution modes, memory, parallelism, profiling.
 - [Reference](./reference/): Python API and Rust API.
