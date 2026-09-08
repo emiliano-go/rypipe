@@ -41,6 +41,7 @@ fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
 ```
 
 **Rules:**
+
 - Return `Some(position)` where `position` is the first byte of the next record.
 - Return `None` if no more records exist after `from`.
 - The position must be valid: `position <= bytes.len()`.
@@ -90,7 +91,7 @@ implementation provides:
 4. **Dedup** and sort
 5. **Chunk floor** via `plan_chunk_count` (2 MiB minimum, thread caps)
 
-```
+```rust
 fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
     let n = plan_chunk_count(bytes.len(), max_chunks, SplitMode::Parallel);
     let nominals: Vec<usize> = (1..n).map(|i| bytes.len() * i / n).collect();
@@ -113,6 +114,7 @@ sub-1 MB chunk collapse. See [Chunk planning](./chunk-planning.md).
 4. Results are merged into a single `RecordBatch` (or kept chunked for streaming)
 
 The engine guarantees:
+
 - Every chunk contains whole records (no mid-record splits)
 - Empty chunks are discarded
 - Chunks are parsed in parallel with no shared mutable state
@@ -124,14 +126,6 @@ The engine guarantees:
 - The scan is O(chunk_size / row_size) on average
 - Skip-region rejection adds O(window × num_openers) per candidate
 - Total split time is < 1% of single-threaded parse time on 500 MB
-
-!!! warning
-
-    Do not override `find_split_points` unless you have a measured reason. The
-    default implementation applies the chunk-size floor (`MIN_CHUNK_BYTES = 2 MiB`)
-    that prevents sub-1 MB chunk collapse, handles skip-region rejection, and
-    deduplicates split points. Hand-rolled versions almost always get this wrong.
-
 
 !!! tip
 
@@ -162,3 +156,23 @@ The engine guarantees:
 
 6. **Using `find_split_points` for row-level iteration**: `find_split_points`
    is for chunk-level splitting only. Row-level iteration uses `parse_chunk`.
+
+## Build and test { #build-and-test }
+
+Unit-test the Splitter against a fixed sample: `next_record_start` must
+return the byte after each `\n`, and `estimate_bytes_per_row` must divide
+the sample by its newline count:
+
+```console
+$ cargo test splitter
+running 2 tests
+test tests::splitter_estimates_bytes_per_row ... ok
+test tests::splitter_finds_row_starts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+```
+
+The test asserts `next_record_start(sample, 0) == Some(30)` (first row
+ends at byte 29), `next_record_start(sample, 30) == Some(sample.len())`,
+and `None` past the end. A wrong position here corrupts every chunk
+boundary, so run this before benchmarking anything.
