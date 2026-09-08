@@ -124,7 +124,7 @@ df = source.to_pandas()
 ## Documentation
 
 - [Tutorial](docs/tutorial/index.md): install, first read, pipeline, stages, sinks, streaming
-- [Writing Adapters](docs/writing-adapters/index.md): add a new format
+- [Writing Adapters](docs/building-adapters/index.md): add a new format
 - [Architecture](docs/architecture/index.md): how the engine works internally
 - [Advanced](docs/advanced/index.md): fusion, execution modes, memory, parallelism
 - [Python API](docs/reference/python-api.md): full API reference
