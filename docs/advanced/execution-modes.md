@@ -2,14 +2,14 @@
 
 `rypipe` adapters can expose up to four execution strategies. Choosing the right one is the biggest single decision for memory and throughput.
 
-| Mode | Memory | Parallelism | Speed (1 GB, 5800X) | Best for |
-|------|--------|-------------|---------------------|----------|
-| `columnar` | Full table in RAM | Single | 714 MB/s | <100 MB, single `Table`, `auto_dict` |
-| `parallel` | Full table in RAM | Multi-core | ~3 GB/s | >100 MB, fits RAM, max speed |
-| `bounded` (streaming) | Budget + one batch | Single | 625 MB/s 64KB | Huge files, 64KB-256 MB budget |
-| `parallel streaming` | Budget + small in-flight set | Multi-core | 1.5-2.5 GB/s (256 MB) | Huge files, ≥256 MB budget, speed + bounded |
+| Mode | Engine type | Memory | Parallelism | Best for |
+|------|-------------|--------|-------------|----------|
+| `columnar` | `Pipeline` (single pass) | Full table in RAM | Single | Small files, one contiguous batch, no chunk overhead |
+| `parallel` | `ParallelExecutor` | Full table in RAM | Multi-core (`rayon`) | Large files that fit RAM, CPU-bound parsers, max speed |
+| `stream` | `BoundedExecutor` / `StreamingBatchIterator` | Budget + one batch | Single | Huge files, row-oriented consumers, low latency per batch |
+| `parallel_streaming` | `ParallelStreamingExecutor` | Budget + small in-flight set | Multi-core | Huge files where you want both bounded memory and speed |
 
-`auto` lets the adapter pick. A common heuristic is: files under ~8 MiB use columnar, larger files use parallel when memory allows and budget is large, otherwise bounded/parallel streaming. Adapters should document their own heuristic because format split boundaries affect chunk safety.
+`auto` lets the adapter pick. `rypipe.resolve_engine` implements the reference heuristic: files under 8 MiB use columnar, files at or above 8 MiB use parallel when available, an explicit `memory` budget forces a streaming mode, and `threads > 1` prefers parallel modes. Adapters should document their own heuristic because format split boundaries affect chunk safety.
 
 ## Stream mode { #stream-mode }
 
@@ -41,7 +41,7 @@ Use columnar mode when:
 - the file fits comfortably in RAM;
 - the parser is fast enough that parallel overhead would not pay off;
 - you need one contiguous `RecordBatch` without a merge step;
-- `auto_dict` or compare filters force a merge anyway, so parallelism adds overhead.
+- `auto_dict` uses the incremental dictionary path, so chunks still export independently.
 
 Columnar mode is often fastest for small files because there is no per-chunk setup and no rayon scheduling.
 
@@ -52,15 +52,14 @@ Parallel mode uses `ParallelExecutor`:
 1. Calls `Splitter::find_split_points`.
 2. Converts points to non-empty `Range<usize>` chunks.
 3. Uses `rayon::par_iter` to parse each chunk independently into a `TableBuilder`.
-4. Fast path: if `auto_dict` is false and schemas are consistent, each builder is exported as its own `RecordBatch` in parallel. No serial merge happens. Compare filters are applied per-row during parse AND re-applied post-export, so they do not force the merge path.
-5. Merge path: if `auto_dict` is enabled or schemas are inconsistent, chunk builders are merged sequentially before export.
+4. Fast path: if `auto_dict` is false and all chunk builders agree on column types, each builder is exported as its own `RecordBatch` in parallel. No serial merge happens. Compare filters are evaluated per-row during parse, so they do not force the merge path. With `auto_dict`, an incremental dictionary path upgrades each chunk in parallel, then unifies the dictionaries (a tiny serial step) and remaps codes, still avoiding the full merge.
+5. Merge path: only when chunk builders disagree on column types are they merged sequentially before export, which surfaces a precise `Error::Merge` for irreconcilable mismatches.
 
 Use parallel mode when:
 
 - the file fits in RAM or in the OS page cache;
 - the parser is CPU-bound (heavy XML, complex field extraction, many columns);
-- you can tolerate higher peak memory for shorter wall-clock time;
-- `auto_dict` and compare filters are off, so the fast path applies.
+- you can tolerate higher peak memory for shorter wall-clock time.
 
 ## Parallel streaming mode { #parallel-streaming-mode }
 
@@ -100,18 +99,18 @@ submit chunk 3 ──────────►│  parse chunk │──► ch
 
 Use parallel streaming when:
 
-- the file is large and you want bounded memory, but have ≥256 MB budget and multiple cores;
-- you need higher throughput than sequential streaming (`bounded` 625 MB/s) while avoiding full-table materialization (`parallel` 3 GB/s needs full RAM);
+- the file is large and you want bounded memory, but you have multiple cores and a budget large enough to give each thread useful work;
+- you need higher throughput than sequential streaming while avoiding full-table materialization;
 - schema is fixed (first chunk defines schema, later chunks `unify_variants` or `Error::Merge`).
 
-Example:
+Example (the adapter decides whether `threads` enables parallel streaming):
 
 ```python
-for batch in rypipe.iter_record_batches_parallel("huge.xml", memory="256MB", threads=8, format="crxml"):
+for batch in source.iter_record_batches(memory="256MB", threads=8):
     writer.write_batch(batch)
 ```
 
-Small budgets (`64KB`) are faster single-threaded; use `parallel streaming` for `≥256MB`.
+Very small budgets leave too little work per chunk to pay for coordination; single-threaded streaming is usually faster there.
 
 ## Auto engine selection { #auto-engine-selection }
 
@@ -196,11 +195,11 @@ may prefer columnar for much larger files than a simple newline-delimited format
 | Highest throughput on large files | parallel | columnar | Many cores parse simultaneously. |
 | Highest throughput on small files | columnar | parallel | Chunk overhead dominates. |
 | Deterministic column order | any with `schema_order` | inference | Chunk merges rely on a common schema. |
-| Low cardinality string compression | columnar or parallel with `dictionary_columns` | parallel with `auto_dict` | Auto-dict forces the merge path. |
+| Low cardinality string compression | any mode with `dictionary_columns` or `auto_dict` | nothing (dictionaries stay on the fast path) | Per-chunk dictionaries are upgraded in parallel and unified serially. |
 
 ## GIL behavior { #gil-behavior }
 
-All parse paths release the GIL during the heavy Rust work. The Arrow C Data Interface export re-acquires the GIL briefly. For `read_path_par`, the entire parallel parse runs outside the GIL.
+All parse paths release the GIL during the heavy Rust work. The Arrow export re-acquires the GIL briefly to hand the batch or table to `pyarrow`. The parallel parse also runs entirely outside the GIL.
 
 This means parallel mode can saturate CPU from Python without `multiprocessing`, provided the adapter is implemented in Rust and exports Arrow.
 
