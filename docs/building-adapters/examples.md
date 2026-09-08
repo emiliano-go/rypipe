@@ -228,3 +228,20 @@ impl RecordParser for TsvParser {
     }
 }
 ```
+
+## Build and test { #build-and-test }
+
+Both examples (the JSONL adapter and the TSV adapter above) build and
+test exactly like the [walkthrough](./walkthrough.md#step-6-build-and-test):
+
+```console
+$ uv run --with maturin maturin develop --release
+📦 Built wheel for abi3 Python ≥ 3.10
+🛠 Installed rypipe-log-0.1.0
+
+$ cargo test
+test result: ok. 10 passed; 0 failed
+```
+
+Swap in the example's `Splitter`/`RecordParser` implementations and the
+same commands apply unchanged.
