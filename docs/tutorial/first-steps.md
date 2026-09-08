@@ -1,137 +1,159 @@
 # First Steps { #first-steps }
 
-This page explains the complete example from the [Tutorial](index.md#tutorial)
-line by line. By the end, you will understand what a **Source** is, how the
-pipeline operator works, and what **rypipe** does behind the scenes.
+By the end of this page you will read `report.xml` into a DataFrame,
+iterate over rows, and chain your first pipeline stage. If you have not
+installed yet:
 
-## The example { #the-example }
-
-Here is the complete code we will explain:
-
-```python
-from rypipe_log import LogSource, RenameFields, CastTypes, FilterRows
-
-source = LogSource("report.log")
-
-df = (
-    source
-    | RenameFields({"Name": "name"})
-    | CastTypes({"Amount": float})
-    | FilterRows(field="Status", op="==", value="Active")
-).to_pandas()
-
-print(df)
+```bash
+pip install "crxml[pandas]"
 ```
+
+[Download report.xml](../examples/report.xml) and save it next to your
+script. It looks like this:
+
+```xml
+<Report Title="Sales Report">
+  <Group Name="East">
+    <Details>
+      <Field Name="Name"><Value>Alice Johnson</Value></Field>
+      <Field Name="Department"><Value>Sales</Value></Field>
+      <Field Name="Amount"><Value>15000.50</Value></Field>
+      ...
+    </Details>
+    ...
+```
+
+Each `<Details>` element is one row, with fields `Name`, `Department`,
+`Amount`, `Status`, and `Date`.
 
 ## Step 1: Create a Source { #step-1-create-a-source }
 
 ```python
-from rypipe_log import LogSource
+from crxml import CrystalXMLSource
 
-source = LogSource("report.log")
+source = CrystalXMLSource("report.xml", row_tag="Details")
 ```
 
-A **Source** is a handle over one input file. It does not parse the file yet.
-It stores the path and configuration, and waits for you to ask for data.
+A **Source** is a handle over one input file. `row_tag="Details"` tells
+**crxml** which XML element is a row. Nothing is parsed yet; the Source
+waits for you to ask for data.
 
-### What a Source gives you { #what-a-source-gives-you }
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `.to_arrow()` | `pyarrow.Table` | Parse and cache the table |
-| `.to_pandas()` | `pd.DataFrame` | Convert to pandas |
-| `.to_polars()` | `pl.DataFrame` | Convert to Polars |
-| `.to_parquet(path)` | - | Write to Parquet |
-| `.clear_cache()` | - | Drop cached table |
-| `.schema()` | `list[str]` | Column names from first row |
-| `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts |
-| `.__or__(stage)` | `Pipeline` | Pipe operator for stages |
-
-## Step 2: Parse with to_arrow() { #step-2-parse-with-to_arrow}
+You can peek at the column names with `.schema()`:
 
 ```python
-source = LogSource("report.log")
-table = source.to_arrow()
+print(source.schema())
+# ['Name', 'Department', 'Amount', 'Status', 'Date']
 ```
 
-The first time you call `.to_arrow()`, **rypipe** parses the file:
-
-1. The **Splitter** finds row boundaries in the byte stream.
-2. The **RecordParser** extracts field values from each row.
-3. The **Engine** accumulates values into Arrow columns.
-4. The result is a `pyarrow.Table`.
-
-The table is cached. Subsequent calls to `.to_arrow()`, `.to_pandas()`,
-etc. reuse the cached table without re-parsing.
-
-### What **rypipe** does automatically { #what-rypipe-does }
-
-With just that one call, **rypipe**:
-
-* Splits the file into chunks for parallel parsing.
-* Discovers the schema from the data.
-* Builds Arrow column arrays with near-zero copy.
-* Returns a `pyarrow.Table` you can use directly.
-
-## Step 3: Chain stages with | { #step-3-chain-stages-with}
+## Step 2: Get a DataFrame { #step-2-get-a-dataframe }
 
 ```python
-result = (
+df = source.to_pandas()
+print(df.head(3))
+```
+
+`to_pandas()` parses the file and returns a pandas DataFrame. The first call
+parses the file; the result is cached, so later calls are instant.
+
+You can also use:
+
+* `.to_arrow()` for a `pyarrow.Table`
+* `.to_pandas()` for a pandas DataFrame
+* `.to_polars()` for a Polars DataFrame
+* `.to_parquet("out.parquet")` to write a Parquet file
+
+See [Sinks](sinks.md#sinks) for the details.
+
+## Step 3: Iterate over rows { #step-3-iterate-over-rows }
+
+Iterating a Source yields one Python `dict` per row:
+
+```python
+for row in source:
+    print(row["Name"], row["Amount"])
+```
+
+```console
+Alice Johnson 15000.50
+Bob Smith 8500.00
+Carol White 12000.75
+...
+```
+
+All values come out of the file as strings. You will fix that in the next
+step.
+
+## Step 4: Chain a stage with | { #step-4-chain-stages-with }
+
+Stages transform the data as it flows through a pipeline. Chain them on the
+Source with the `|` operator, like a Unix pipe:
+
+```python
+from crxml import CastTypes, FilterRows, to_dataframe
+
+df = to_dataframe(
     source
-    | RenameFields({"Name": "name"})
     | CastTypes({"Amount": float})
     | FilterRows(field="Status", op="==", value="Active")
 )
+print(df.head(3))
 ```
 
-The `|` operator chains transformation stages. Each stage transforms the
-data as it flows through, like a Unix pipe:
+* `CastTypes` converts the `Amount` column from strings to floats.
+* `FilterRows` keeps only rows where `Status` is `"Active"`.
+* `to_dataframe()` runs the pipeline and collects the result.
 
-* `RenameFields` renames the "Name" column to "name".
-* `CastTypes` casts the "Amount" column from string to float.
-* `FilterRows` keeps only rows where Status equals "Active".
+Each `|` returns a new `Pipeline`. The original Source is not modified, so
+you can reuse it as often as you like.
 
-Each `|` returns a new `Pipeline`, the original Source is not modified.
+## Run it and check the output { #run-it }
 
-### What **rypipe** does automatically { #what-rypipe-does-pipeline }
-
-When you call `.to_pandas()` on the pipeline, **rypipe**:
-
-1. Splits the stages into **fusable** and **non-fusable** groups.
-2. Pushes fusable stages (RenameFields, DropFields, CastTypes, constant
-   FilterRows) into the Rust parse loop via the plan.
-3. Runs remaining stages (lambda predicates, complex combinators) over Arrow
-   batches in Python.
-
-Fusable stages run at Rust speed during parsing: they never touch Python.
-
-## Step 4: Get a DataFrame { #step-4-get-a-dataframe}
+Save this as `first_steps.py` next to `report.xml`:
 
 ```python
-df = result.to_pandas()
+from crxml import CrystalXMLSource, CastTypes, FilterRows, to_dataframe
+
+source = CrystalXMLSource("report.xml", row_tag="Details")
+print("Columns:", source.schema())
+
+df = to_dataframe(
+    source
+    | CastTypes({"Amount": float})
+    | FilterRows(field="Status", op="==", value="Active")
+)
 print(df)
-#     name  Amount  Status
-# 0  Alice   150.0  Active
-# 2  Carol   200.0  Active
+print("Active rows:", len(df))
 ```
 
-`.to_pandas()` materializes the pipeline into a pandas DataFrame. You can
-also use:
+Run it:
 
-* `.to_arrow()` for a `pyarrow.Table`
-* `.to_polars()` for a Polars DataFrame
-* `.to_parquet(path)` to write to a Parquet file
-* `rypipe.collect()` to get a list of dicts
+```console
+$ python first_steps.py
+Columns: ['Name', 'Department', 'Amount', 'Status', 'Date']
+             Name   Department    Amount  Status        Date
+0   Alice Johnson        Sales   15000.5  Active  2026-01-05
+1       Bob Smith  Engineering    8500.0  Active  2026-01-06
+2     Carol White    Marketing  12000.75  Active  2026-01-07
+3       Eve Davis  Engineering   11200.0  Active  2026-01-09
+4    Frank Miller        Sales   13500.0  Active  2026-01-10
+5   Grace Wilson    Marketing    7600.5  Active  2026-01-11
+6   Henry Taylor  Engineering   14200.0  Active  2026-01-12
+7    Jack Thomas    Marketing   10100.0  Active  2026-01-14
+8  Kate Martinez        Sales  16800.25  Active  2026-01-15
+9     Leo Garcia  Engineering    9400.0  Active  2026-01-15
+10  Mia Robinson    Marketing  11700.5  Active  2026-01-15
+11  Olivia Lewis  Engineering  12600.75  Active  2026-01-15
+Active rows: 12
+```
 
-See [Sinks](sinks.md#sinks) for the full reference.
+## Recap, step by step { #recap }
 
-## Recap { #recap }
+1. `CrystalXMLSource("report.xml", row_tag="Details")` creates a Source over
+   one file. Nothing is parsed yet.
+2. `.to_pandas()` parses the file into a cached pandas DataFrame.
+3. Iterating the Source yields rows as dicts, all values as strings.
+4. `source | CastTypes(...) | FilterRows(...)` builds a Pipeline; the Source
+   itself is untouched.
+5. `to_dataframe(pipeline)` runs the pipeline and collects the result.
 
-* A **Source** is a handle over one input file. It parses lazily and caches.
-* The `|` operator chains stages into a **Pipeline**.
-* **Stages** (`RenameFields`, `CastTypes`, `FilterRows`) transform data.
-* **Sinks** (`.to_pandas()`, `.to_arrow()`) materialize results.
-* **rypipe** pushes fusable stages into the Rust parse loop automatically.
-
-**Next:** [Pipeline](pipeline.md#pipeline), the pipeline operator and
-adapter wiring.
+**Next:** [Pipeline](pipeline.md#pipeline), the `|` operator in depth.
