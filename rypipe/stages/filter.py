@@ -342,22 +342,36 @@ class FilterRows:
 
 def _require_filter_spec(obj, label: str) -> dict:
     """Extract a fusable spec or raise with a helpful message."""
-    if not isinstance(obj, FilterRows):
-        raise TypeError(f"{label} expects FilterRows instances, got {type(obj).__name__!r}")
-    if obj._filter_spec is None:
-        raise ValueError(
-            f"{label} only accepts fusable filters: FilterRows with field/op/value "
-            f"or field_a/op/field_b keyword form. Pass FilterRows(..., field=..., op=..., "
-            f"value=...) or field_a/field_b instead of a plain lambda/Callable."
-        )
-    return obj._filter_spec
+    if isinstance(obj, FilterRows):
+        if obj._filter_spec is None:
+            raise ValueError(
+                f"{label} only accepts fusable filters: FilterRows with field/op/value "
+                f"or field_a/op/field_b keyword form. Pass FilterRows(..., field=..., op=..., "
+                f"value=...) or field_a/field_b instead of a plain lambda/Callable."
+            )
+        return obj._filter_spec
+    if isinstance(obj, (FilterRowsAny, FilterRowsAll, FilterRowsNot)):
+        return obj._combined_spec()
+    raise TypeError(
+        f"{label} expects FilterRows or combinator instances, got {type(obj).__name__!r}"
+    )
+
+
+def _matches(obj, record: dict) -> bool:
+    """Uniform row test for FilterRows and combinators."""
+    if isinstance(obj, FilterRows):
+        return obj._predicate(record)
+    return obj.apply(record) is not None
 
 
 class FilterRowsAny:
     """Keep rows that satisfy **any** of the given fusable filters (OR).
 
     Each argument must be a :class:`FilterRows` built with the keyword form
-    (``field``/``field_a``) so it can be pushed into the Rust parse loop.
+    (``field``/``field_a``) or another combinator, so the whole tree can be
+    pushed into the Rust parse loop. Combinators nest:
+    ``FilterRowsAny(A, FilterRowsAll(B, FilterRowsNot(C)))`` is
+    ``A or (B and not C)``.
 
     Example::
 
@@ -378,15 +392,18 @@ class FilterRowsAny:
 
     def apply(self, record: dict) -> dict | None:
         for f in self._filters:
-            if f._predicate(record):
+            if _matches(f, record):
                 return record
         return None
 
     def __call__(self, stream):
         return (r for r in map(self.apply, stream) if r is not None)
 
+    def _combined_spec(self) -> dict:
+        return {"or": self._specs}
+
     def _plan_kwargs(self) -> dict | None:
-        return {"filter": {"or": self._specs}}
+        return {"filter": self._combined_spec()}
 
 
 class FilterRowsAll:
@@ -414,15 +431,18 @@ class FilterRowsAll:
 
     def apply(self, record: dict) -> dict | None:
         for f in self._filters:
-            if not f._predicate(record):
+            if not _matches(f, record):
                 return None
         return record
 
     def __call__(self, stream):
         return (r for r in map(self.apply, stream) if r is not None)
 
+    def _combined_spec(self) -> dict:
+        return {"and": self._specs}
+
     def _plan_kwargs(self) -> dict | None:
-        return {"filter": {"and": self._specs}}
+        return {"filter": self._combined_spec()}
 
 
 class FilterRowsNot:
@@ -441,10 +461,13 @@ class FilterRowsNot:
         self._spec = _require_filter_spec(inner, "FilterRowsNot")
 
     def apply(self, record: dict) -> dict | None:
-        return None if self._inner._predicate(record) else record
+        return None if _matches(self._inner, record) else record
 
     def __call__(self, stream):
         return (r for r in map(self.apply, stream) if r is not None)
 
+    def _combined_spec(self) -> dict:
+        return {"not": self._spec}
+
     def _plan_kwargs(self) -> dict | None:
-        return {"filter": {"not": self._spec}}
+        return {"filter": self._combined_spec()}
