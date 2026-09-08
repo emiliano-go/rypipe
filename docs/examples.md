@@ -6,12 +6,12 @@ Legend: `(ADAPTER BOUND)` is code you write in your adapter crate (format specif
 
 ## Python API examples { #python-api-examples }
 
-### Read a file through a registered adapter { #read-a-file-through-a-registered-adapter }
+### Read a file { #read-a-file-through-a-registered-adapter }
 
 ```python
-import rypipe
+from crxml import CrystalXMLSource
 
-table = rypipe.read("data.xml", format="crxml", row_tag="Row")
+table = CrystalXMLSource("data.xml", row_tag="Row").to_arrow()
 print(table.num_rows, table.num_columns)
 ```
 
@@ -19,15 +19,15 @@ print(table.num_rows, table.num_columns)
 
 ```python
 from crxml import CrystalXMLSource
-from crxml import RenameFields, DropFields, FilterRows, CastTypes
+from crxml import RenameFields, DropFields, FilterRows, CastTypes, to_dataframe
 
-df = (
+df = to_dataframe(
     CrystalXMLSource("data.xml", row_tag="Row")
     | RenameFields({"old_name": "new_name"})
     | DropFields(["internal_id"])
     | FilterRows(field="status", op="==", value="active")
     | CastTypes({"amount": float, "qty": int})
-).to_pandas()
+)
 ```
 
 ### Build an adapter subclass { #build-an-adapter-subclass }
@@ -70,43 +70,50 @@ source.to_parquet("report.parquet")
 ### Memory-bounded stream { #memory-bounded-stream }
 
 ```python
+import pandas as pd
+import pyarrow.parquet as pq
 from crxml import CrystalXMLSource
 
-# Streaming to a DataFrame (bounded memory)
 src = CrystalXMLSource("huge.xml", row_tag="Row")
-df = src.to_pandas(memory="256MiB")
+
+# Streaming to a DataFrame (bounded memory)
+df = pd.concat(b.to_pandas() for b in src.iter_record_batches(memory="256MB"))
 
 # Streaming to Parquet (bounded memory)
-src.to_parquet("output.parquet", memory="256MiB")
+batches = src.iter_record_batches(memory="256MB")
+first = next(batches)
+with pq.ParquetWriter("output.parquet", first.schema) as writer:
+    writer.write_batch(first)
+    for batch in batches:
+        writer.write_batch(batch)
 
 # Parallel streaming (higher throughput on multi-core)
-df = src.to_pandas(memory="256MiB", threads=16)
+df = pd.concat(b.to_pandas() for b in src.iter_record_batches(memory="256MB", threads=16))
 
 # Advanced: batch-level control via iter_record_batches
-for batch in src.iter_record_batches(memory="256MiB"):
+for batch in src.iter_record_batches(memory="256MB"):
     process(batch.to_pylist())
 ```
 
 ### Parallel parse { #parallel-parse }
 
 ```python
-import rypipe
+from crxml import CrystalXMLSource
 
-table = rypipe.read_par("large.xml", format="crxml", chunks=16)
+table = CrystalXMLSource("large.xml", row_tag="Row", threads=16).to_arrow()
 ```
 
 ### Sink to Parquet { #sink-to-parquet }
 
 ```python
 from crxml import CrystalXMLSource
-import rypipe
-from crxml import FilterRows
 
-pipeline = (
-    CrystalXMLSource("data.xml", row_tag="Row")
-    | FilterRows(field="status", op="==", value="active")
+src = CrystalXMLSource(
+    "data.xml",
+    row_tag="Row",
+    filter={"field": "status", "op": "==", "value": "active"},
 )
-rypipe.to_parquet(pipeline, "active.parquet")
+src.to_parquet("active.parquet")
 ```
 
 ## Rust API examples { #rust-api-examples }
@@ -238,4 +245,4 @@ class FooAdapter(rypipe.Adapter):
 rypipe.register_adapter("foo", FooAdapter, extensions=[".foo"])
 ```
 
-See [Writing adapters](writing-adapters/index.md) for the full trait reference.
+See [Writing adapters](building-adapters/index.md) for the full trait reference.
