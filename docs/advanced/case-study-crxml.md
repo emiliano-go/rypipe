@@ -31,7 +31,7 @@ rypipe-core engine : typed builders, filters, projection, Arrow export
 pyarrow.Table / pandas.DataFrame
 ```
 
-The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapter` that calls the Rust core and registers itself with `rypipe`.
+The Rust side lives in the `crxml-core` crate (`src/crxml_core`). The Python side is a thin `CrystalXMLAdapter` (`src/crxml/rypipe_adapter.py`) that calls the Rust core and registers itself with `rypipe`.
 
 ## Techniques from this section { #techniques-from-this-section }
 
@@ -47,7 +47,7 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 
 ## The splitter { #the-splitter }
 
-`CrystalXmlSplitter` uses `memchr::memmem` to scan for the row tag. It is SIMD-accelerated on most platforms. It skips `<!-- ... -->` and `<![CDATA[ ... ]]>` regions so a `<Row` string inside them is not mistaken for a real row start. It also validates that a candidate tag is followed by whitespace, `>`, or `/` to avoid prefix collisions such as `<RowItem`.
+`CrystalXmlSplitter` uses `memchr::memmem` to scan for the row tag. It is SIMD-accelerated on most platforms. Its `skip_regions()` implementation rejects candidates inside `<!-- ... -->` and `<![CDATA[ ... ]]>` regions, so a `<Row` string inside them is not mistaken for a real row start. It also validates that a candidate tag is followed by whitespace, `>`, or `/` to avoid prefix collisions such as `<RowItem`.
 
 ## The decoder { #the-decoder }
 
@@ -58,7 +58,7 @@ The Rust side lives in `crxml-core`. The Python side is a thin `CrystalXMLAdapte
 3. Recognizes `<Field>`, `<Text>`, and `<Section>` patterns.
 4. Calls `sink.put_field(key, Value::Str(value))` so the engine builds typed columns.
 
-The decoder also has a `parse_tail` fallback that rescans orphan close-tags at chunk boundaries, so chunked parsing stays correct without a serial pre-pass.
+Chunk-boundary correctness needs no serial pre-pass: the splitter only emits boundaries at valid row starts, and the engine discards each chunk's incomplete trailing row during `TableBuilder::normalize()`.
 
 ## Why it is fast { #why-it-is-fast }
 
@@ -77,7 +77,7 @@ The decoder also has a `parse_tail` fallback that rescans orphan close-tags at c
 2. Find split points cheaply. A single `memmem` scan beats scanning byte-by-byte.
 3. Handle boundary cases. Chunks can start or end inside a row; have a fallback path that rescans from the nearest safe row start.
 4. Borrow strings into the engine. Pass `Value::Str(Cow::Borrowed(&str))` slices whenever the input is valid UTF-8.
-5. Register with `rypipe`. A thin adapter class lets users call `rypipe.read()` while you keep the fast Rust core.
+5. Register with the framework. A thin adapter class self-registers on import, so users get a self-contained package while you keep the fast Rust core.
 
 ## Source { #source }
 
