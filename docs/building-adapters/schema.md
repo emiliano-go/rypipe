@@ -321,3 +321,33 @@ lexicographic.
 
 **Memory higher than expected**: ensure `field_types` is set for all numeric
 columns. Without it, intermediate strings double memory for those columns.
+
+## Build and test { #build-and-test }
+
+The typed-schema path is covered by a unit test that parses with
+`field_types={"age": "int64"}` and asserts the output column type:
+
+```console
+$ cargo test typed_schema
+running 1 test
+test tests::typed_schema_casts_during_parse ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+From Python, pass the schema kwargs to the source and check the result:
+
+```console
+$ python -c "
+from rypipe_log import LogSource
+t = LogSource('test.log', schema=['name', 'age', 'active'],
+              field_types={'age': 'int64'}).to_arrow()
+print(t.schema)
+"
+name: string
+age: int64
+active: string
+```
+
+Note that `schema` fixes column order, not projection: fields discovered
+beyond the list are still appended at the end.
