@@ -6,7 +6,7 @@ implements the third (`ColumnarSink`). This page documents all three traits
 in depth, including every method, its cost model, and how to squeeze maximum
 performance from each.
 
-See [Writing adapters](../writing-adapters/) for the step-by-step guide to
+See [Writing adapters](../building-adapters/) for the step-by-step guide to
 implementing these traits.
 
 ## Splitter { #splitter }
@@ -58,7 +58,7 @@ fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
 }
 ```
 
-See [Skip regions](../writing-adapters/skip-regions.md) for the full interface.
+See [Skip regions](../building-adapters/skip-regions.md) for the full interface.
 
 ### find_split_points (default, do not override) { #find_split_points }
 
@@ -133,49 +133,55 @@ pub trait ColumnarSink {
 }
 ```
 
-### Required methods (4) { #required-methods }
+### Required methods { #required-methods }
 
 - **`begin_row`**: Start a new row. Clears per-row state.
 - **`put_field`**: Push a field value. Engine resolves name and stores.
 - **`end_row`**: End the row. Null-fills missing, evaluates filter.
 - **`finish`**: Finalize into Arrow RecordBatch.
 
-### Field resolution (4) { #field-resolution }
+### Field resolution { #field-resolution }
 
 - **`wants(name)`**: `false` to signal the engine will drop this field.
 - **`resolve(name)`**: Map raw name to output column, or `None` if dropped.
 - **`put_field_resolved(name, value)`**: Push with pre-resolved name.
 - **`resolve_and_put(name, value)`**: Combined resolve + push.
 
-### Tier control (3) { #tier-control }
+### Tier control { #tier-control }
 
 - **`needs_value()`**: `false` = locate-only (skip text extraction).
 - **`needs_resolve()`**: `false` = traverse-only (skip resolve).
 - **`row_rejected()`**: `true` = filter rejected; scanner byte-jumps.
 
-### Projection (3) { #projection }
+### Projection { #projection }
 
 - **`row_satisfied()`**: `true` = all wanted columns present; byte-jump.
 - **`wanted_mask()`**: Bitmask of wanted columns for O(1) membership test.
 - **`reset_child_ordinal()`**: Reset ordinal after row-tag attributes.
 
-### Layout prediction (4) { #layout-prediction }
+### Layout prediction { #layout-prediction }
 
 - **`expect_slot(ordinal)`**: `(slot, raw_name)` for memcmp fast path.
 - **`put_field_at(slot, value)`**: Direct slot push, no name resolution.
 - **`record_slot(ordinal, slot, raw_name)`**: Cache slot for next row.
 - **`layout_broken(ordinal)`**: Invalidate cached layout.
 
-### Batch (1) { #batch }
+### Batch { #batch }
 
 - **`put_row(fields)`**: Push a complete row in one call.
 
-### Raw-byte methods (2) { #raw-byte-methods }
+### Raw-byte methods { #raw-byte-methods }
 
 - **`resolve_raw(raw_name)`**: Resolve a field name still in raw byte form.
   Default converts via `from_utf8` then delegates to `resolve`.
 - **`resolve_and_put_raw(raw_name, value)`**: Combined raw-name resolve +
   push. Default converts via `from_utf8` then delegates to `resolve_and_put`.
+
+The raw variants exist for parsers that already hold the name as `&[u8]`
+(scanner output, zero-copy slices). Overriding them lets you compare or
+hash the bytes directly and skip the per-field UTF-8 validation. The
+constraint: you only win if your format guarantees ASCII or UTF-8 names;
+otherwise the default `from_utf8` path is the safe choice.
 
 ### Fast path hierarchy { #fast-path-hierarchy }
 
@@ -185,6 +191,16 @@ pub trait ColumnarSink {
 | `put_field_resolved(name, value)` | ~10 ns | After resolve() |
 | `resolve_and_put(name, value)` | ~15 ns | Default |
 | `put_field(name, value)` | ~20 ns | Slowest, full resolution |
+
+The cheaper methods are not free upgrades: each one shifts work onto the
+parser. `put_field_at` is only valid after `expect_slot` has confirmed the
+row layout, so the parser must detect layout changes and call
+`layout_broken`. `put_field_resolved` requires the parser to call
+`resolve()` itself and cache the result. `put_field` has no preconditions
+at all. Start with `put_field`; only move down the table when profiling
+shows name resolution is hot. See
+[Fast paths in order](../building-adapters/sink.md#fast-paths-in-order)
+for the full trade-off discussion.
 
 ### Projection fast path { #projection-fast-path }
 
@@ -246,7 +262,7 @@ pub fn plan_chunk_count(bytes: usize, threads: usize, mode: SplitMode) -> usize
 ```
 
 Determines chunk count with 2 MiB floor, thread caps, and 1024 maximum.
-See [Chunk planning](../writing-adapters/chunk-planning.md).
+See [Chunk planning](../building-adapters/chunk-planning.md).
 
 ### in_skip_region { #in_skip_region }
 
@@ -255,4 +271,4 @@ pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) ->
 ```
 
 Bounded backward scan to check if a position is inside a skip region.
-See [Skip regions](../writing-adapters/skip-regions.md).
+See [Skip regions](../building-adapters/skip-regions.md).
