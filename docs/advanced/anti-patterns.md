@@ -16,28 +16,30 @@ This works, but it reconstructs Python dicts from the Arrow table. If the source
 ```python
 result = (
     source
-    | (lambda table: transform(table))
-    | (lambda table: another_transform(table))
-).to_arrow()
+    | (lambda rows: transform(rows))
+    | (lambda rows: another_transform(rows))
+).to_pandas()
 ```
 
-Each callable materializes a full Python object (usually a `pyarrow.Table` or list of dicts) and breaks fusion. Prefer fused stages or move the logic into Rust.
+Each callable stage that the [lambda compiler](../architecture/lambda-compiler.md) does not recognize is opaque to fusion: it runs in Python per row (or forces the pipeline onto the dict-stream path) and cannot be pushed into the Rust parse loop. Prefer fused stages (`RenameFields`, `DropFields`, `CastTypes`, keyword-form or compilable-lambda `FilterRows`) or move the logic into Rust.
 
-## Repeated `to_pandas` / `to_arrow` { #repeated-to_pandas-to_arrow }
+## Repeated sinks on a pipeline { #repeated-to_pandas-to_arrow }
 
 ```python
 t1 = pipeline.to_pandas()
-t2 = pipeline.to_arrow()
-t3 = pipeline.to_pandas()
+t2 = pipeline.to_pandas()
 ```
 
-Each call re-runs the pipeline. Cache the table once and reuse it:
+Pipelines do not cache: each sink re-runs the whole chain. Materialize once and reuse the result:
 
 ```python
-table = pipeline.to_arrow()
-t1 = table.to_pandas()
-t2 = table
+df = pipeline.to_pandas()
+t1 = df
+t2 = df
 ```
+
+Sources are different: `source.to_arrow()` caches the table, so repeated
+sinks on the same Source parse only once.
 
 ## Ignoring `plan_overrides` { #ignoring-plan_overrides }
 
@@ -52,18 +54,21 @@ If an adapter ignores `plan_overrides`, fused stages silently fall back to Pytho
 ## Wrong engine choice { #wrong-engine-choice }
 
 ```python
-source.read_stream(chunks=64)  # tiny file, over-parallelized
+from crxml import CrystalXMLSource
+
+# Tiny file, over-parallelized: coordination costs more than the parse
+table = CrystalXMLSource("tiny.xml", row_tag="Row", threads=64).to_arrow()
 ```
 
-For small files, columnar mode is usually fastest. For huge files, stream mode keeps memory flat. Parallel mode only wins for large, CPU-bound, cached files.
+For small files, columnar mode is usually fastest. For huge files, stream mode keeps memory flat. Parallel mode only wins for large, CPU-bound, cached files. When in doubt, let `resolve_engine` pick.
 
-## Using `auto_dict` in parallel mode for throughput { #using-auto_dict-in-parallel-mode-for-throughput }
+## Misusing `auto_dict` { #using-auto_dict-in-parallel-mode-for-throughput }
 
 ```python
-source.read_par(auto_dict=True, chunks=32)
+source = MySource("data.log", auto_dict=True)  # on a high-cardinality file
 ```
 
-`auto_dict` forces the merge path in parallel mode. If throughput is the goal, use explicit `dictionary_columns` for only the columns that need it, or switch to columnar mode.
+`auto_dict` tracks distinct-value counts for every string column. On high-cardinality data that tracking is pure overhead and nothing upgrades. Use explicit `dictionary_columns` for the columns you know are low-cardinality, or tighten `auto_dict_threshold` / `auto_dict_max_size`. Dictionaries no longer force the parallel merge path, so the remaining cost is the tracking itself.
 
 ## Not declaring types for numeric filters { #not-declaring-types-for-numeric-filters }
 
@@ -71,7 +76,7 @@ source.read_par(auto_dict=True, chunks=32)
 FilterRows(field="amount", op=">", value="100.0")
 ```
 
-Without `field_types={"amount": "float64"}`, the engine may store `amount` as a string and skip the vectorized compare filter. Declare the type so the filter runs in Arrow.
+Without `field_types={"amount": "float64"}`, the engine stores `amount` as a string and the compare runs with string ordering (`"9" > "100"` is true for strings). Declare the type so the filter compares numbers.
 
 ## Summary { #summary }
 
