@@ -1,8 +1,9 @@
 # Building an Adapter { #building-an-adapter }
 
-This page shows how to build a **rypipe** adapter for a newline-delimited
-`key=value` log format. By the end, you will have a complete adapter that
-works with the pipeline API.
+The [track overview](index.md) showed what an adapter is and how the engine
+works. In this walkthrough you will build one: a complete **rypipe** adapter
+for a newline-delimited `key=value` log format. By the end, it works with
+`rypipe.read()` and with the full pipeline API.
 
 ## The format { #the-format }
 
@@ -64,7 +65,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rypipe-core = "2"
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+# arrow must match rypipe-core's pinned version for the PyArrow export
+arrow = { version = "=55.2.0", default-features = false, features = ["pyarrow", "ffi"] }
+# pyo3 0.24 matches the pyo3 version arrow 55's "pyarrow" feature uses
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
 simdutf8 = "0.1"
 ```
@@ -72,6 +76,28 @@ simdutf8 = "0.1"
 The `cdylib` crate type produces a shared library that Python can import.
 The `abi3` feature enables stable ABI, so one wheel works across Python
 versions.
+
+You also need a `pyproject.toml` so maturin can build the package. The
+`module-name` places the compiled extension inside the Python package,
+and `python-source` tells maturin where the pure-Python files live:
+
+### `pyproject.toml` { #pyproject-toml }
+
+```toml
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "rypipe-log"
+version = "0.1.0"
+dependencies = ["rypipe", "pyarrow>=15"]
+
+[tool.maturin]
+module-name = "rypipe_log._rypipe_log"
+python-source = "."
+features = ["pyo3/extension-module"]
+```
 
 ## Step 2: Implement the Splitter { #step-2-implement-the-splitter}
 
@@ -195,23 +221,81 @@ call it directly, they use `LogSource` instead:
 ### `src/lib.rs` (Python bindings) { #python-bindings }
 
 ```rust
+use arrow::pyarrow::ToPyArrow;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use rypipe_core::{ExecutionPlan, Pipeline};
-use rypipe_python::record_batches_to_pyarrow_table;
+use pyo3::types::PyModule;
+use rypipe_core::{ExecutionPlan, FieldType, FilterPredicate, Pipeline};
+use std::collections::HashMap;
 
 // Internal function: called by LogSource._read_arrow().
-// Users never call this directly.
+// Users never call this directly. The kwargs are the merged pushdown plan
+// that fused pipeline stages produce (rename, drop, cast, filter, ...).
 #[pyfunction]
-fn read_log(path: String) -> PyResult<PyObject> {
-    let plan = ExecutionPlan::new();
-    let batches = Pipeline::new(LogSplitter, LogParser)
-        .with_plan(plan)
-        .read_path(&path, false, false)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None, field_types=None, schema=None, auto_dict=false, use_mmap=false, prefault=false))]
+fn read_log(
+    path: String,
+    field_mapping: Option<HashMap<String, String>>,
+    drop_fields: Option<Vec<String>>,
+    filter: Option<HashMap<String, String>>,
+    field_types: Option<HashMap<String, String>>,
+    schema: Option<Vec<String>>,
+    auto_dict: bool,
+    use_mmap: bool,
+    prefault: bool,
+) -> PyResult<Py<PyAny>> {
+    let mut plan = ExecutionPlan::new();
+    if let Some(map) = field_mapping {
+        plan.field_map = map.into_iter().collect();
+    }
+    if let Some(drop) = drop_fields {
+        plan.drop_fields = drop.into_iter().collect();
+    }
+    if let Some(s) = schema {
+        plan.schema_order = s;
+    }
+    plan.auto_dict = auto_dict;
+    if let Some(ft) = field_types {
+        for (name, type_str) in ft {
+            let ft = FieldType::from_str(&type_str).ok_or_else(|| {
+                PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
+            })?;
+            plan.field_types.insert(name, ft);
+        }
+    }
+    if let Some(f) = filter {
+        let field = f
+            .get("field")
+            .ok_or_else(|| PyValueError::new_err("filter must include 'field' key"))?
+            .to_owned();
+        let op = f
+            .get("op")
+            .ok_or_else(|| PyValueError::new_err("filter must include 'op' key"))?
+            .to_owned();
+        let value = f
+            .get("value")
+            .ok_or_else(|| PyValueError::new_err("filter must include 'value' key"))?
+            .to_owned();
+        plan.filter = Some(match op.as_str() {
+            "==" | "eq" => FilterPredicate::Equal { field, value },
+            "!=" | "ne" => FilterPredicate::NotEqual { field, value },
+            other => return Err(PyValueError::new_err(format!("unsupported filter op {other:?}"))),
+        });
+    }
 
+    let batch = Pipeline::new(LogSplitter, LogParser)
+        .with_plan(plan)
+        .read_path(&path, use_mmap, prefault)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Export the RecordBatch to a pyarrow.Table over the C Data Interface.
     Python::with_gil(|py| {
-        record_batches_to_pyarrow_table(py, &[batches])
-            .map(|obj| obj.into())
+        let pa = PyModule::import(py, "pyarrow")?;
+        let rb = batch.to_pyarrow(py)?;
+        let table = pa
+            .getattr("Table")?
+            .call_method1("from_batches", (vec![rb],))?;
+        Ok(table.into())
     })
 }
 
@@ -223,9 +307,12 @@ fn _rypipe_log(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 ```
 
-This creates a Python module `_rypipe_log` with an internal `read_log`
-function. The user-facing API is `LogSource`, which calls `read_log`
-internally via `_read_arrow()`.
+This creates a Python module `rypipe_log._rypipe_log` with an internal
+`read_log` function. The user-facing API is `LogSource`, which calls
+`read_log` internally via `_read_arrow()`. The function must accept the
+full plan kwarg set: fused pipeline stages forward their pushdown options
+(rename, drop, cast, filter) as keyword arguments, and rejecting one
+breaks fusion.
 
 ## Step 5: Create the Python wrapper { #step-5-create-the-python-wrapper}
 
@@ -253,6 +340,7 @@ __all__ = [
 
 _modules = {
     "LogSource": ".source",
+    "LogAdapter": ".rypipe_adapter",
     "CastTypes": ".stages",
     "FilterRows": ".stages",
     "RenameFields": ".stages",
@@ -282,8 +370,8 @@ The Source subclass is the pipeline-capable entry point. It implements
 ```python
 from typing import Any
 
-import _rypipe_log
 from rypipe import Source
+from rypipe_log import _rypipe_log
 
 
 class LogSource(Source):
@@ -307,20 +395,21 @@ class LogSource(Source):
 
 ### `rypipe_log/rypipe_adapter.py` { #adapter-py}
 
-The adapter inherits from `rypipe.Adapter`, which handles plan forwarding
-automatically. Subclasses only implement `read()`:
+The adapter registered with **rypipe** is a plain object with a
+`read(path, **kwargs)` method. Registration makes `rypipe.read()` work;
+users still interact with `LogSource`:
 
 ```python
 from typing import Any
 
-from rypipe import Adapter
 
-
-class LogAdapter(Adapter):
+class LogAdapter:
     """rypipe-compatible adapter for newline-delimited key=value logs."""
 
     def read(self, path: str, **kwargs: Any) -> Any:
         """Parse ``path`` and return a ``pyarrow.Table``."""
+        from rypipe_log import _rypipe_log
+
         return _rypipe_log.read_log(path, **kwargs)
 
 
@@ -337,27 +426,35 @@ _register()
 
 !!! note
 
-    Complex adapters (like [`crxml`](../crxml-adapter.md)) override
-    `_read_arrow()` instead of `read()` to control engine selection and
-    streaming. See [Adapter design patterns](../advanced/source-pattern.md)
-    for details. The `read()` override is simpler and sufficient for most
-    adapters.
+    `rypipe.Adapter` is a different thing: a `Source` subclass you
+    instantiate per file (`CsvAdapter("data.csv")`), useful as a base for
+    sources like `LogSource`. The object passed to `register_adapter` is a
+    plain callable adapter like `LogAdapter` above. Complex adapters (like
+    [`crxml`](../crxml-adapter.md)) also override `_read_arrow()` instead
+    of `read()` to control engine selection and streaming. See
+    [Adapter design patterns](../advanced/source-pattern.md) for details.
 
-For the full stage implementations (`CastTypes`, `FilterRows`, etc.), see
-[Stages](stages.md#stages).
+For the stage and sink re-export pattern (`CastTypes`, `FilterRows`,
+`collect`, `to_pandas`, ...), see
+[Python Adapter Wiring](python-wiring.md#re-exporting-stages).
 
 ## Step 6: Build and test { #step-6-build-and-test}
 
-Build the Rust extension with maturin, then test your adapter:
+Build the Rust extension with maturin (release mode, so timings are
+meaningful), then test your adapter:
 
 ### Build { #build }
 
-```bash
-pip install maturin
-maturin develop --release
+```console
+$ uv run --with maturin maturin develop --release
+📦 Built wheel for abi3 Python ≥ 3.10 to /tmp/.../rypipe_log-0.1.0-cp310-abi3-linux_x86_64.whl
+✏️ Setting installed package as editable
+🛠 Installed rypipe-log-0.1.0
 ```
 
 ### Test it { #test }
+
+Save this as `try_log.py` and run it:
 
 ```python
 import rypipe
@@ -371,28 +468,45 @@ with open("test.log", "w") as f:
 # Pattern 1: one-liner via rypipe (extension auto-detected)
 table = rypipe.read("test.log")
 print(table)
-# pyarrow.Table<name: string, age: string, active: string>
+```
 
-# Pattern 2: pipeline via LogSource + repacked stages
+```console
+$ python try_log.py
+pyarrow.Table
+name: string
+age: string
+active: string
+----
+name: [["Alice","Bob"]]
+age: [["30","25"]]
+active: [["true","false"]]
+```
+
+Pattern 2 uses the Source directly with the pipeline `|` operator; fused
+stages are pushed into the Rust parse:
+
+```python
 from rypipe_log import LogSource, CastTypes, FilterRows
 
 src = LogSource("test.log")
-result = (
+df = (
     src
     | CastTypes({"age": int})
     | FilterRows(field="active", op="==", value="true")
-).to_arrow()
-print(result)
-# pyarrow.Table<name: string, age: int64, active: string>
-# name: ["Alice"]
-# age: [30]
-# active: ["true"]
+).to_pandas()
+print(df)
 ```
 
-Pattern 2 (using the Source directly) is the recommended approach. It gives
-you the pipeline `|` operator, caching, and streaming. Pattern 1
-(`rypipe.read()`) is a convenience for one-liner reads but does not support
-pipelines.
+```console
+    name  age active
+0  Alice   30   true
+```
+
+Pattern 2 is the recommended approach. It gives you the pipeline `|`
+operator, caching, and streaming. Pattern 1 (`rypipe.read()`) is a
+convenience for one-liner reads but does not support pipelines. Note that
+`age` came back as a real integer and only Alice survived the filter:
+both stages ran inside the Rust parse, not in Python afterward.
 
 ## What just happened { #what-just-happened}
 
@@ -402,16 +516,24 @@ pipelines.
 3. **Engine** accumulated values into Arrow columns.
 4. **Export** produced a `pyarrow.Table` with zero-copy.
 
+!!! tip
+
+    Pass `schema=["name", "age", "active"]` and
+    `field_types={"age": "int64"}` when constructing `LogSource` to skip
+    column discovery and emit typed Arrow arrays directly. This alone can
+    boost throughput by +80% on projection workloads. See
+    [Schema](schema.md).
+
 ## Next steps { #next-steps}
 
-* [Pipeline](pipeline.md#pipeline), how the `|` operator and plan forwarding
-  work
-* [Stages](stages.md#stages), implement `CastTypes`, `FilterRows`, etc.
-* [Sinks](sinks.md#sinks), implement `collect`, `to_pandas`, `to_csv`
-* [Rust Creation](../writing-adapters/rust-creation.md), deep dive into
+* [Python Adapter Wiring](python-wiring.md), stage and sink re-exports,
+  adapter kwargs, engine selection, and streaming
+* [Rust Creation](rust-creation.md), deep dive into
   Splitter, RecordParser, and ColumnarSink
-* [Schema](../writing-adapters/schema.md), declare columns for maximum
+* [Schema](schema.md), declare columns for maximum
   performance
+* [Pipeline](../tutorial/pipeline.md#plans), how plan fusion works (user
+  perspective)
 
 ## Recap { #recap }
 
