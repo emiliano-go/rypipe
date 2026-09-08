@@ -1,403 +1,269 @@
 # Stages { #stages }
 
 Stages are the building blocks of pipelines. Each stage transforms the data
-as it flows through. This page explains the stages and how to expose them
-from your adapter.
-
-## How stages work { #how-stages-work }
-
-Stages are the building blocks of pipelines. Each stage transforms
-the data as it flows through, like a Unix pipe:
+as it flows through, like a Unix pipe. **crxml** ships four of them:
+`RenameFields`, `DropFields`, `CastTypes`, and `FilterRows`.
 
 ```python
-from rypipe_log import LogSource, RenameFields, FilterRows
+from crxml import CrystalXMLSource, RenameFields, FilterRows, to_dataframe
 
-source = LogSource("test.log")
+source = CrystalXMLSource("report.xml", row_tag="Details")
 
-# Each stage transforms the data in order
-result = (
+df = to_dataframe(
     source
-    | RenameFields({"Name": "name"})    # renames columns
-    | FilterRows(field="status", op="==", value="active")  # keeps matching rows
-)
-
-table = result.to_arrow()
-```
-
-**rypipe** stages have three methods:
-
-* `apply(record)`: transform a single dict (used for fused iteration).
-* `__call__(stream)`: transform an iterable of dicts (used for unfused
-  iteration).
-* `_plan_kwargs()`: return pushdown kwargs for the Rust engine, or `None`
-  if the stage cannot be fused.
-
-You never call these methods directly. The pipeline calls them automatically.
-See [Stage Protocol](../advanced/stage-protocol.md) for how the engine
-uses these methods.
-
-## Re-exporting stages from your adapter { #re-exporting-stages }
-
-Adapters re-export the stage classes from **rypipe**. Users import
-everything from the adapter package, never from **rypipe** directly:
-
-```python
-from rypipe_log import LogSource, CastTypes, FilterRows, RenameFields, DropFields
-```
-
-### The re-export pattern { #re-export-pattern }
-
-Add a `stages/` subpackage that re-exports from `rypipe.stages`:
-
-```python
-# rypipe_log/stages/__init__.py
-from rypipe.stages import (
-    CastTypes,
-    FilterRows,
-    FilterRowsAny,
-    FilterRowsAll,
-    FilterRowsNot,
-    RenameFields,
-    DropFields,
-)
-
-__all__ = [
-    "CastTypes",
-    "FilterRows",
-    "FilterRowsAny",
-    "FilterRowsAll",
-    "FilterRowsNot",
-    "RenameFields",
-    "DropFields",
-]
-```
-
-Then re-export from your package's top level:
-
-```python
-# rypipe_log/__init__.py
-from .stages import (
-    CastTypes,
-    FilterRows,
-    FilterRowsAny,
-    FilterRowsAll,
-    FilterRowsNot,
-    RenameFields,
-    DropFields,
+    | RenameFields({"Name": "name"})                        # renames a column
+    | FilterRows(field="Status", op="==", value="Active")   # keeps matching rows
 )
 ```
 
-!!! tip
-
-    Re-exporting is zero-cost. The stage classes are the same objects; the
-    engine fuses them identically whether they come from your package or from
-    **rypipe**. Copying the implementations creates maintenance burden with no
-    benefit.
+This page is a tour of each stage. All examples run against
+[report.xml](../examples/report.xml) (15 rows, fields `Name`, `Department`,
+`Amount`, `Status`, `Date`).
 
 ## RenameFields { #renamefields }
 
-Renames columns in each record.
+Renames columns. Columns not in the mapping pass through unchanged:
 
 ```python
-from rypipe_log import RenameFields
+from crxml import CrystalXMLSource, RenameFields
 
-stage = RenameFields({"Name": "name", "Amount": "amount"})
+src = CrystalXMLSource("report.xml", row_tag="Details")
 
-# Input:  {"Name": "Alice", "Amount": 150, "Status": "active"}
-# Output: {"name": "Alice", "amount": 150, "Status": "active"}
+row = next(iter(src | RenameFields({"Name": "name", "Amount": "amount"})))
+print(row)
+# {'name': 'Alice Johnson', 'Department': 'Sales', 'amount': '15000.50',
+#  'Status': 'Active', 'Date': '2026-01-05'}
 ```
-
-Keys not in the mapping pass through unchanged.
-
-**Fusable.** The Rust engine renames columns during parsing, no Python overhead.
-The `_plan_kwargs()` method returns `{"field_mapping": mapping}`.
 
 ## DropFields { #dropfields }
 
-Removes columns entirely from each record.
+Removes columns entirely:
 
 ```python
-from rypipe_log import DropFields
+from crxml import CrystalXMLSource, DropFields
 
-stage = DropFields(["InternalId"])
+src = CrystalXMLSource("report.xml", row_tag="Details")
 
-# Input:  {"Name": "Alice", "InternalId": 42, "Amount": 150}
-# Output: {"Name": "Alice", "Amount": 150}
+row = next(iter(src | DropFields(["Status", "Date"])))
+print(row)
+# {'Name': 'Alice Johnson', 'Department': 'Sales', 'Amount': '15000.50'}
 ```
 
-**Fusable.** The Rust engine skips the dropped column entirely: no scanning,
-no decoding, no memory allocation for that column.
+!!! warning
+
+    `DropFields` expects a `list[str]`, not a bare string:
+
+    ```python
+    DropFields("Status")    # wrong: raises TypeError
+    DropFields(["Status"])  # correct
+    ```
 
 !!! tip
 
     Dropped columns are the cheapest optimization. The engine skips all
-    work for the column during parsing.
-
-!!! warning
-
-    `DropFields` expects a `list[str]`, not a bare string. Passing a string
-    raises a `TypeError`:
-
-    ```python
-    # Wrong; raises TypeError
-    DropFields("InternalId")
-
-    # Correct
-    DropFields(["InternalId"])
-    ```
+    parsing work for them.
 
 ## CastTypes { #casttypes }
 
-Casts column values to the specified Python types.
+Casts column values to Python types. Files are text, so everything starts
+as a string; `CastTypes` gives you real numbers and booleans:
 
 ```python
-from rypipe_log import CastTypes
+from crxml import CrystalXMLSource, CastTypes
 
-stage = CastTypes({"age": int, "amount": float})
+src = CrystalXMLSource("report.xml", row_tag="Details")
 
-# Input:  {"name": "Alice", "age": "30", "amount": "150.5"}
-# Output: {"name": "Alice", "age": 30, "amount": 150.5}
+row = next(iter(src | CastTypes({"Amount": float})))
+print(row["Amount"], type(row["Amount"]))
+# 15000.5 <class 'float'>
 ```
 
-If the field is missing from the record, the cast is silently skipped. If
-the cast fails (e.g., `int("abc")`), a `ValueError` is raised.
-
-**Fusable** for `int`, `float`, `bool`, `date`, `datetime`, `Decimal`. The
-Rust engine parses the column directly as the target type: no string-to-number
-conversion in Python.
-
-| Python type | Rust type | Fusable |
-|-------------|-----------|---------|
-| `int` | `int64` | Yes |
-| `float` | `float64` | Yes |
-| `bool` | `bool` | Yes |
-| `date` | `date32` | Yes |
-| `datetime` | `timestamp` | Yes |
-| `Decimal` | `decimal128` | Yes |
-| `str` | (no-op) | - |
-| `UUID` | `string` | No |
-
-!!! tip
-
-    If your format is text-only and has no numeric fields, the `str` cast is a
-    no-op. You can skip the `CastTypes` stage entirely.
+Supported targets: `int`, `float`, `bool` (`str` is a no-op). If the column
+is missing from a row, the cast is skipped. If the cast fails (for example
+`int("abc")`), a `ValueError` is raised.
 
 ## FilterRows { #filterrows }
 
-Filters rows by a predicate.
+Keeps only the rows that match a condition.
 
 ### Constant filter { #filterrows-constant }
 
-Compares a field to a literal value:
+Compare a column to a literal value with `==` (equal) or `!=` (not equal):
 
 ```python
-from rypipe_log import FilterRows
+from crxml import CrystalXMLSource, FilterRows, collect
 
-stage = FilterRows(field="status", op="==", value="active")
+src = CrystalXMLSource("report.xml", row_tag="Details")
 
-# Input:  {"name": "Alice", "status": "active"}   kept
-# Input:  {"name": "Bob",   "status": "inactive"} dropped
+sales = src | FilterRows(field="Department", op="==", value="Sales")
+print(len(collect(sales)))  # 6
+
+not_active = src | FilterRows(field="Status", op="!=", value="Active")
+print(len(collect(not_active)))  # 3
 ```
-
-Supported operators: `==`, `!=`, `>`, `<`, `>=`, `<=`.
-
-### Null check { #filterrows-null }
-
-Keep rows where a field is null or missing:
-
-```python
-stage = FilterRows(field="email", is_null=True)
-
-# Input:  {"name": "Alice", "email": "a@b.com"}  dropped
-# Input:  {"name": "Bob"}                         kept (no email key)
-```
-
-### Type check { #filterrows-type }
-
-Keep rows where a field matches a specific type:
-
-```python
-stage = FilterRows(field="amount", is_type="float64")
-
-# Input:  {"amount": 3.14}    kept (float64)
-# Input:  {"amount": "hello"} dropped (string)
-```
-
-Supported types: `string`, `int64`, `float64`, `bool`, `date32`, `timestamp`, `decimal128`.
 
 ### Column comparison { #filterrows-compare }
 
-Compares two fields in the same record:
+Compare two columns in the same row with `field_a`, `op`, and `field_b`.
+All six operators work here: `==`, `!=`, `>`, `<`, `>=`, `<=`.
 
 ```python
-stage = FilterRows(field_a="price", op=">", field_b="cost")
+from crxml import CrystalXMLSource, FilterRows, collect
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+# Data-quality check: rows where Name and Department are identical
+suspect = src | FilterRows(field_a="Name", op="==", field_b="Department")
+print(len(collect(suspect)))  # 0
 ```
+
+This is handy for validating data (two columns that should always match, or
+never match) and for row-level arithmetic relationships, like
+`field_a="revenue", op=">", field_b="cost"`.
+
+!!! warning
+
+    Untyped columns are compared as strings, so `"9" > "100"` is true.
+    Add a `CastTypes` stage (or `field_types` on the source) before
+    comparing numbers.
+
+### Null and type checks { #filterrows-null-type }
+
+Two more keyword forms check a column's presence and type, no value needed:
+
+```python
+from crxml import CrystalXMLSource, FilterRows, collect
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+missing_status = src | FilterRows(field="Status", is_null=True)
+print(len(collect(missing_status)))  # 0, every row has a Status
+
+strings = src | FilterRows(field="Name", is_type="string")
+print(len(collect(strings)))  # 15
+```
+
+`is_null=True` keeps rows where the field is null or missing. `is_type`
+keeps rows where the field has the given type; valid types are `string`,
+`int64`, `float64`, `bool`, `dictionary`, `date32`, `timestamp`, and
+`decimal128`. Anything else raises a `ValueError`.
+
+### Combining filters: Any, All, Not { #filterrows-combinators }
+
+Three combinators build OR, AND, and NOT logic out of the keyword-form
+filters above:
+
+```python
+from crxml import CrystalXMLSource, FilterRows, collect
+from crxml import FilterRowsAny, FilterRowsAll, FilterRowsNot
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+# OR: Sales department or Inactive status
+either = src | FilterRowsAny(
+    FilterRows(field="Department", op="==", value="Sales"),
+    FilterRows(field="Status", op="==", value="Inactive"),
+)
+print(len(collect(either)))  # 6
+
+# AND: Sales department and Active status
+both = src | FilterRowsAll(
+    FilterRows(field="Department", op="==", value="Sales"),
+    FilterRows(field="Status", op="==", value="Active"),
+)
+print(len(collect(both)))  # 3
+
+# NOT: everything except Active rows
+not_active = src | FilterRowsNot(FilterRows(field="Status", op="==", value="Active"))
+print(len(collect(not_active)))  # 3
+```
+
+`FilterRowsAny` and `FilterRowsAll` take two or more filters; `FilterRowsNot`
+takes exactly one. They nest, so
+`FilterRowsAny(A, FilterRowsAll(B, FilterRowsNot(C)))` expresses
+`A or (B and not C)`. The inner filters must use a keyword form (constant,
+column comparison, `is_null`, or `is_type`); a plain callable cannot be
+combined this way and raises `ValueError`.
+
+!!! tip
+
+    Chaining two `FilterRows` stages with `|` is already an implicit AND,
+    so reach for `FilterRowsAll` mainly when nesting inside `FilterRowsAny`
+    or `FilterRowsNot`.
+
+All three combinators are fusable: the whole tree is pushed into the Rust
+parse loop, exactly like a single keyword filter.
 
 ### Callable predicate { #filterrows-callable }
 
-An arbitrary Python function that receives a dict and returns `True` to keep
-or `False` to drop:
+For anything more complex, pass a function that receives the row dict and
+returns `True` to keep the row:
 
 ```python
-stage = FilterRows(lambda r: r["name"].startswith("A"))
+from crxml import CrystalXMLSource, FilterRows, collect
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+a_names = src | FilterRows(lambda r: r["Name"].startswith("A"))
+print([r["Name"] for r in collect(a_names)])
+# ['Alice Johnson']
 ```
 
-Simple lambdas (field comparisons, `startswith`, `endswith`, `contains`,
-`strip`, `lower`, `upper`, `replace`, `len()`, compound AND/OR, closures)
-are automatically compiled into fusable predicates that run in the Rust parse
-loop. Complex lambdas (method chains like `strip().lower()`) fall back to
-Python execution.
-See [Lambda Compiler](../architecture/lambda-compiler.md) for the full list
-of supported patterns.
+Lambdas are not slow by default. When you pass a lambda, rypipe analyzes its
+bytecode at construction time and, for common patterns, compiles it into a
+Rust filter operation that runs fused inside the parse loop, just like the
+keyword form. Compilable patterns include field comparisons
+(`r["Amount"] == "100"`), string methods (`startswith`, `endswith`,
+`contains`, `strip`, `lower`, `upper`, `replace`), `len()` comparisons,
+`in` / `not in` membership, and `and` / `or` / `not` combinations of those.
 
-### Fusion { #filterrows-fusion }
+Only lambdas the compiler does not recognize (calling your own functions,
+date parsing, and so on) run in Python per row.
 
-FilterRows is fusable when using the keyword form or a compiled lambda.
-The Rust engine applies the filter during parsing.
-
-## FilterRowsAny { #filterrowsany }
-
-Keeps rows that satisfy **any** of the given filters (logical OR).
-
-```python
-from rypipe_log import FilterRows, FilterRowsAny
-
-stage = FilterRowsAny(
-    FilterRows(field="status", op="==", value="active"),
-    FilterRows(field="status", op="==", value="pending"),
-)
-
-# Keeps rows where status is "active" OR "pending"
-```
-
-**Parameters:** At least two `FilterRows` instances (keyword form only).
-
-## FilterRowsAll { #filterrowsall }
-
-Keeps rows that satisfy **all** of the given filters (logical AND).
-
-```python
-from rypipe_log import FilterRows, FilterRowsAll
-
-stage = FilterRowsAll(
-    FilterRows(field="status", op="==", value="active"),
-    FilterRows(field="age", op="!=", value="0"),
-)
-
-# Keeps rows where status == "active" AND age != "0"
-```
-
-**Parameters:** At least two `FilterRows` instances (keyword form only).
-
-!!! note
-
-    Chaining plain `FilterRows` with `|` already implies AND. `FilterRowsAll`
-    is useful when combining inside another combinator or when the order matters.
-
-## FilterRowsNot { #filterrowsnot }
-
-Negates a single filter.
-
-```python
-from rypipe_log import FilterRows, FilterRowsNot
-
-stage = FilterRowsNot(FilterRows(field="status", op="==", value="deleted"))
-
-# Keeps rows where status != "deleted"
-```
-
-**Parameters:** Exactly one `FilterRows` instance (keyword form only).
+For the full filter-spec format (including column-to-column comparison),
+see the [Python API reference](../reference/python-api.md#filter-spec-format).
 
 ## Combining stages { #combining-stages }
 
-Stages compose freely. The order matters: stages are applied left to right:
+Stages compose freely, and order matters: they run left to right. Chaining
+two `FilterRows` keeps rows matching **both** (logical AND):
 
 ```python
-from rypipe_log import LogSource
-from rypipe_log import RenameFields, DropFields, CastTypes, FilterRows
-from rypipe_log import FilterRowsAny, FilterRowsNot
+from crxml import CrystalXMLSource
+from crxml import RenameFields, DropFields, CastTypes, FilterRows, to_dataframe
 
-src = LogSource("test.log")
+src = CrystalXMLSource("report.xml", row_tag="Details")
 
-# Complex pipeline
-result = (
+df = to_dataframe(
     src
     | RenameFields({"Name": "name", "Amount": "amount"})
-    | DropFields(["InternalId", "DebugInfo"])
+    | DropFields(["Date"])
     | CastTypes({"amount": float})
-    | FilterRowsAny(
-        FilterRows(field="status", op="==", value="active"),
-        FilterRows(field="status", op="==", value="pending"),
-    )
-    | FilterRowsNot(FilterRows(field="name", op="==", value="system"))
+    | FilterRows(field="Status", op="==", value="Active")
+    | FilterRows(field="Department", op="!=", value="Sales")
 )
-
-table = result.to_arrow()
+print(df.head(3))
 ```
 
-## When to re-implement { #when-to-re-implement }
-
-Re-export the standard stages. Only re-implement when you need
-format-specific behavior that the standard stages cannot express.
-
-### Example: validated filter with logging { #example-validated-filter }
-
-Suppose your format has a `status` field that is always uppercase, but
-downstream consumers expect lowercase. You want to normalize before filtering
-and log warnings for unexpected values:
-
-```python
-from rypipe.stages import FilterRows
-
-class ValidatingFilterRows(FilterRows):
-    """FilterRows that normalizes status values and logs warnings."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._warnings = []
-
-    def apply(self, record: dict) -> dict | None:
-        # Normalize before filtering
-        if "status" in record:
-            record["status"] = record["status"].lower()
-            if record["status"] not in ("active", "inactive", "pending"):
-                self._warnings.append(f"unexpected status: {record['status']}")
-        return super().apply(record)
+```console
+          name   Department    amount  Status
+0    Bob Smith  Engineering    8500.0  Active
+1  Carol White    Marketing  12000.75  Active
+2    Eve Davis  Engineering   11200.0  Active
 ```
-
-Use it like the standard `FilterRows`; it fuses identically because
-`_plan_kwargs()` is inherited:
-
-```python
-from rypipe_log import LogSource
-from my_adapter.stages import ValidatingFilterRows
-
-src = LogSource("test.log")
-result = src | ValidatingFilterRows(field="status", op="==", value="active")
-table = result.to_arrow()
-```
-
-!!! note
-
-    If you override `_plan_kwargs()` and return `None`, the stage falls back
-    to Python execution. Only do this when fusion is impossible (e.g., the
-    stage depends on external state).
-
-See [Stage Protocol](../advanced/stage-protocol.md) for the full protocol
-reference and [Pushdown Fusion](../advanced/fusion.md) for how the engine
-compiles stages into an execution plan.
 
 ## Recap { #recap }
 
-* **Re-export** stages from `rypipe.stages`; don't copy implementations.
-* **RenameFields** renames columns. Always fusable.
-* **DropFields** removes columns. Always fusable.
-* **CastTypes** converts column types. Fusable for `int`, `float`, `bool`,
-  `date`, `datetime`, `Decimal`.
-* **FilterRows** filters rows. Fusable when using the keyword form or a
-  compiled lambda. See [Lambda Compiler](../architecture/lambda-compiler.md).
-* **FilterRowsAny**, **FilterRowsAll**, **FilterRowsNot** combine filters.
-* Import stages from the adapter package, not from **rypipe**.
-* Only re-implement when you need format-specific behavior.
+* `RenameFields` renames columns; `DropFields` removes them.
+* `CastTypes` converts strings to `int`, `float`, or `bool`.
+* `FilterRows` keeps matching rows: constant (`field`/`op`/`value`), column
+  comparison (`field_a`/`op`/`field_b`), null check (`is_null=True`), type
+  check (`is_type="..."`), or a lambda. Keyword forms and recognized lambdas
+  compile into Rust filter operations; only unrecognized lambdas run in
+  Python.
+* `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` combine keyword-form
+  filters into OR / AND / NOT trees, and nest.
+* Full parameter reference: [Python API](../reference/python-api.md#stages).
 
-**Next:** [Plans](plans.md#plans), how plan fusion works.
+**Next:** [Sinks](sinks.md#sinks), getting data out of sources and
+pipelines.
