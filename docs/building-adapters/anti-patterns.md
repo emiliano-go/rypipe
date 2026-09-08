@@ -203,6 +203,33 @@ producing wrong results silently.
 | Wrong `next_record_start` | Overlapping chunks | Return pos after delim |
 | Forgetting `end_row` | Silent wrong results | Pair begin/end |
 
+## Build and test { #build-and-test }
+
+Check the UTF-8 validation pitfall first: read a file with an invalid
+byte sequence and confirm the parser rejects it cleanly instead of
+crashing or emitting garbage:
+
+```console
+$ python -c "
+from rypipe_log import LogSource
+try:
+    LogSource('bad.log').to_arrow()
+except ValueError as e:
+    print('invalid UTF-8 -> ValueError', e)
+"
+invalid UTF-8 -> ValueError invalid UTF-8: invalid utf-8 sequence
+```
+
+The same guarantee is pinned by a Rust unit test:
+
+```console
+$ cargo test parser_rejects_invalid_utf8
+running 1 test
+test tests::parser_rejects_invalid_utf8 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
 ## See also { #see-also }
 
 - [Techniques](./techniques.md): Performance optimizations
