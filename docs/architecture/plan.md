@@ -127,6 +127,7 @@ Compare uses native-typed comparison with numeric promotion (Int64↔Float64).
 
 `rypipe-python` converts Python kwargs to `ExecutionPlan` via
 `execution_plan_from_kwargs` in `plan_kwargs.rs`:
+
 - `field_mapping` → `field_map`
 - `drop_fields` → `drop_fields`
 - `field_types` → `field_types`
