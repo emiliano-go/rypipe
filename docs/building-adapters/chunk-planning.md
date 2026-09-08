@@ -30,6 +30,7 @@ pub enum SplitMode {
 ```
 
 **Algorithm:**
+
 1. `by_size = bytes / MIN_CHUNK_BYTES` (chunk count from file size)
 2. `cap = 16 * threads` (Parallel) or `8 * threads` (Streaming)
 3. `result = min(by_size, cap).max(threads).min(MAX_SPLIT_CHUNKS)`
@@ -55,7 +56,25 @@ backpressure, so smaller chunks help amortize it.
 ```python
 t = threads if threads > 0 else cpu_count()
 file_bytes = path.stat().st_size
-num_chunks = max(t, min(16 * t, file_bytes // (4 * 1024 * 1024)))
+num_chunks = max(t, min(16 * t, file_bytes // (2 * 1024 * 1024)))
 ```
 
-This matches `plan_chunk_count(bytes, threads, SplitMode::Parallel)`.
+This matches `plan_chunk_count(bytes, threads, SplitMode::Parallel)`
+(`MIN_CHUNK_BYTES` is 2 MiB).
+
+## Build and test { #build-and-test }
+
+Verify the planner's floor and thread clamp against the real constants:
+
+```console
+$ cargo test chunk_planning
+running 1 test
+test tests::chunk_planning_respects_floor ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+The test calls `rypipe_core::decoder::plan_chunk_count` directly:
+`plan_chunk_count(1024, 4, Parallel)` returns 4 (clamped up to the thread
+count), and a 1 GiB file on 8 threads returns 128 in Parallel mode and 64
+in Streaming mode, never exceeding `MAX_SPLIT_CHUNKS` (1024).
