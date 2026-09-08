@@ -1,321 +1,173 @@
 # Streaming { #streaming }
 
+By default, `to_arrow()` parses the whole file into memory. For files
+larger than your RAM, stream instead: **rypipe** reads the file in bounded
+chunks and yields one Arrow `RecordBatch` at a time, so peak memory stays
+roughly constant no matter how big the file is.
+
+The entry point is `iter_record_batches()`:
+
+```python
+from crxml import CrystalXMLSource
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+for batch in src.iter_record_batches(memory="64MB"):
+    print(batch.num_rows)
+```
+
+The examples below run on `report.xml` unchanged; the patterns are
+identical for a 50 GB file.
+
+## The memory parameter { #memory-parameter }
+
+`memory=` sets the budget per chunk. It accepts a string or an integer
+number of bytes:
+
+```python
+src.iter_record_batches(memory="64MB")
+src.iter_record_batches(memory="512KB")
+src.iter_record_batches(memory=67_108_864)  # 64 MB in bytes
+```
+
+Supported units: `B`, `KB`, `MB`, `GB`, `TB` (1024-based, case-insensitive,
+no space between the number and the unit). The `KiB`/`MiB` binary forms are
+not accepted; `"64MiB"` raises `invalid memory`. Peak memory is
+approximately the budget plus one batch and the export buffer.
+
 !!! note
 
-    Streaming options (`memory`, `threads`) are available in most adapters
-    but may have different defaults. Check your adapter's docs.
-
-When processing files larger than available memory, use streaming to process
-data in bounded chunks. Here is the complete pattern:
-
-```python
-from rypipe_log import LogSource
-
-src = LogSource("huge_report.log")
-df = src.to_pandas(memory="64MiB")
-```
-
-We will explain every line of this in the following sections.
-
-## The problem { #the-problem }
-
-By default, `.to_arrow()` parses the entire file into memory at once.
-This works for files up to several GB on a machine with enough RAM,
-but fails for larger files:
-
-```python
-from rypipe_log import LogSource
-
-# This loads the entire file into memory
-source = LogSource("huge_report.log")
-table = source.to_arrow()  # may OOM
-```
+    Batch sizes are derived automatically from the memory budget and the
+    estimated row size. You do not need to tune them.
 
 ## Streaming to a DataFrame { #streaming-to-a-dataframe }
 
-Pass `memory=` to any sink for bounded-memory processing:
+Concatenate the batches into one pandas DataFrame:
 
 ```python
-from rypipe_log import LogSource
+import pandas as pd
+from crxml import CrystalXMLSource
 
-src = LogSource("huge_report.log")
-df = src.to_pandas(memory="64MiB")
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+df = pd.concat(b.to_pandas() for b in src.iter_record_batches(memory="64MB"))
+print(df.shape)  # (15, 5)
 ```
 
-Peak memory is `memory` + one batch + export buffer. A 10 GB file with
-`memory="256MiB"` uses at most ~300 MB of parsing memory at any time.
+The whole DataFrame still ends up in memory, of course. The win is that the
+*parser* never holds the whole file at once, and you can process or write
+out each batch as it arrives (see below).
 
-### How it works { #how-it-works }
+## Streaming with pipelines { #streaming-with-pipelines }
 
-When you pass `memory=` to a sink, **rypipe** reads a chunk of the file into
-memory (bounded by `memory`), parses it into a `RecordBatch`, converts it to
-a DataFrame, and repeats for the next chunk. The batches are concatenated
-into a single DataFrame at the end.
-
-### What **rypipe** does automatically { #what-rypipe-does }
-
-With streaming enabled, **rypipe**:
-
-* Bounds memory per chunk; a 50 GB file with `memory="64MiB"` never
-  exceeds ~64 MiB of parsing memory.
-* Discovers the schema from the first chunk and reuses it for all subsequent
-  chunks, avoiding per-chunk discovery overhead.
-* Pushes fusable stages (rename, drop, constant filter, typed cast) into the
-  Rust parse loop, so they run at full parsing speed with no Python overhead.
-* Sizes batches automatically from the `memory` budget and estimated row
-  size, or you can set `batch_size` explicitly for finer control.
-
-### Memory parameter { #memory-parameter}
-
-The `memory` parameter accepts a string or integer:
+Pipelines stream too. Fusable stages are pushed into the streaming parse
+loop, so they run at full parsing speed:
 
 ```python
-# String formats
-df = src.to_pandas(memory="64MiB")
-df = src.to_pandas(memory="256MB")
+from crxml import CrystalXMLSource, CastTypes, FilterRows
 
-# Integer (bytes)
-df = src.to_pandas(memory=67_108_864)  # 64 MiB
-```
+src = CrystalXMLSource("report.xml", row_tag="Details")
 
-Supported units: `B`, `KB`, `MB`, `GB`, `TB`, `KiB`, `MiB`, `GiB`, `TiB`.
-
-## Streaming with pipelines { #streaming-with-pipelines}
-
-Pipelines also support streaming:
-
-```python
-from rypipe_log import LogSource
-from rypipe_log import CastTypes, FilterRows
-
-src = LogSource("huge_report.log")
-df = (
+pipeline = (
     src
-    | CastTypes({"amount": float})
-    | FilterRows(field="status", op="==", value="active")
-).to_pandas(memory="64MiB")
+    | CastTypes({"Amount": float})
+    | FilterRows(field="Status", op="==", value="Active")
+)
+
+total = sum(b.num_rows for b in pipeline.iter_record_batches(memory="64MB"))
+print(total)  # 12
 ```
 
-!!! note
+## Writing Parquet with constant memory { #writing-to-parquet }
 
-    When all stages are fusable, **rypipe** pushes the entire pipeline into the
-    streaming parse loop. Non-fusable stages run after each batch is parsed.
-
-## Writing to Parquet { #writing-to-parquet}
-
-A common pattern is streaming a large file into a Parquet file:
+The classic large-file pattern: stream batches straight into a Parquet
+file. Only one batch is in memory at a time:
 
 ```python
-from rypipe_log import LogSource
-from rypipe_log import CastTypes
+import pyarrow.parquet as pq
+from crxml import CrystalXMLSource
 
-src = LogSource("huge_report.log")
-pipeline = src | CastTypes({"amount": float})
+src = CrystalXMLSource("report.xml", row_tag="Details")
 
-pipeline.to_parquet("output.parquet", memory="64MiB")
+batches = src.iter_record_batches(memory="64MB")
+first = next(batches)
+
+with pq.ParquetWriter("output.parquet", first.schema) as writer:
+    writer.write_batch(first)
+    for batch in batches:
+        writer.write_batch(batch)
 ```
 
-## Writing to Polars { #writing-to-polars}
+## Streaming to Polars { #writing-to-polars }
 
 ```python
-from rypipe_log import LogSource
+import pyarrow as pa
+import polars as pl
+from crxml import CrystalXMLSource
 
-src = LogSource("huge_report.log")
-df = src.to_polars(memory="64MiB")
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+table = pa.Table.from_batches(list(src.iter_record_batches(memory="64MB")))
+df = pl.from_arrow(table)
 ```
 
 ## Parallel streaming { #parallel-streaming }
 
-For higher throughput on multi-core machines, pass `threads=` for parallel
-streaming. The engine parses chunks in parallel across multiple threads while
-keeping memory bounded:
+Pass `threads=` to parse chunks in parallel while keeping the same memory
+bound. This gives throughput close to full-RAM parallel parsing:
 
 ```python
-from rypipe_log import LogSource
-
-src = LogSource("huge_report.log")
-
-# Single-threaded streaming
-df = src.to_pandas(memory="64MiB")
-
-# Parallel streaming (faster on multi-core machines)
-df = src.to_pandas(memory="64MiB", threads=16)
+total = 0
+for batch in src.iter_record_batches(memory="64MB", threads=16):
+    total += batch.num_rows
 ```
-
-Parallel streaming keeps the same memory bound as single-threaded streaming
-but achieves throughput closer to full-RAM parallel parsing.
-
-## Performance { #performance }
-
-Streaming has slightly lower throughput than full-table parsing when
-single-threaded. Parallel streaming closes the gap and can exceed
-full-RAM parallel by keeping the pipeline feed saturated. Typical
-numbers for the [`crxml`](../crxml-adapter.md) adapter:
-
-| Mode | Throughput | Peak memory |
-|------|-----------|-------------|
-| Parallel (default) | ~4 GB/s | File size |
-| Single-thread | ~1 GB/s | File size |
-| Streaming (64 MiB, single-thread) | ~700 MB/s | ~64 MiB |
-| Parallel streaming (64 MiB, 16 threads) | ~4.5 GB/s | ~64 MiB |
 
 !!! tip
 
-    Use streaming when your file is larger than ~50% of available RAM. For
-    smaller files, the default parallel mode is faster.
+    Use streaming when the file is larger than about half of your available
+    RAM. For smaller files the default parallel mode is faster. See
+    [Performance](../performance.md) for measured numbers.
 
-## Advanced: batch-level control { #advanced-batch-control }
+## Batch-level control { #advanced-batch-control }
 
-For cases where you need to stop early or process batches individually, use
-`iter_record_batches()` directly:
+Because you get one batch at a time, you can stop early. Here we search for
+one record without parsing the rest of the file:
 
 ```python
-from rypipe_log import LogSource
+from crxml import CrystalXMLSource
 
-src = LogSource("huge_report.log")
+src = CrystalXMLSource("report.xml", row_tag="Details")
 
-# Stop after finding a specific record (don't parse the full 50 GB file)
-for batch in src.iter_record_batches(memory="64MiB"):
+for batch in src.iter_record_batches(memory="64MB"):
     df = batch.to_pandas()
-    matches = df[df["order_id"] == "ORD-12345"]
+    matches = df[df["Name"] == "Ivy Anderson"]
     if not matches.empty:
-        print(f"Found: {matches.iloc[0].to_dict()}")
+        print(matches.iloc[0].to_dict())
         break
 ```
 
-!!! note
-
-    `iter_record_batches()` is the low-level API for advanced use cases.
-    For most users, `to_pandas(memory=...)`, `to_parquet(path, memory=...)`,
-    and `to_polars(memory=...)` are simpler and sufficient.
-
-## Adding streaming to your adapter { #adding-streaming-to-your-adapter }
-
-### Two levels of streaming support { #two-levels }
-
-Most adapters get streaming for free. The engine provides Rust streaming
-iterators (`StreamingBatchIterator` and `ParallelStreamingBatchIterator`)
-that handle bounded memory, chunking, and parallelism. Your adapter just
-needs to override `iter_record_batches()` to call them.
-
-### Python-side wiring (the common path) { #python-wiring }
-
-Two files wire the Rust streaming entry point to Python.
-
-#### Source: `rypipe_log/source.py` { #source-py }
-
-`LogSource` subclasses `Source` and exposes the Rust `iter_batches` function.
-`_read_arrow` handles full-table reads; `iter_record_batches` handles
-bounded-memory streaming:
-
-```python
-# rypipe_log/source.py
-from rypipe import Source
-import _rypipe_log
-
-
-class LogSource(Source):
-    """Pipeline-capable source for newline-delimited key=value logs."""
-
-    def _read_arrow(self, plan_overrides=None):
-        # Merge construction-time kwargs with fused pipeline overrides
-        plan = self._build_plan_kwargs()
-        if plan_overrides:
-            plan.update(plan_overrides)
-        return _rypipe_log.read(str(self._path), **plan)
-
-    def iter_record_batches(self, memory="64MiB", batch_size=None, **kwargs):
-        # Forward plan kwargs (field_mapping, drop_fields, filter, ...) to Rust
-        plan = self._build_plan_kwargs()
-        return _rypipe_log.iter_batches(
-            str(self._path), memory=memory, batch_size=batch_size, **plan
-        )
-```
-
-#### Adapter: `rypipe_log/rypipe_adapter.py` { #adapter-py }
-
-`LogAdapter` is a thin wrapper. `read()` returns a table for `rypipe.read()`;
-`iter_record_batches` delegates to `LogSource` for streaming:
-
-```python
-# rypipe_log/rypipe_adapter.py
-from .source import LogSource
-
-
-class LogAdapter:
-    """rypipe-compatible adapter for newline-delimited key=value logs."""
-
-    def read(self, path: str, **kwargs):
-        return LogSource(path, **kwargs).to_arrow()
-
-    def iter_record_batches(self, path, memory="64MiB", batch_size=None, **kwargs):
-        yield from LogSource(path, **kwargs).iter_record_batches(
-            memory=memory, batch_size=batch_size
-        )
+```console
+{'Name': 'Ivy Anderson', 'Department': 'Sales', 'Amount': '6300.75', 'Status': 'Inactive', 'Date': '2026-01-13'}
 ```
 
 !!! note
 
-    The adapter's `read()` returns a `pyarrow.Table`, not a Source.
-    Users who want pipelines use the Source directly.
-
-### When you need a custom Rust streaming path { #custom-rust-streaming }
-
-If your format has special chunking requirements (e.g., row boundaries span
-chunks), implement `iter_batches` in Rust and expose it via PyO3. See
-[Python Adapter Wiring: Streaming](../writing-adapters/python-wiring.md#streaming)
-for the full Source implementation.
-
-### What users get { #what-users-get }
-
-With the wiring above:
-
-- `source.to_pandas(memory="64MiB")` works automatically.
-- `source.to_parquet(path, memory="64MiB")` works automatically.
-- `pipeline.to_pandas(memory="64MiB")` works automatically.
-- Fusable stages run in the parse loop (no Python overhead).
-- Peak memory is bounded by the `memory` parameter.
-
-## Try it { #try-it }
-
-Run the streaming example:
-
-```bash
-python -c "
-from rypipe_log import LogSource, CastTypes
-
-# Create a test file with multiple rows
-with open('huge_report.log', 'w') as f:
-    for i in range(10000):
-        f.write(f'name=User{i},amount={i*1.5},status=active\n')
-
-# Stream with bounded memory
-src = LogSource('huge_report.log')
-df = src.to_pandas(memory='64MiB')
-print(f'Processed {len(df)} rows')
-print(df.head())
-"
-```
-
-Expected output:
-
-```
-Processed 10000 rows
-       name  amount  status
-0    User0     0.0  active
-1    User1     1.5  active
-2    User2     3.0  active
-3    User3     4.5  active
-4    User4     6.0  active
-```
+    You can also pass `memory=` to the `CrystalXMLSource` constructor. Then
+    even `to_arrow()` stays within the budget. See
+    [Configuration](configuration.md#source-constructor-options).
 
 ## Recap { #recap }
 
-* Pass `memory=` to any sink (`to_pandas`, `to_polars`, `to_parquet`,
-  `collect`) for bounded-memory streaming.
-* Peak memory is `memory` + one batch + export buffer.
-* Pass `threads=` for parallel streaming on multi-core machines.
-* Streaming works with pipelines: fusable stages run in the parse loop.
-* Use `iter_record_batches()` for advanced batch-level control.
+* `iter_record_batches(memory="64MB")` yields Arrow batches within a fixed
+  memory budget, from Sources and from pipelines.
+* Build a DataFrame with `pd.concat`, write Parquet incrementally with
+  `pq.ParquetWriter`, or process batches one at a time and stop early.
+* `threads=` enables parallel streaming at the same memory bound.
+* Units are `B`/`KB`/`MB`/`GB`/`TB` (case-insensitive, no spaces), or an
+  integer number of bytes.
+* Not streaming? Then call `.clear_cache()` after each file's final sink so
+  ETL jobs over many files do not accumulate cached tables (see
+  [Sinks](sinks.md#clear-cache)).
 
-**Next:** [Configuration](configuration.md#configuration): all available options.
+**Next:** [Configuration](configuration.md#configuration), all available
+options.
