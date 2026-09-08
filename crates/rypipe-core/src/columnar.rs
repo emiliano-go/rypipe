@@ -491,6 +491,41 @@ pub fn parse_date32(s: &str) -> Option<i32> {
     Some((d - epoch).num_days() as i32)
 }
 
+/// Parse a decimal string into a scaled `i128` for Arrow `Decimal128`.
+/// Handles signs and fractional parts; extra fraction digits beyond `scale`
+/// are truncated. Returns `None` for non-numeric input.
+pub fn parse_decimal128(s: &str, scale: u8) -> Option<i128> {
+    let s = s.trim();
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (int_part, frac_part) = s.split_once('.').map_or((s, ""), |(i, f)| (i, f));
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let int_val: i128 = if int_part.is_empty() {
+        0
+    } else {
+        int_part.parse().ok()?
+    };
+    let scale = scale as u32;
+    let mut val = int_val.checked_mul(10i128.checked_pow(scale)?)?;
+    if !frac_part.is_empty() {
+        let digits = &frac_part[..frac_part.len().min(scale as usize)];
+        if !digits.is_empty() {
+            if !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let frac: i128 = digits.parse().ok()?;
+            let frac_scaled =
+                frac.checked_mul(10i128.checked_pow(scale - digits.len() as u32)?)?;
+            val = val.checked_add(frac_scaled)?;
+        }
+    }
+    Some(if neg { -val } else { val })
+}
+
 /// Parse an ISO-8601 datetime (or bare date = midnight) into an integer in
 /// `unit`. Naive parsing only; adapters handling timezones should emit
 /// `Value::Timestamp` directly.
@@ -796,12 +831,7 @@ impl ColumnBuilder {
                 v.push(value.and_then(|s| parse_timestamp(&s, *unit)));
             }
             ColumnBuilder::Decimal128(scale, v) => {
-                v.push(value.and_then(|s| {
-                    s.trim()
-                        .parse::<i128>()
-                        .ok()
-                        .map(|n| n * 10i128.pow(*scale as u32))
-                }));
+                v.push(value.and_then(|s| parse_decimal128(&s, *scale)));
             }
             ColumnBuilder::Dictionary {
                 codes,
@@ -839,12 +869,7 @@ impl ColumnBuilder {
                 v.push(value.and_then(|s| parse_timestamp(s, *unit)));
             }
             ColumnBuilder::Decimal128(scale, v) => {
-                v.push(value.and_then(|s| {
-                    s.trim()
-                        .parse::<i128>()
-                        .ok()
-                        .map(|n| n * 10i128.pow(*scale as u32))
-                }));
+                v.push(value.and_then(|s| parse_decimal128(&s, *scale)));
             }
             ColumnBuilder::Dictionary {
                 codes,
@@ -1415,6 +1440,34 @@ mod tests {
     use super::*;
     use crate::plan::FieldType;
     use crate::value::Value;
+
+    #[test]
+    fn test_parse_decimal128() {
+        assert_eq!(parse_decimal128("15000.50", 2), Some(1500050));
+        assert_eq!(parse_decimal128("42", 2), Some(4200));
+        assert_eq!(parse_decimal128("-3.25", 2), Some(-325));
+        assert_eq!(parse_decimal128("+1.5", 0), Some(1)); // fraction truncated at scale 0
+        assert_eq!(parse_decimal128("0.123456", 4), Some(1234));
+        assert_eq!(parse_decimal128(".5", 2), Some(50));
+        assert_eq!(parse_decimal128("bad", 2), None);
+        assert_eq!(parse_decimal128("1.2.3", 2), None);
+        assert_eq!(parse_decimal128("", 2), None);
+    }
+
+    #[test]
+    fn test_decimal128_column_from_strings() {
+        let mut b = ColumnBuilder::with_capacity(3, &FieldType::Decimal128(2));
+        b.push_value(Value::Str(Cow::Borrowed("15000.50")));
+        b.push_value(Value::Str(Cow::Borrowed("8.5")));
+        b.push_value(Value::Null);
+        if let ColumnBuilder::Decimal128(_, v) = &b {
+            assert_eq!(v.get(0), Some(1500050));
+            assert_eq!(v.get(1), Some(850));
+            assert_eq!(v.get(2), None);
+        } else {
+            panic!("expected Decimal128 builder");
+        }
+    }
 
     #[test]
     fn test_push_value_str_parsing() {
