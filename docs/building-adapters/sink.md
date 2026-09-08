@@ -7,9 +7,9 @@ values into typed Arrow columns.
 See [Decoder API](../architecture/decoder.md) for how the
 engine implements this trait internally.
 
-## Method reference (21 methods) { #method-reference }
+## Method reference { #method-reference }
 
-### Required (4) { #required }
+### Required { #required }
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
@@ -18,7 +18,7 @@ engine implements this trait internally.
 | `end_row` | `fn end_row(&mut self)` | End the row. Null-fills missing columns, evaluates filter. |
 | `finish` | `fn finish(&mut self) -> Result<RecordBatch>` | Finalize into Arrow. Called once after all rows. |
 
-### Field resolution (4) { #field-resolution }
+### Field resolution { #field-resolution }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
@@ -27,7 +27,7 @@ engine implements this trait internally.
 | `put_field_resolved` | delegates to `put_field` | Push with pre-resolved name (skips rename lookup). |
 | `resolve_and_put` | resolve then put_field_resolved | Combined resolve + push (single hash probe). |
 
-### Tier control (3) { #tier-control }
+### Tier control { #tier-control }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
@@ -35,7 +35,7 @@ engine implements this trait internally.
 | `needs_resolve` | `true` | `false` = traverse-only mode (skip resolve). |
 | `row_rejected` | `false` | `true` = filter rejected this row; scanner byte-jumps to row close. |
 
-### Projection (3) { #projection }
+### Projection { #projection }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
@@ -43,7 +43,7 @@ engine implements this trait internally.
 | `wanted_mask` | `0` | Bitmask of wanted columns. `(mask >> slot) & 1` replaces per-field `wants()`. |
 | `reset_child_ordinal` | no-op | Reset ordinal counter after row-tag attributes. |
 
-### Layout prediction (4) { #layout-prediction }
+### Layout prediction { #layout-prediction }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
@@ -52,15 +52,27 @@ engine implements this trait internally.
 | `record_slot` | no-op | Cache slot resolution for subsequent rows. |
 | `layout_broken` | no-op | Invalidate cached layout on mismatch. |
 
-### Batch (1) { #batch }
+### Batch { #batch }
 
 | Method | Default | Purpose |
 |--------|---------|---------|
 | `put_row` | iterates `put_field` | Push a complete row in one call. |
 
+The default just loops over `put_field`, so there is nothing to gain unless
+you override it. Override only if your parser naturally produces a whole
+row at once (a decoded record struct, a fixed-width slot array) and can
+push it without per-field branching; otherwise the per-field methods give
+the engine more chances to short-circuit (`wants`, `row_rejected`).
+
 ## Fast paths in order { #fast-paths-in-order }
 
-The engine provides four push methods, from fastest to slowest:
+The engine provides four push methods, from fastest to slowest. The speed
+differences come from skipped lookups, and each skip moves a responsibility
+onto your parser: the faster the method, the more preconditions you must
+guarantee yourself. The slower methods exist because they are simpler and
+robust by construction; a few nanoseconds per field only matter on very hot
+paths, so start with `put_field` and move down this list only where
+profiling justifies it.
 
 ### 1. `put_field_at(slot, value)`: fastest { #1-put_field_at-fastest }
 
@@ -74,6 +86,15 @@ expect_slot(ordinal) → Some((slot, expected))
 
 **Cost:** ~5 ns per field (column write + dirty bit set).
 
+**Use when:** your format has a fixed field order and the parser sits on a
+hot path (millions of rows).
+
+**Constraint:** slot numbers are only meaningful for one specific layout.
+You must guard every push with the `expect_slot` memcmp and call
+`layout_broken(ordinal)` the moment a row deviates (reordered, missing, or
+extra fields), or you silently write values into the wrong columns. See
+[Layout prediction](#layout-prediction).
+
 ### 2. `put_field_resolved(name, value)`: fast { #2-put_field_resolved-fast }
 
 Skips the rename lookup. Used when you've already called `resolve()`.
@@ -84,6 +105,15 @@ resolve(name) → Some(resolved)
 ```
 
 **Cost:** ~10 ns per field (single HashMap lookup + column write).
+
+**Use when:** extraction is expensive (entity decoding, base64, date
+parsing), so you want to check `resolve()` once, skip unwanted fields, and
+push without paying the rename/drop lookup a second time.
+
+**Constraint:** the `resolved` name is only valid within the current row
+state; do not cache it across rows or schema changes. And if extraction is
+cheap, this gains nothing over `resolve_and_put`, since you paid for
+`resolve()` anyway.
 
 ### 3. `resolve_and_put(name, value)`: medium { #3-resolve_and_put-medium }
 
@@ -96,12 +126,28 @@ resolve(name) → Some(resolved)
 
 **Cost:** ~15 ns per field (HashMap lookup + column write).
 
+**Use when:** you want the `resolve()` semantics (rename + drop honored,
+unwanted fields skipped) in one call without managing the resolved name
+yourself. This is the default for a reason: it is what `put_field`
+degenerates to after resolution.
+
+**Constraint:** still one hash lookup per field; on a fixed-layout hot
+loop, method 1 or 2 avoids it.
+
 ### 4. `put_field(name, value)`: slowest { #4-put_field-slowest }
 
 Full resolve + push. The engine calls `resolve_field(name)` which checks
 rename map, then drop set, then returns the output name.
 
 **Cost:** ~20 ns per field (two HashMap lookups + column write).
+
+**Use when:** almost everywhere. No bookkeeping, no layout assumptions, no
+validity windows: pass the raw field name and the value and the engine does
+the right thing. At ~20 ns per field, a 1M-row, 10-column file spends about
+0.2 s of total parse time here, usually a small fraction of actual parsing
+work.
+
+**Constraint:** none, which is the point.
 
 ## The projection fast path { #the-projection-fast-path }
 
@@ -158,6 +204,7 @@ expect_slot(ordinal)  →  Some((slot, expected))
 ```
 
 **Cost comparison:**
+
 - Generic path: ~25 ns (find_attr_value + decode_attr + resolve + put_field)
 - Fast path: ~8 ns (memcmp + put_field_at)
 
@@ -262,3 +309,22 @@ instance via `begin_row`/`end_row` lifecycle. The engine creates one
     `&dyn ColumnarSink`, you will hit data races. Always let the engine manage
     sink instances: one per chunk, never shared.
 
+
+## Build and test { #build-and-test }
+
+Verify the projection contract: with a plan that drops every field except
+`name`, a correct `wants()` implementation lets the parser skip all other
+fields and the finished batch has exactly one column:
+
+```console
+$ cargo test sink_wants
+running 1 test
+test tests::sink_wants_skips_dropped_fields ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+The test builds a plan with `.drop("age").drop("active")`, parses a
+two-row sample, and asserts `batch.num_columns() == 1` and the remaining
+column is `name`. If your sink ignores `wants()`, all three columns
+appear and this test fails.
