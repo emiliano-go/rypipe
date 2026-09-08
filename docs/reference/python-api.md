@@ -312,17 +312,29 @@ Cast column values. Supported callables: `int`, `float`, `str`, `bool`.
 FilterRows(
     predicate=None,            # Callable: arbitrary filter
     *,
-    field=None,                # str: column name (constant filter)
+    field=None,                # str: column name (constant/null/type filter)
     op=None,                   # str: operator
     value=None,                # str: value (constant filter)
     field_a=None,              # str: left column (comparison)
     field_b=None,              # str: right column (comparison)
+    is_null=False,             # bool: keep rows where field is null/missing
+    is_type=None,              # str: keep rows where field has this type
 )
 ```
 
-**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
+**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=` (with aliases
+`eq`, `ne`, `gt`, `lt`, `ge`, `le`)
 
-**Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
+**Null check:** `FilterRows(field="Status", is_null=True)` keeps rows where
+`Status` is null or missing.
+
+**Type check:** `FilterRows(field="Amount", is_type="int64")` keeps rows
+where `Amount` has the given type. Valid types: `string`, `int64`,
+`float64`, `bool`/`boolean`, `dictionary`, `date32`, `timestamp`,
+`decimal128`.
+
+**Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=` (see
+[Filter spec format](#filter-spec-format))
 
 ### FilterRowsAny { #filterrowsany }
 
@@ -347,6 +359,72 @@ FilterRowsNot(inner: FilterRows)  # exactly 1 filter
 ```
 
 Negate a filter.
+
+## Filter spec format { #filter-spec-format }
+
+The `filter` option (accepted by `Source(...)` constructors,
+`rypipe.read(**kwargs)`, and produced by fusable `FilterRows` stages) is a
+dict with these forms:
+
+### Constant filter { #filter-constant }
+
+```python
+{"field": "Status", "op": "==", "value": "Active"}
+```
+
+Constant filters support `==`, `!=`, `>`, `<`, `>=`, `<=` (aliases `eq`,
+`ne`, `gt`, `lt`, `ge`, `le`).
+
+### Null and type checks { #filter-null-type }
+
+```python
+{"field": "Status", "op": "is_null"}
+{"field": "Amount", "op": "is_type", "value": "int64"}
+```
+
+`is_null` keeps rows where the field is null or missing. `is_type` keeps
+rows where the field has the given type (`string`, `int64`, `float64`,
+`bool`, `dictionary`, `date32`, `timestamp`, `decimal128`).
+
+### Column comparison { #filter-compare }
+
+Compares two columns in the same row:
+
+```python
+{"field_a": "price", "op": ">", "field_b": "cost"}
+```
+
+### Compound filters { #filter-compound }
+
+```python
+# AND
+{"and": [spec1, spec2]}
+
+# OR
+{"or": [spec1, spec2]}
+
+# NOT
+{"not": spec1}
+```
+
+!!! note
+
+    Compound forms are produced by `FilterRowsAny` / `FilterRowsAll` /
+    `FilterRowsNot`. Not every adapter's parser accepts compound pushdown;
+    check your adapter's documentation.
+
+### Supported operators { #filter-operators }
+
+| Operator | Aliases | Meaning | Constant | Column comparison |
+|----------|---------|---------|----------|-------------------|
+| `"=="` | `"eq"` | Equal | Yes | Yes |
+| `"!="` | `"ne"` | Not equal | Yes | Yes |
+| `">"` | `"gt"` | Greater than | Yes | Yes |
+| `"<"` | `"lt"` | Less than | Yes | Yes |
+| `">="` | `"ge"` | Greater or equal | Yes | Yes |
+| `"<="` | `"le"` | Less or equal | Yes | Yes |
+| `"is_null"` | | Field is null or missing | Yes (`is_null=True`) | No |
+| `"is_type"` | | Field has the given type | Yes (`is_type="..."`) | No |
 
 ## Sinks { #sinks }
 
