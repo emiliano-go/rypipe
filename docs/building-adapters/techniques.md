@@ -337,6 +337,21 @@ Streaming mode reduces this to ~88 MB. Use `wants()`, typed values, and
 - [ ] No allocations in the hot path
 - [ ] `estimate_bytes_per_row` returns accurate estimate
 
+## Build and test { #build-and-test }
+
+Field-level skip (`wants`/`drop_fields`) is the easiest win to measure.
+Build with `maturin develop --release` so timings are meaningful, then
+read a 1M-row log with and without dropped fields:
+
+```console
+$ python bench_wants.py
+all 8 fields: 1000000 rows, 8 cols in 1.56s
+keep 3 of 8: 1000000 rows, 3 cols in 1.04s
+```
+
+Skipping 5 of 8 fields cuts end-to-end time by about a third here, since
+dropped fields never reach `put_field` or a column builder.
+
 ## See also { #see-also }
 
 - [Schema](./schema.md): The biggest performance lever
