@@ -1,12 +1,28 @@
-# Writing a Format Adapter { #writing-adapters }
+# Building an Adapter { #writing-adapters }
 
-This guide teaches you how to write a **rypipe** adapter, a package that
+This track teaches you how to write a **rypipe** adapter, a package that
 lets **rypipe** read your custom format.
 
 !!! tip
 
     If you just want to **use** an existing adapter, see the
-    [Tutorial](../tutorial/index.md) instead. This guide is for adapter authors.
+    [Tutorial](../tutorial/index.md) instead. This track is for adapter
+    authors.
+
+## How this track works { #how-this-track-works }
+
+Read it in order:
+
+1. **[Walkthrough](./walkthrough.md)**, build a complete working adapter
+   (`rypipe_log`) from scratch, step by step.
+2. **[Python wiring](./python-wiring.md)**, the full wiring reference:
+   Source, adapter class, registration, stage and sink re-exports, adapter
+   kwargs, engine selection, streaming.
+3. **Deep dives**, one page per component: Splitter, RecordParser, Sink,
+   Schema, scan primitives, and more.
+
+The rest of this page is the map: what you will build, the API contract,
+and how the engine works.
 
 
 ## What you will build { #what-you-will-build }
@@ -25,7 +41,7 @@ name=Bob,age=25,active=false
 ## The crxml formula { #the-crxml-formula }
 
 The reference adapter ([**crxml**](../crxml-adapter.md)) defines the standard pattern. Every adapter
-follows this structure:
+should follow this structure:
 
 ### Rust layer { #rust-layer }
 
@@ -60,7 +76,7 @@ The engine provides `TableBuilder` as the production
 
 Every adapter must expose these APIs:
 
-### Source class (required) { #source-class }
+### Source class { #source-class }
 
 ```python
 from rypipe import Source
@@ -76,7 +92,7 @@ class LogSource(Source):
 The Source class gives users the pipeline `|` operator, caching, and all
 sinks (`.to_arrow()`, `.to_pandas()`, `.to_polars()`, `.to_parquet()`).
 
-### Stages (required) { #stages }
+### Stages { #stages }
 
 Re-export these stage classes from `rypipe.stages`:
 
@@ -85,9 +101,10 @@ Re-export these stage classes from `rypipe.stages`:
 - `RenameFields`, rename columns
 - `DropFields`, remove columns
 
-See [Stages](../tutorial/stages.md) for the re-export pattern.
+See [Python Wiring](./python-wiring.md#re-exporting-stages) for the
+re-export pattern.
 
-### Sinks (required) { #sinks }
+### Sinks { #sinks }
 
 Re-export or reimplement these sink functions:
 
@@ -98,7 +115,7 @@ Re-export or reimplement these sink functions:
 - `to_parquet(pipeline, path)`, write to Parquet
 - `to_csv(pipeline, path)`, write to CSV
 
-### Registration (required) { #registration }
+### Registration { #registration }
 
 Register the adapter at import time so `rypipe.read("file.ext")` works:
 
@@ -195,10 +212,16 @@ pyarrow.Table                  (Python API)
 
 | Page | What you learn |
 |------|---------------|
-| [Quick Start](./quickstart.md) | Build a working adapter in 15 minutes |
-| [Python Wiring](./python-wiring.md) | Source, adapter, registration, stages |
+| [Walkthrough](./walkthrough.md) | Build a complete working adapter, step by step |
+| [Python Wiring](./python-wiring.md) | Source, adapter, registration, stages, sinks, kwargs, streaming |
 | [Rust Creation](./rust-creation.md) | Splitter, RecordParser, ColumnarSink |
+| [Splitter](./splitter.md) | Finding row boundaries |
+| [Parser](./parser.md) | Extracting field values |
+| [Sink](./sink.md) | The ColumnarSink contract |
 | [Schema](./schema.md) | Schema declaration for maximum performance |
+| [Scan primitives](./scan.md) | Fast byte-scanning helpers |
+| [Skip regions](./skip-regions.md) | Skipping quoted/escaped regions |
+| [Chunk planning](./chunk-planning.md) | How input is split into chunks |
 | [Techniques](./techniques.md) | Performance optimizations |
 | [Anti-patterns](./anti-patterns.md) | Common mistakes to avoid |
 | [Examples](./examples.md) | Worked CSV, JSONL, and TSV adapters |
@@ -218,7 +241,7 @@ Each `put_field` call goes through:
 3. **Push**: write the value into the column builder (engine does this).
 4. **Filter**: check if the row passes the predicate (engine does this).
 
-The engine optimizes steps 2–4. Your parser's job is to make step 1 fast.
+The engine optimizes steps 2-4. Your parser's job is to make step 1 fast.
 
 For a 533 MB file on a Ryzen 5800X:
 
@@ -228,6 +251,14 @@ For a 533 MB file on a Ryzen 5800X:
 | Parsing | ~70% | `parse_chunk` is the hot path |
 | Column building | ~20% | Engine handles this |
 | Export | ~5% | Zero-copy, engine handles this |
+
+## Build and test { #build-and-test }
+
+Every adapter in this guide builds and tests the same way: compile the
+Rust extension into your environment with
+`uv run --with maturin maturin develop --release`, then run the Rust unit
+tests with `cargo test`. The [walkthrough](./walkthrough.md#step-6-build-and-test)
+shows both commands end to end with real output.
 
 ## Recap { #recap }
 
