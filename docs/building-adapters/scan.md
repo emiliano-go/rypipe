@@ -78,3 +78,21 @@ no false candidates before it.**
   at 16B SSE2 / 32B AVX2).
 - `Finder` construction hoisting is worth ~0.4pp because construction was
   never the cost.
+
+## Build and test { #build-and-test }
+
+The scan helpers are pure functions, so test them directly against known
+byte strings:
+
+```console
+$ cargo test scan_helpers
+running 1 test
+test tests::scan_helpers_find_bytes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+```
+
+The test asserts `find2(b"a=b,c=d", 0, b'=', b',') == Some((1, b'='))`,
+`starts_with(b"a=b,c=d", 3, b",c")`, and that `find2` returns `None` when
+neither byte is present. Note the helpers live in `rypipe_core::scan`,
+not at the crate root.
