@@ -128,6 +128,7 @@ end_row → finish_row:
 Parallel maximizes throughput by parsing all chunks simultaneously.
 Bounded maximizes memory efficiency by processing one batch at a time.
 The choice depends on file size vs available RAM:
+
 - File < RAM: use parallel (fastest)
 - File > RAM: use bounded (constant RSS)
 - File ≈ RAM: use parallel with smaller budget
@@ -207,6 +208,7 @@ Fast path (schemas consistent): export each as separate RecordBatch with
 unified schema (D null-filled in chunks 0,2,3).
 
 Merge path: extend sequentially:
+
 - merged starts empty
 - extend(chunk0): columns `A,B,C`, rows 120K
 - extend(chunk1): D is new → backfill 120K nulls, then append 120K values
