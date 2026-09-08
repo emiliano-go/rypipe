@@ -23,6 +23,14 @@ pub trait RecordParser: Send + Sync {
 }
 ```
 
+Only `validate` and `parse_chunk` are required; `parse_chunk_generic` has a
+default implementation that delegates to `parse_chunk`. The full method
+signatures, including the `where Self: Sized` bound that makes the generic
+method object-safe to skip, are in the
+[Rust API reference](../reference/rust-api.md#recordparser). For how the
+engine drives these methods across execution modes, see
+[Architecture: Decoder](../architecture/decoder.md).
+
 ## `validate` { #validate }
 
 Called once per chunk before parsing. Use it for upfront checks like UTF-8
@@ -45,6 +53,12 @@ The main parsing loop. For each record in the chunk:
 
 The engine calls this once per chunk. Your parser sees a contiguous byte range
 that starts and ends at record boundaries (guaranteed by the `Splitter`).
+
+The `put_field(name, value)` form shown below is the simplest sink call, but
+it pays a hash lookup per field. The faster alternatives
+(`put_field_resolved`, `put_field_at`, raw variants) are covered in
+[The ColumnarSink Trait](sink.md) and listed in the
+[Rust API reference](../reference/rust-api.md#columnarsink).
 
 ```rust
 fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
@@ -77,7 +91,10 @@ fn parse_chunk_generic<S: ColumnarSink>(&self, bytes: &[u8], sink: &mut S) -> Re
 
 Override this method for a measurable speedup on hot paths. The compiler can
 then inline `sink.begin_row()`, `sink.put_field()`, and `sink.end_row()` into
-the parsing loop, eliminating vtable dispatch overhead.
+the parsing loop, eliminating vtable dispatch overhead. For why the engine
+calls the generic form on every execution path (columnar, parallel, and
+streaming), see [Adapter design](../advanced/adapter-design.md#parse_chunk_generic)
+and [Architecture: Decoder](../architecture/decoder.md#parse_chunk_generic).
 
 ## Performance tips { #performance-tips }
 
@@ -141,7 +158,9 @@ sink.put_field("amount", Value::Float64(123.45));
 ```
 
 Typed variants skip the string-to-number conversion in the engine. The engine
-still stores the value correctly and exports it as the right Arrow type.
+still stores the value correctly and exports it as the right Arrow type. The
+full variant list, including how decimals work without a `Decimal128`
+variant, is in [Rust Adapter Creation: Value types](rust-creation.md#value-types).
 
 ### 5. Do not call `end_row()` for partial trailing rows { #5-do-not-call-end_row-for-partial-trailing-rows }
 
@@ -201,6 +220,10 @@ sink.finish()                      ← called once after all chunks
 Arrow RecordBatch                  ← zero-copy export
 ```
 
+The same flow with the engine's internals filled in (chunk planning,
+parallel export, merge paths) is diagrammed in
+[Architecture: Data flow](../architecture/data-flow.md).
+
 ## Error handling { #error-handling }
 
 Return `Err` from `parse_chunk` to abort parsing. The engine will propagate
@@ -210,5 +233,27 @@ the error to the caller. Common error types:
 - `rypipe_core::Error::Plan`: invalid plan or configuration
 - `rypipe_core::Error::Io`: I/O error
 
+The complete `Error` enum (including `Merge`, `Parser`, and `Lifetime`) is
+documented in the [Rust API reference](../reference/rust-api.md#error).
+
 Do not panic in `parse_chunk`. Panics are caught by `catch_unwind` in the
 parallel executor, but they abort the entire parse.
+
+## Build and test { #build-and-test }
+
+Run the parser unit tests: one feeds a two-row sample through
+`TableBuilder` and checks row and column counts, the other confirms
+`validate()` rejects invalid UTF-8 instead of panicking:
+
+```console
+$ cargo test parser
+running 2 tests
+test tests::parser_rejects_invalid_utf8 ... ok
+test tests::parser_emits_all_rows ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+```
+
+Both finish in microseconds, so use them as a smoke test after every
+change to `parse_chunk`. For the end-to-end check through Python, see the
+[walkthrough](walkthrough.md#step-6-build-and-test).
