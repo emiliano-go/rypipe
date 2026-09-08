@@ -12,7 +12,7 @@ num_chunks = 4 * physical_cores
 
 For a CPU-bound parser, this provides enough tasks to keep all cores busy even when chunks finish at different speeds. For a memory-bandwidth-bound parser, fewer chunks may be better because each chunk contends for the same DRAM channels and caches.
 
-The built-in `bench_throughput` example is a simple TSV adapter. On a 12-core/24-thread Ryzen 9 5900X, parallel mode is slightly slower than single-threaded parse because the parser is so fast that chunk overhead dominates. Real adapters with heavier parsing usually see a win.
+The built-in `bench_throughput` example is a simple TSV adapter. Very fast parsers can show little or negative scaling because chunk overhead dominates the tiny per-row work. Real adapters with heavier parsing usually see a win.
 
 ## How `rayon` schedules chunks { #how-rayon-schedules-chunks }
 
@@ -62,15 +62,22 @@ Too many chunks also increase peak RSS because each chunk holds its own builder 
 
 ## Measuring speedup { #measuring-speedup }
 
-Run the same parse at several chunk counts and plot throughput:
+Run the same parse at several thread counts and compare throughput. With the Python API, sweep `threads` directly:
 
-```bash
-python benchmarks/bench_throughput.py --chunks 1 --output c1.json
-python benchmarks/bench_throughput.py --chunks 4 --output c4.json
-python benchmarks/bench_throughput.py --chunks 8 --output c8.json
-python benchmarks/bench_throughput.py --chunks 16 --output c16.json
-python benchmarks/bench_throughput.py --chunks 32 --output c32.json
+```python
+import time
+from crxml import CrystalXMLSource
+
+for threads in (1, 4, 8, 16, 32):
+    start = time.perf_counter()
+    table = CrystalXMLSource("big_file.xml", row_tag="Row", threads=threads).to_arrow()
+    elapsed = time.perf_counter() - start
+    print(f"threads={threads:3d}  {elapsed:.2f}s")
 ```
+
+(Chunk count is a lower-level knob: the framework's `rypipe.read_par(path, chunks=N)` forwards it to the adapter. It matters when you are developing or benchmarking an adapter, not in day-to-day use.)
+
+The Rust side records per-chunk timing internally: `reset_chunk_profile()` before a run and `chunk_profile()` after it return `(split_scan_ns, sum_ns, max_ns, count)`, which shows whether the split scan or the slowest chunk dominates.
 
 Look for the elbow where adding chunks stops helping. Also measure RSS at each point; sometimes the fastest setting is not the most memory-efficient.
 
