@@ -36,7 +36,7 @@ S3 / API / FTP
   → write Parquet → publish to warehouse
 ```
 
-* **Orchestration** is Python (`Airflow`, `Dagster`, `Prefect`, `Mage`, plain `cron`). A DAG that can `import rypipe` keeps the whole pipeline in one language.
+* **Orchestration** is Python (`Airflow`, `Dagster`, `Prefect`, `Mage`, plain `cron`). A DAG that can `import crxml` (or any adapter package) keeps the whole pipeline in one language.
 * **File handling** is Python (`pathlib`, `fsspec`, `boto3`, `requests`). Requiring users to shell out to a Rust binary breaks composability.
 * **Interactivity** is Python. Data is discovered in a Jupyter notebook: `source | FilterRows(...) | .to_pandas().describe()`. The same code then runs headless in CI. A pure-Rust library forces a context switch (new language, new toolchain, new mental model) exactly when exploration should be fastest.
 * **Error handling & data quality** are Python (`pydantic`, `pandera`, `great_expectations`). Row-level validation, Slack alerts, and quarantine logic live next to the parse call, not inside the parser.
@@ -75,7 +75,7 @@ In other words: *you pay Rust for the hot loop, Python for the composition*. A p
 
 | Dimension | Hybrid (rypipe today) | Pure Rust alternative |
 |-----------|----------------------|----------------------|
-| **Install** | `pip install rypipe my-adapter`, one wheel, stable ABI (`abi3`, 3.10+), manylinux/musllinux/macOS/Windows | `cargo add rypipe-core my-adapter && cargo build --release`, requires Rust 1.78+, `cc`, Arrow build, per-project compilation |
+| **Install** | `pip install my-adapter`, one wheel, stable ABI (`abi3`, 3.10+), manylinux/musllinux/macOS/Windows | `cargo add rypipe-core my-adapter && cargo build --release`, requires Rust 1.78+, `cc`, Arrow build, per-project compilation |
 | **Audience** | Anyone who can `import pandas`, data engineers, analysts, scientists | Rust developers only, <10% of data teams |
 | **Prototyping** | `source \| FilterRows(...) \| .to_pandas()` in a notebook cell, instant feedback | Write a binary, handle `Result`, print tables manually, rebuild on every change |
 | **Reuse in prod** | Same notebook code runs in Airflow/Dagster unchanged | Rewrite notebook logic in Rust or maintain two codebases |
@@ -127,7 +127,7 @@ Steps 1-2 demand a REPL. Step 4 demands Rust speed. rypipe gives both from the s
 For CSV alone you can. rypipe’s value is the *same* engine for XML, JSON, HTML, and other row-oriented formats where no fast Arrow-native reader exists, with parallel and memory-bounded execution, pushdown, and the same `source | ... | .to_polars()` surface.
 
 **“Can I avoid Python entirely?”**
-Yes. See [Rust API](./reference/rust-api.md) and [Writing a format adapter](./writing-adapters/index.md). The Python bindings are optional; `rypipe-core` has zero Python dependency.
+Yes. See [Rust API](./reference/rust-api.md) and [Writing a format adapter](./building-adapters/index.md). The Python bindings are optional; `rypipe-core` has zero Python dependency.
 
 **“Does Python add overhead?”**
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.
