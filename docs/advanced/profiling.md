@@ -12,11 +12,13 @@ Run it:
 cargo run --release -p rypipe-core --example bench_throughput
 ```
 
-Or use the Python wrapper that writes JSON results:
+Or use the Python wrapper, which runs the benchmark and optionally writes JSON results:
 
 ```bash
 python benchmarks/bench_throughput.py --output .benchmarks/rypipe.json
 ```
+
+`benchmarks/bench_throughput.py` accepts only `--output`; it rebuilds the benchmark from source so the binary always matches HEAD. The `crates/rypipe-core/examples/` directory also contains focused micro-benchmarks: `bench_scanner_single`, `bench_push_tier`, and `bench_blockmasks`.
 
 The output reports rows, time, rows per second, MB/s, and RSS. Use these to compare configurations.
 
@@ -28,11 +30,17 @@ Always profile a release build. Debug builds are 10-50x slower and the profile w
 cargo build --release -p rypipe-core
 ```
 
-For symbols without full debug overhead, use the `profiling` profile if it exists:
+For symbols without full debug overhead, the workspace defines a `profiling` Cargo profile (release with debug symbols):
 
 ```bash
 cargo build --profile profiling -p rypipe-core
 ```
+
+`rypipe-core` also ships compile-time instrumentation features:
+
+- `profile`: enables timing counters in the engine (for example the push-tier breakdown in `TableBuilder`). It costs roughly 15% on filtered paths, so use it only for measurement builds. `chunk_profile()` / `reset_chunk_profile()` (parallel) and `discovery_profile()` / `reset_discovery_profile()` (parallel streaming) are always available.
+- `alloc-stats`: enables allocation tracking (`alloc_stats::snapshot()`, `reset()`, `print_stats()`) used by the bench harness.
+- `bench`: enables the tier-ladder cost decomposition used by `src/bench`.
 
 ## Profiling with `perf` { #profiling-with-perf }
 
