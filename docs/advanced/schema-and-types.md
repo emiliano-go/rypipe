@@ -13,16 +13,16 @@ passes, stabilizes column order, and enables numeric compare filters.
 
 Some formats need a discovery pass to infer column names. For example, an XML adapter may scan the file to find all field names before parsing. This doubles I/O work and delays the first row.
 
-Provide `schema_order` when the columns are known:
+Provide `schema` when the columns are known:
 
 ```python
 source = MyAdapter(
     "data.log",
-    schema_order=["id", "ts", "amount", "status"],
+    schema=["id", "ts", "amount", "status"],
 )
 ```
 
-With `schema_order`, the engine does not need to discover column names. It also sorts columns to this order at finish time, making output deterministic.
+The Python `schema` kwarg maps to `ExecutionPlan::schema_order` on the Rust side. With a declared schema, the engine does not need to discover column names. It also sorts columns to this order at finish time, making output deterministic. Columns not listed appear after the listed ones in first-appearance order.
 
 ## Stable column order across chunks { #stable-column-order-across-chunks }
 
@@ -48,17 +48,21 @@ source = MyAdapter(
 
 The engine builds the correct Arrow array from the first row. It does not store intermediate strings and recast later. This saves memory and CPU.
 
-Supported types include:
+Supported type strings (as accepted by `FieldType::from_str`):
 
-| Type | Rust `FieldType` | Notes |
-|------|------------------|-------|
-| `string` / `str` | `FieldType::String` | Default for text data. |
-| `int64` / `int` | `FieldType::Int64` | Parses integer strings during parse. |
-| `float64` / `float` | `FieldType::Float64` | Parses float strings during parse. |
+| Type string | Rust `FieldType` | Notes |
+|-------------|------------------|-------|
+| `string` | `FieldType::String` | Default for text data. |
+| `int64` | `FieldType::Int64` | Parses integer strings during parse. |
+| `float64` | `FieldType::Float64` | Parses float strings during parse. |
 | `bool` / `boolean` | `FieldType::Boolean` | Parses common bool representations. |
 | `dictionary` | `FieldType::Dictionary` | Dictionary encoding; equivalent to listing the column in `dictionary_columns`. |
 | `date32` | `FieldType::Date32` | ISO dates (`YYYY-MM-DD`) stored as days since the Unix epoch. |
 | `timestamp`, `timestamp[s]`, `timestamp[ms]`, `timestamp[us]`, `timestamp[ns]` | `FieldType::Timestamp(unit)` | ISO-8601 timestamps stored as integers in the given unit (default µs). |
+| `decimal128`, `decimal128(N)` | `FieldType::Decimal128(scale)` | Fixed-precision decimal; default scale 18, or `N` when given. |
+
+There are no `str`, `int`, or `float` aliases; an unknown type string raises
+`PlanError` at construction time.
 
 `field_types={"status": "dictionary"}` and `dictionary_columns=["status"]` are
 two spellings of the same storage decision; prefer `dictionary_columns` (or
@@ -76,32 +80,34 @@ let plan = ExecutionPlan::new()
 
 ## Numeric compare filters { #numeric-compare-filters }
 
-Casting during parse is especially important for filters. When both sides of a
-column-to-column comparison (`Compare`) are stored as `Int64` or `Float64`, the
-engine compares them natively per-row during parsing with numeric promotion
-(Int64 vs Float64 widens to f64), no Python-level comparisons and no
-post-assembly pass.
+Casting during parse is especially important for filters. Column-to-column
+comparisons (`Compare`) and constant comparisons with ordering operators
+(`CompareLiteral`, produced by `FilterRows(field=..., op=">", value=...)`)
+are evaluated natively per-row during parsing with numeric promotion:
+`Int64` versus `Float64` widens to `f64`. There is no Python-level
+comparison and no post-assembly pass.
 
-If the columns are left as strings, the comparison falls back to string
-ordering, which is rarely what you want for numbers. Declare the types
-explicitly to keep numeric comparisons native.
+If the columns are left as strings, the comparison uses string ordering,
+which is rarely what you want for numbers (`"9" > "100"` is true for
+strings). Declare the types explicitly to keep numeric comparisons native.
 
 ## Combining schema hints with fusion { #combining-schema-hints-with-fusion }
 
-`schema_order` and `field_types` are part of the `ExecutionPlan`. They merge cleanly with `RenameFields`, `DropFields`, and `FilterRows`:
+`schema` and `field_types` are part of the `ExecutionPlan`. They merge cleanly with `RenameFields`, `DropFields`, and `FilterRows`:
 
 ```python
 result = (
-    MyAdapter("data.log", schema_order=["id", "amount"], field_types={"amount": "float64"})
+    MyAdapter("data.log", schema=["id", "amount"], field_types={"amount": "float64"})
     | RenameFields({"old_name": "amount"})
     | FilterRows(field="amount", op=">", value="100.0")
 ).to_arrow()
 ```
 
-The filter runs on the renamed, typed column. Without `field_types`, the filter would fall back to Python or be skipped.
+The filter runs on the renamed, typed column. Without `field_types`, the
+same filter would compare string values instead of numbers.
 
 ## Summary { #summary }
 
-- Provide `schema_order` to skip inference and stabilize output columns.
-- Provide `field_types` to cast during parse and enable numeric Arrow filters.
+- Provide `schema` to skip discovery and stabilize output column order.
+- Provide `field_types` to cast during parse and keep compare filters numeric.
 - Combine both with fused stages for the fastest path through the engine.
