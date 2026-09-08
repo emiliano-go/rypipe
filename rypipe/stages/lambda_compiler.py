@@ -127,7 +127,7 @@ def _is_load_const_value(instr) -> bool:
 
 
 def _field_access(ops: list, i: int) -> Optional[str]:
-    """Check for field access pattern: LOAD_FAST LOAD_CONST BINARY_OP.
+    """Check for field access pattern: LOAD_FAST LOAD_CONST BINARY_SUBSCR.
     Returns the field name if matched, None otherwise."""
     if i + 2 >= len(ops):
         return None
@@ -135,7 +135,7 @@ def _field_access(ops: list, i: int) -> Optional[str]:
         return None
     if not _is_load_const_str(ops[i + 1]):
         return None
-    if ops[i + 2].opname != "BINARY_OP":
+    if ops[i + 2].opname not in ("BINARY_SUBSCR", "BINARY_OP"):
         return None
     return ops[i + 1].argval
 
