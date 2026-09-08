@@ -47,7 +47,7 @@ When you need control over engine selection, bounded-memory streaming,
 or how the Rust reader is invoked:
 
 ```python
-from rypipe import Adapter
+from rypipe import Adapter, resolve_engine
 
 class LogAdapter(Adapter):
     def _read_arrow(self, plan_overrides=None):
@@ -56,17 +56,23 @@ class LogAdapter(Adapter):
             plan.update(plan_overrides)
 
         # Choose engine based on file size, memory budget, etc.
-        engine = self._resolve_engine(plan)
+        engine = resolve_engine(
+            file_size=self._path.stat().st_size,
+            memory=self._memory,
+            threads=self._threads or None,
+            schema=self._schema or None,
+            has_parallel=_HAS_PARALLEL,
+            has_columnar=_HAS_COLUMNAR,
+        )
 
-        if engine == "bounded":
-            return _rypipe_log.read_bounded(str(self._path), **plan)
-        elif engine == "parallel":
+        if engine == "parallel":
             return _rypipe_log.read_parallel(str(self._path), **plan)
         else:
             return _rypipe_log.read(str(self._path), **plan)
 ```
 
 Override `_read_arrow()` when you need to:
+
 * Choose between parallel, bounded, and columnar engines
 * Pass adapter-specific kwargs (e.g., `row_tag`, `threads`, `memory`)
 * Implement custom caching or pre-processing
@@ -118,8 +124,11 @@ provides:
 
 ## The crxml example { #the-crxml-example}
 
-[`crxml`](../crxml-adapter.md) overrides `_read_arrow()` for engine selection
-and `iter_record_batches()` for true streaming:
+[`crxml`](../crxml-adapter.md) is the reference for the advanced level: its
+source overrides `_read_arrow()` for engine selection and
+`iter_record_batches()` for true streaming. The shape below is modeled on
+it (the published crxml 2.1 package predates `rypipe.Source` and mirrors
+the same pattern with its own base class):
 
 ```python
 from rypipe import Adapter, resolve_engine
@@ -133,29 +142,9 @@ class CrystalXMLSource(Adapter):
         self._memory = memory
         super().__init__(path, **kwargs)
 
-    def _read_arrow(self, plan_overrides=None):
-        plan = self._build_plan_kwargs()
-        if plan_overrides:
-            plan.update(plan_overrides)
-
-        engine = self._resolve_engine(plan)
-        if engine == "parallel_streaming":
-            return _core.read_to_columnar_bounded(
-                str(self._path), self._row_tag, self._memory, **plan
-            )
-        elif engine == "parallel":
-            return _core.read_to_columnar_par(
-                str(self._path), self._row_tag, self._num_threads, **plan
-            )
-        else:
-            return _core.read_to_columnar(
-                str(self._path), self._row_tag, **plan
-            )
-
-    def _resolve_engine(self, plan: dict) -> str:
+    def _resolve_engine(self) -> str:
         if self._engine != "auto":
             return self._engine
-
         return resolve_engine(
             file_size=self._path.stat().st_size,
             memory=self._memory,
@@ -165,8 +154,23 @@ class CrystalXMLSource(Adapter):
             has_columnar=_HAS_COLUMNAR,
         )
 
+    def _read_arrow(self, plan_overrides=None):
+        plan = self._build_plan_kwargs()
+        if plan_overrides:
+            plan.update(plan_overrides)
+
+        engine = self._resolve_engine()
+        if engine == "parallel":
+            return _core.read_to_columnar_par(
+                str(self._path), self._row_tag, self._threads, **plan
+            )
+        else:
+            return _core.read_to_columnar(
+                str(self._path), self._row_tag, **plan
+            )
+
     def iter_record_batches(self, memory="64MiB", batch_size=None, **kwargs):
-        yield from _core.iter_record_batches(
+        yield from _core.iter_batches(
             str(self._path), self._row_tag, memory=memory, **kwargs
         )
 ```
