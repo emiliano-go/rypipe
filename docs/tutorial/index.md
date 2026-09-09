@@ -36,11 +36,11 @@ pip install "crxml[pandas,polars]"
 next to your script. It is a small sales report with 15 rows.
 
 ```python
-from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows, to_dataframe
+from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows, to_pandas
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
-df = to_dataframe(
+df = to_pandas(
     source
     | RenameFields({"Name": "name"})
     | CastTypes({"Amount": float})

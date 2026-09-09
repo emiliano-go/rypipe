@@ -10,9 +10,19 @@ For the adapter-author guide, see [Schema](../building-adapters/schema.md).
 
 Schema in rypipe answers three questions:
 
-1. **What columns exist?** (`schema_order` or discovery)
+1. **Which columns are extracted?** (`schema_order` projection, or all discovered columns)
 2. **What type is each column?** (`field_types` or default `String`)
 3. **What order are they in?** (`schema_order` or first-appearance)
+
+When `schema_order` is declared it acts as a **projection + order**: the
+output contains exactly the listed columns, in the listed order; unlisted
+fields are rejected by `plan.resolve_field` during parsing (so
+`ColumnarSink::wants`/`resolve` return `false`/`None` and adapters skip them
+entirely); listed columns absent from the data are null-filled at finish.
+Fields referenced by the row filter are still materialized internally so
+predicates evaluate correctly, but they are projected out of the final
+batch. A column listed in both `schema_order` and `drop_fields` is dropped
+(`drop_fields` wins).
 
 The engine resolves these questions before parsing starts, builds an immutable
 `FrozenSchema`, and shares it across all workers. This guarantees that every
@@ -187,6 +197,11 @@ pub struct DiscoveryOpts {
 
     /// Bytes per window.
     pub window_bytes: usize,
+
+    /// Disable auto-schema discovery entirely. When true, discover_schema()
+    /// returns an empty schema and the engine falls back to full parsing.
+    /// Useful for esoteric formats where discovery may be unreliable.
+    pub disable_auto_schema: bool,
 }
 ```
 
@@ -199,6 +214,7 @@ impl Default for DiscoveryOpts {
             full_scan_threshold: 128 * 1024 * 1024, // 128 MiB
             windows: 16,
             window_bytes: 2 * 1024 * 1024, // 2 MiB
+            disable_auto_schema: false,
         }
     }
 }
@@ -235,6 +251,34 @@ When a missed column is encountered at parse time, the engine raises
 ```
 unknown field "LateColumn" not in frozen schema (10 columns, exact=false);
 pass schema=[...] with full column list or use full-scan discovery
+```
+
+### Escape hatch: disable_auto_schema { #escape-hatch }
+
+For formats where schema discovery is unreliable (extremely sparse or
+heterogeneous data), set `disable_auto_schema = true`:
+
+```rust
+use rypipe_core::DiscoveryOpts;
+
+let opts = DiscoveryOpts {
+    disable_auto_schema: true,
+    ..DiscoveryOpts::default()
+};
+```
+
+When enabled, `discover_schema()` returns an empty schema immediately,
+skipping all window scanning. The engine falls back to full parsing with
+string-typed columns. Combine with explicit `schema_order` and
+`field_types` for maximum control:
+
+```python
+source = MyAdapter(
+    "esoteric.dat",
+    schema=["id", "value", "timestamp"],
+    field_types={"id": "int64", "value": "float64"},
+    disable_auto_schema=True,
+)
 ```
 
 ## Schema cache { #schema-cache }
@@ -383,7 +427,11 @@ adds ~0.1 ms total (negligible vs parse time).
 ## sort_columns { #sort_columns }
 
 `sort_columns` reorders the internal column list to match `schema_order`.
-It is called at finish time when `schema_order` is non-empty.
+Note: when `schema_order` is non-empty, `finish()` takes the projection
+path instead — it emits exactly the declared columns in the declared order
+(schema columns are pre-declared in `with_plan`, and any still missing are
+created null-filled), so `sort_columns` is effectively vestigial for the
+projection path.
 
 ### Algorithm { #algorithm }
 
@@ -583,6 +631,17 @@ ExecutionPlan
 ```
 
 ### How schema interacts with projection { #how-schema-interacts-with-projection }
+
+`schema_order` itself is the primary projection mechanism: unlisted fields
+are rejected by `plan.resolve_field`, so `wants("unlisted_field")` returns
+`false` and the parser skips the field entirely (no scanning, no decoding).
+The wanted-column set (schema columns plus filter-referenced fields) is
+pre-declared in `TableBuilder::with_plan`, which makes the
+`wanted_mask`/`row_satisfied` short-circuit stable from the first row —
+adapters can byte-jump to the row close as soon as every wanted column has
+a value. At finish time the batch contains exactly the declared columns in
+the declared order; filter-only columns are projected out, and declared
+columns absent from the data are null-filled.
 
 When `DropFields` is used, the plan's `drop_fields` set is populated.
 During schema construction:

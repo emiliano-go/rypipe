@@ -5,11 +5,11 @@ as it flows through, like a Unix pipe. **crxml** ships four of them:
 `RenameFields`, `DropFields`, `CastTypes`, and `FilterRows`.
 
 ```python
-from crxml import CrystalXMLSource, RenameFields, FilterRows, to_dataframe
+from crxml import CrystalXMLSource, RenameFields, FilterRows, to_pandas
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
-df = to_dataframe(
+df = to_pandas(
     source
     | RenameFields({"Name": "name"})                        # renames a column
     | FilterRows(field="Status", op="==", value="Active")   # keeps matching rows
@@ -217,11 +217,12 @@ keyword form. Compilable patterns include field comparisons
 `contains`, `strip`, `lower`, `upper`, `replace`), `len()` comparisons,
 `in` / `not in` membership, and `and` / `or` / `not` combinations of those.
 
-Only lambdas the compiler does not recognize (calling your own functions,
-date parsing, and so on) run in Python per row.
+Only lambdas [the compiler](../architecture/lambda-compiler.md) does not
+recognize (calling your own functions, date parsing, and so on) run in Python
+per row.
 
 For the full filter-spec format (including column-to-column comparison),
-see the [Python API reference](../reference/python-api.md#filter-spec-format).
+see the [Python API reference](../reference/python-api.md#filterrows).
 
 ## Combining stages { #combining-stages }
 
@@ -230,11 +231,11 @@ two `FilterRows` keeps rows matching **both** (logical AND):
 
 ```python
 from crxml import CrystalXMLSource
-from crxml import RenameFields, DropFields, CastTypes, FilterRows, to_dataframe
+from crxml import RenameFields, DropFields, CastTypes, FilterRows, to_pandas
 
 src = CrystalXMLSource("report.xml", row_tag="Details")
 
-df = to_dataframe(
+df = to_pandas(
     src
     | RenameFields({"Name": "name", "Amount": "amount"})
     | DropFields(["Date"])

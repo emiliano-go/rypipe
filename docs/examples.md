@@ -19,9 +19,9 @@ print(table.num_rows, table.num_columns)
 
 ```python
 from crxml import CrystalXMLSource
-from crxml import RenameFields, DropFields, FilterRows, CastTypes, to_dataframe
+from crxml import RenameFields, DropFields, FilterRows, CastTypes, to_pandas
 
-df = to_dataframe(
+df = to_pandas(
     CrystalXMLSource("data.xml", row_tag="Row")
     | RenameFields({"old_name": "new_name"})
     | DropFields(["internal_id"])

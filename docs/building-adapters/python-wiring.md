@@ -8,8 +8,9 @@ subclass, adapter class, registration, and repacked stages.
 The reference adapter ([**crxml**](../crxml-adapter.md)) defines the standard pattern. Every adapter
 should follow this structure:
 
+### Users import everything from the adapter package { #users-import-everything-from-the-adapter-package }
+
 ```python
-# Users import everything from the adapter package { #users-import-everything-from-the-adapter-package }
 from rypipe_log import LogSource, CastTypes, FilterRows
 ```
 
@@ -45,11 +46,10 @@ The Source subclass is the pipeline-capable entry point. It implements
 
 ```python
 # rypipe_log/source.py { #rypipe_logsourcepy }
-from __future__ import annotations
 from typing import Any
 
-import _rypipe_log
 from rypipe import Source
+from rypipe_log import _rypipe_log
 
 
 class LogSource(Source):
@@ -62,7 +62,7 @@ class LogSource(Source):
         if plan_overrides:
             plan.update(plan_overrides)
         # Pass the merged plan to the Rust reader
-        return _rypipe_log.read(str(self._path), **plan)
+        return _rypipe_log.read_log(str(self._path), **plan)
 ```
 
 ### How _read_arrow works { #how-read-arrow-works }
@@ -95,12 +95,11 @@ to Python execution: 10-50× slower.
 
 ## Adapter class { #adapter-class }
 
-The adapter is a thin, stateless wrapper. It delegates to the Source for
-actual parsing:
+The adapter is a thin, stateless wrapper. `read()` calls the Rust reader
+directly; `iter_record_batches()` delegates to the Source for streaming:
 
 ```python
 # rypipe_log/rypipe_adapter.py { #rypipe_logrypipe_adapterpy }
-from __future__ import annotations
 from typing import Any
 
 from .source import LogSource
@@ -111,7 +110,9 @@ class LogAdapter:
 
     def read(self, path: str, **kwargs: Any) -> Any:
         """Parse ``path`` and return a ``pyarrow.Table``."""
-        return LogSource(path, **kwargs).to_arrow()
+        from rypipe_log import _rypipe_log
+
+        return _rypipe_log.read_log(path, **kwargs)
 
     def iter_record_batches(
         self, path: str, memory: str | int = "64MiB",
@@ -125,9 +126,14 @@ class LogAdapter:
 
 !!! note
 
-    The adapter's `read()` method returns a `pyarrow.Table`, not a Source.
-    This is by design: `rypipe.read()` calls `adapter.read()` and expects a
-    table. Users who want pipelines use the Source directly.
+    `LogAdapter` deliberately does **not** inherit from `rypipe.Adapter`.
+    `register_adapter()` accepts any plain object with a
+    `read(path, **kwargs)` method that returns a `pyarrow.Table`;
+    `rypipe.read()` calls that method directly. `rypipe.Adapter` is a
+    different thing: a `Source` subclass instantiated per file
+    (`LogSource` plays that role here), giving users pipelines, caching,
+    and streaming. See
+    [Adapter design patterns](../advanced/source-pattern.md) for details.
 
 
 ## Registration { #registration }
@@ -171,6 +177,7 @@ __all__ = [
 
 _modules = {
     "LogSource": ".source",
+    "LogAdapter": ".rypipe_adapter",
     "CastTypes": ".stages",
     "FilterRows": ".stages",
     "RenameFields": ".stages",
@@ -296,7 +303,7 @@ to_csv = _rypipe_to_csv
 ```
 
 Or reimplement them from scratch for full control. Users then write
-`from rypipe_log import collect, to_dataframe` and never touch **rypipe**.
+`from rypipe_log import collect, to_pandas` and never touch **rypipe**.
 
 ## Adapter kwargs { #adapter-kwargs }
 
@@ -348,6 +355,7 @@ budget, and threads. Use it to dispatch in `_read_arrow`:
 
 ```python
 from rypipe import Source, resolve_engine
+from rypipe_log import _rypipe_log
 
 class LogSource(Source):
     def __init__(self, path, *, engine="auto", **kwargs):
@@ -377,7 +385,7 @@ class LogSource(Source):
         elif engine == "stream":
             return _rypipe_log.read_stream(str(self._path), **plan)
         else:  # columnar (default)
-            return _rypipe_log.read(str(self._path), **plan)
+            return _rypipe_log.read_log(str(self._path), **plan)
 ```
 
 `iter_record_batches` always streams regardless of the engine mode, so it
@@ -393,12 +401,14 @@ Your side of the deal is overriding `iter_record_batches` on your Source
 and forwarding the plan kwargs, the same way `_read_arrow` does:
 
 ```python
+from rypipe_log import _rypipe_log
+
 class LogSource(Source):
     def _read_arrow(self, plan_overrides=None):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
-        return _rypipe_log.read(str(self._path), **plan)
+        return _rypipe_log.read_log(str(self._path), **plan)
 
     def iter_record_batches(self, memory="64MiB", batch_size=None, **kwargs):
         plan = self._build_plan_kwargs()
@@ -425,27 +435,22 @@ from rypipe_log import LogSource
 
 src = LogSource("huge_report.log")
 
-# Streaming DataFrame (most common)
-df = src.to_pandas(memory="256MiB")
+# Materialize (bounded by the engine's default budget)
+df = src.to_pandas()
+src.to_parquet("output.parquet")
 
-# Streaming Parquet
-src.to_parquet("output.parquet", memory="256MiB")
-
-# Parallel streaming (higher throughput)
-df = src.to_pandas(memory="256MiB", threads=16)
-
-# Advanced: batch-level control
+# Batch-level control with an explicit memory budget
 for batch in src.iter_record_batches(memory="256MiB"):
     process(batch)
 ```
 
 With this wiring:
 
-* `source.to_pandas(memory="256MiB")` works automatically.
-* `source.to_parquet(path, memory="256MiB")` works automatically.
-* `pipeline.to_pandas(memory="256MiB")` works automatically.
+* `to_pandas()` and `to_parquet(path)` go through the engine's bounded
+  read path.
+* `iter_record_batches(memory="256MiB")` streams batches with peak memory
+  bounded by the `memory` parameter.
 * Fusable stages run in the parse loop (no Python overhead).
-* Peak memory is bounded by the `memory` parameter.
 
 !!! note
 

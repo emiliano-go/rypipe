@@ -56,7 +56,9 @@ print(df.shape)  # (15, 5)
 
 The whole DataFrame still ends up in memory, of course. The win is that the
 *parser* never holds the whole file at once, and you can process or write
-out each batch as it arrives (see below).
+out each batch as it arrives (see
+[Writing Parquet](#writing-to-parquet) and
+[Batch-level control](#advanced-batch-control)).
 
 ## Streaming with pipelines { #streaming-with-pipelines }
 

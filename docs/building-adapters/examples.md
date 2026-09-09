@@ -11,6 +11,7 @@ record boundary.
 use rypipe_core::Splitter;
 use rypipe_core::decoder::SkipRegionFinder;
 
+#[derive(Clone)]
 struct CsvSplitter;
 
 impl Splitter for CsvSplitter {
@@ -55,6 +56,7 @@ impl SkipRegionFinder for CsvSkipRegions {
 use std::borrow::Cow;
 use rypipe_core::{RecordParser, ColumnarSink, Value, Result};
 
+#[derive(Clone)]
 struct CsvParser { header: Vec<String> }
 
 impl RecordParser for CsvParser {
@@ -107,6 +109,7 @@ let batch = pipeline.read_path("data.csv", false, false)?;
 JSONL is newline-delimited JSON. Each line is one record.
 
 ```rust
+#[derive(Clone)]
 struct JsonlSplitter;
 
 impl Splitter for JsonlSplitter {
@@ -126,6 +129,7 @@ No skip regions needed (JSON strings don't contain bare newlines in JSONL).
 ### Parser { #parser }
 
 ```rust
+#[derive(Clone)]
 struct JsonlParser;
 
 impl RecordParser for JsonlParser {
@@ -186,6 +190,7 @@ impl RecordParser for JsonlParser {
 TSV is tab-delimited. Simple newline splitting.
 
 ```rust
+#[derive(Clone)]
 struct TsvSplitter;
 
 impl Splitter for TsvSplitter {
@@ -203,6 +208,7 @@ impl Splitter for TsvSplitter {
 ### Parser { #parser }
 
 ```rust
+#[derive(Clone)]
 struct TsvParser { header: Vec<String> }
 
 impl RecordParser for TsvParser {

@@ -7,7 +7,7 @@ how to build pipelines, reuse them, and get data out of them.
 ## Basic usage { #basic-usage }
 
 ```python
-from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows, to_dataframe
+from crxml import CrystalXMLSource, RenameFields, CastTypes, FilterRows, to_pandas
 
 src = CrystalXMLSource("report.xml", row_tag="Details")
 
@@ -18,7 +18,7 @@ pipeline = (
     | FilterRows(field="Status", op="==", value="Active")
 )
 
-df = to_dataframe(pipeline)
+df = to_pandas(pipeline)
 ```
 
 Each `|` returns a new `Pipeline`. The original Source is never modified.
@@ -93,14 +93,14 @@ Noah Clark 8900.00
 Use the sink functions from `crxml`:
 
 * `collect(pipeline)`, a list of row dicts.
-* `to_dataframe(pipeline)`, a pandas DataFrame.
+* `to_pandas(pipeline)`, a pandas DataFrame.
 * `to_csv(pipeline, "out.csv")`, write a CSV file.
 
 ```python
-from crxml import collect, to_dataframe, to_csv
+from crxml import collect, to_pandas, to_csv
 
 rows = collect(pipeline)
-df = to_dataframe(pipeline)
+df = to_pandas(pipeline)
 to_csv(pipeline, "active.csv")
 ```
 
@@ -131,7 +131,8 @@ engine applies them while parsing, before any Python object is created:
 
 Stages that cannot be expressed as plan options are **non-fusable**. They run
 in Python over the parsed batches. For `FilterRows`, that only happens when
-the lambda uses a pattern the compiler does not recognize (calling your own
+the lambda uses a pattern [the compiler](../architecture/lambda-compiler.md)
+does not recognize (calling your own
 functions, for example); comparisons, string methods, membership tests, and
 `and`/`or`/`not` logic all compile. See
 [Stages: callable predicate](stages.md#filterrows-callable) for the full list.
@@ -156,7 +157,7 @@ automatically every time you materialize it. See
 
 * `src | stage | stage` builds a `Pipeline`; the Source is not modified.
 * Pipelines are reusable and composable: extend a stored pipeline freely.
-* Iterate a pipeline to get row dicts; use `collect()`, `to_dataframe()`,
+* Iterate a pipeline to get row dicts; use `collect()`, `to_pandas()`,
   or `to_csv()` to materialize it.
 * Fusable stages run inside the Rust parse loop automatically.
 

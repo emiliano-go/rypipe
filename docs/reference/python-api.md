@@ -124,7 +124,7 @@ rypipe.resolve_engine(
     *,                        # keyword-only from here
     memory=None,              # int | str | None: memory budget (e.g. "64MiB")
     threads=None,             # int | None: number of threads
-    schema=None,              # list[str] | None: explicit column names
+    schema=None,              # list[str] | None: projected column names, in order
     has_parallel=True,        # bool: adapter has parallel support
     has_columnar=True,        # bool: adapter has columnar support
 ) -> str
@@ -167,7 +167,7 @@ class Source(ABC):
         filter=None,                   # dict | None
         field_types=None,              # dict[str, str]
         dictionary_columns=None,       # list[str]
-        schema=None,                   # list[str]
+        schema=None,                   # list[str]: project exactly these columns, in this order
         auto_dict=False,               # bool
         use_mmap=True,                 # bool
         batch_size=1024,               # int
@@ -312,29 +312,21 @@ Cast column values. Supported callables: `int`, `float`, `str`, `bool`.
 FilterRows(
     predicate=None,            # Callable: arbitrary filter
     *,
-    field=None,                # str: column name (constant/null/type filter)
+    field=None,                # str: column name (constant filter)
     op=None,                   # str: operator
     value=None,                # str: value (constant filter)
     field_a=None,              # str: left column (comparison)
     field_b=None,              # str: right column (comparison)
-    is_null=False,             # bool: keep rows where field is null/missing
-    is_type=None,              # str: keep rows where field has this type
+    is_null=None,              # bool: keep rows where field is null/missing
+    is_type=None,              # str: keep rows where field matches this type
 )
 ```
 
-**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=` (with aliases
-`eq`, `ne`, `gt`, `lt`, `ge`, `le`)
+**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `not in`, `startswith`, `endswith`, `contains`, `strip`, `lower`, `upper`, `replace`, `len`
 
-**Null check:** `FilterRows(field="Status", is_null=True)` keeps rows where
-`Status` is null or missing.
+**Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 
-**Type check:** `FilterRows(field="Amount", is_type="int64")` keeps rows
-where `Amount` has the given type. Valid types: `string`, `int64`,
-`float64`, `bool`/`boolean`, `dictionary`, `date32`, `timestamp`,
-`decimal128`.
-
-**Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=` (see
-[Filter spec format](#filter-spec-format))
+**Type check values:** `string`, `int64`, `float64`, `bool`, `date32`, `timestamp`, `decimal128`
 
 ### FilterRowsAny { #filterrowsany }
 
@@ -359,72 +351,6 @@ FilterRowsNot(inner: FilterRows)  # exactly 1 filter
 ```
 
 Negate a filter.
-
-## Filter spec format { #filter-spec-format }
-
-The `filter` option (accepted by `Source(...)` constructors,
-`rypipe.read(**kwargs)`, and produced by fusable `FilterRows` stages) is a
-dict with these forms:
-
-### Constant filter { #filter-constant }
-
-```python
-{"field": "Status", "op": "==", "value": "Active"}
-```
-
-Constant filters support `==`, `!=`, `>`, `<`, `>=`, `<=` (aliases `eq`,
-`ne`, `gt`, `lt`, `ge`, `le`).
-
-### Null and type checks { #filter-null-type }
-
-```python
-{"field": "Status", "op": "is_null"}
-{"field": "Amount", "op": "is_type", "value": "int64"}
-```
-
-`is_null` keeps rows where the field is null or missing. `is_type` keeps
-rows where the field has the given type (`string`, `int64`, `float64`,
-`bool`, `dictionary`, `date32`, `timestamp`, `decimal128`).
-
-### Column comparison { #filter-compare }
-
-Compares two columns in the same row:
-
-```python
-{"field_a": "price", "op": ">", "field_b": "cost"}
-```
-
-### Compound filters { #filter-compound }
-
-```python
-# AND
-{"and": [spec1, spec2]}
-
-# OR
-{"or": [spec1, spec2]}
-
-# NOT
-{"not": spec1}
-```
-
-!!! note
-
-    Compound forms are produced by `FilterRowsAny` / `FilterRowsAll` /
-    `FilterRowsNot`. Not every adapter's parser accepts compound pushdown;
-    check your adapter's documentation.
-
-### Supported operators { #filter-operators }
-
-| Operator | Aliases | Meaning | Constant | Column comparison |
-|----------|---------|---------|----------|-------------------|
-| `"=="` | `"eq"` | Equal | Yes | Yes |
-| `"!="` | `"ne"` | Not equal | Yes | Yes |
-| `">"` | `"gt"` | Greater than | Yes | Yes |
-| `"<"` | `"lt"` | Less than | Yes | Yes |
-| `">="` | `"ge"` | Greater or equal | Yes | Yes |
-| `"<="` | `"le"` | Less or equal | Yes | Yes |
-| `"is_null"` | | Field is null or missing | Yes (`is_null=True`) | No |
-| `"is_type"` | | Field has the given type | Yes (`is_type="..."`) | No |
 
 ## Sinks { #sinks }
 
@@ -460,3 +386,4 @@ rypipe.to_csv(
 | `rypipe.XmlError` | `ParseError` | XML-specific parse error. |
 | `rypipe.PlanError` | `Exception` | Invalid plan kwargs. |
 | `rypipe.MergeError` | `Exception` | Schema mismatch between chunks. |
+| `rypipe.ParserError` | `Exception` | Parser misbehavior (adapter bug). |

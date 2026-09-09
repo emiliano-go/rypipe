@@ -131,6 +131,24 @@ dropped fields saves significant CPU.
     treatment and [Adapter design](../advanced/adapter-design.md#parse_chunk_generic)
     for how the engine drives it.
 
+    It is an optimization, not a requirement — the default implementation
+    delegates to `parse_chunk`, so behavior is identical either way. Reasons
+    to skip it:
+
+    * `parse_chunk` is still mandatory (the trait requires the object-safe
+      method), so the usual shape is one generic helper plus a one-line
+      `parse_chunk` shim — extra boilerplate for a first adapter.
+    * The generic method is not object-safe: anything driving your parser
+      through `dyn RecordParser` (custom drivers, tests) still uses
+      `parse_chunk`.
+    * Monomorphization instantiates the parser body per concrete sink type,
+      which costs compile time and binary size — noticeable for large
+      parsers.
+    * The 5-10% only materializes when you are CPU-bound in the parse loop.
+      For small files, I/O-bound reads, or formats dominated by UTF-8
+      validation or allocation, it is in the noise. Migrate later if
+      profiling says so; nothing breaks in the meantime.
+
 
 ## Value types { #value-types }
 
@@ -188,39 +206,62 @@ bindings (covered below):
 use std::borrow::Cow;
 use rypipe_core::{Splitter, RecordParser, ColumnarSink, Value, Result};
 
+// Splitter: tells the engine where records begin so it can carve the
+// input into chunks for parallel parsing. Clone is required by Pipeline.
 #[derive(Clone, Default)]
 pub struct LogSplitter;
 
 impl Splitter for LogSplitter {
+    // Find the next record boundary after `from`. The log format is
+    // newline-delimited, so a SIMD-accelerated newline scan suffices;
+    // return the offset just past the newline.
     fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
         memchr::memchr(b'\n', &bytes[from..]).map(|r| from + r + 1)
     }
+
+    // Rough average row size from a file sample. The engine uses this to
+    // size chunks and memory budgets, so it only needs to be approximate.
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
         let n = sample.iter().filter(|&&b| b == b'\n').count().max(1);
-        (sample.len() / n).max(1)
+        (sample.len() / n).max(1)  // never return 0
     }
 }
 
+// Parser: turns each byte chunk into row/field events on the sink.
+// Stateless here; formats with headers or options would store them in
+// this struct.
 #[derive(Clone, Default)]
 pub struct LogParser;
 
 impl RecordParser for LogParser {
+    // Called once per chunk before parsing. Reject invalid input early
+    // with a fast SIMD UTF-8 check.
     fn validate(&self, bytes: &[u8]) -> Result<()> {
         simdutf8::basic::from_utf8(bytes)
             .map_err(rypipe_core::Error::Utf8)?;
         Ok(())
     }
 
+    // The hot path: iterate rows and emit begin_row / put_field / end_row
+    // for each record.
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+        // validate() already ran, so this cannot fail on real input;
+        // map the error anyway instead of unwrapping.
         let text = std::str::from_utf8(bytes)
             .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
 
         for line in text.lines() {
-            if line.is_empty() { continue; }
+            if line.is_empty() { continue; }  // tolerate trailing newlines
             sink.begin_row();
             for part in line.split(',') {
+                // Skip tokens without '=' (malformed fields) rather than
+                // failing the whole chunk.
                 if let Some((key, value)) = part.split_once('=') {
+                    // wants() is false for fields the plan drops or renames
+                    // away — skipping them saves real CPU.
                     if sink.wants(key) {
+                        // Borrow from the input: zero-copy until the sink
+                        // decides to materialize the value.
                         sink.put_field(key, Value::Str(Cow::Borrowed(value)));
                     }
                 }
@@ -417,18 +458,23 @@ use pyo3::types::PyModule;
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
 use std::collections::HashMap;
 
+// One function is the whole Python API: Python passes the merged pushdown
+// plan as plain kwargs, everything after the boundary stays in Rust.
 #[pyfunction]
+// Every plan kwarg is optional; defaults match the Python side's defaults
+// so `read_log(path)` alone does something sensible.
 #[pyo3(signature = (path, field_mapping=None, drop_fields=None, field_types=None,
                     auto_dict=false, use_mmap=false, prefault=false))]
 fn read_log(
     path: String,
-    field_mapping: Option<HashMap<String, String>>,
-    drop_fields: Option<Vec<String>>,
-    field_types: Option<HashMap<String, String>>,
+    field_mapping: Option<HashMap<String, String>>,  // RenameFields pushdown
+    drop_fields: Option<Vec<String>>,                // DropFields pushdown
+    field_types: Option<HashMap<String, String>>,    // CastTypes pushdown
     auto_dict: bool,
     use_mmap: bool,
     prefault: bool,
 ) -> PyResult<Py<PyAny>> {
+    // Translate the Python kwargs into the engine's ExecutionPlan.
     let mut plan = ExecutionPlan::new();
     if let Some(map) = field_mapping {
         plan.field_map = map.into_iter().collect();
@@ -439,6 +485,9 @@ fn read_log(
     plan.auto_dict = auto_dict;
     if let Some(ft) = field_types {
         for (name, type_str) in ft {
+            // Type names arrive as strings ("int64", "float64", ...);
+            // reject unknown ones with a Python ValueError naming both
+            // the type and the field.
             let ft = FieldType::from_str(&type_str).ok_or_else(|| {
                 PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
             })?;
@@ -446,11 +495,15 @@ fn read_log(
         }
     }
 
+    // Run the whole parse in Rust: split, parse, fuse the plan, merge
+    // chunks — one RecordBatch comes out. Engine errors become ValueError.
     let batch = Pipeline::new(LogSplitter, LogParser)
         .with_plan(plan)
         .read_path(&path, use_mmap, prefault)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
+    // Export to Python: convert the batch via Arrow's PyO3 bridge, then
+    // wrap it in a pyarrow.Table (the type the Python side promises).
     Python::with_gil(|py| {
         let pa = PyModule::import(py, "pyarrow")?;
         let rb = batch.to_pyarrow(py)?;
@@ -461,6 +514,8 @@ fn read_log(
     })
 }
 
+// Module init: the name must match [tool.maturin] module-name
+// (`rypipe_log._rypipe_log`).
 #[pymodule]
 fn _rypipe_log(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_log, m)?)?;

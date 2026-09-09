@@ -89,9 +89,9 @@ Stages transform the data as it flows through a pipeline. Chain them on the
 Source with the `|` operator, like a Unix pipe:
 
 ```python
-from crxml import CastTypes, FilterRows, to_dataframe
+from crxml import CastTypes, FilterRows, to_pandas
 
-df = to_dataframe(
+df = to_pandas(
     source
     | CastTypes({"Amount": float})
     | FilterRows(field="Status", op="==", value="Active")
@@ -101,7 +101,7 @@ print(df.head(3))
 
 * `CastTypes` converts the `Amount` column from strings to floats.
 * `FilterRows` keeps only rows where `Status` is `"Active"`.
-* `to_dataframe()` runs the pipeline and collects the result.
+* `to_pandas()` runs the pipeline and collects the result.
 
 Each `|` returns a new `Pipeline`. The original Source is not modified, so
 you can reuse it as often as you like.
@@ -111,12 +111,12 @@ you can reuse it as often as you like.
 Save this as `first_steps.py` next to `report.xml`:
 
 ```python
-from crxml import CrystalXMLSource, CastTypes, FilterRows, to_dataframe
+from crxml import CrystalXMLSource, CastTypes, FilterRows, to_pandas
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 print("Columns:", source.schema())
 
-df = to_dataframe(
+df = to_pandas(
     source
     | CastTypes({"Amount": float})
     | FilterRows(field="Status", op="==", value="Active")
@@ -154,6 +154,6 @@ Active rows: 12
 3. Iterating the Source yields rows as dicts, all values as strings.
 4. `source | CastTypes(...) | FilterRows(...)` builds a Pipeline; the Source
    itself is untouched.
-5. `to_dataframe(pipeline)` runs the pipeline and collects the result.
+5. `to_pandas(pipeline)` runs the pipeline and collects the result.
 
 **Next:** [Pipeline](pipeline.md#pipeline), the `|` operator in depth.

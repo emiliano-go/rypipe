@@ -1,7 +1,7 @@
 # Rust API Reference { #rust-api }
 
 This page is a reference for the **rypipe-core** Rust API. For a tutorial,
-see [Writing Adapters](../building-adapters/index.md).
+see [Building Adapters](../building-adapters/index.md).
 
 ## Crate structure { #crate-structure }
 
@@ -9,6 +9,7 @@ see [Writing Adapters](../building-adapters/index.md).
 |-------|---------|
 | `rypipe-core` | Engine, traits, pipeline, Arrow export |
 | `rypipe-python` | PyO3 bindings and helpers |
+| `rypipe-test` | Property-based testing helpers and fixtures |
 
 ## Core traits { #core-traits }
 
@@ -165,13 +166,54 @@ impl CompareOp {
 }
 ```
 
+## ArithOp { #arithop }
+
+```rust
+pub enum ArithOp { Add, Sub, Mul, Div }
+```
+
 ## FilterPredicate { #filterpredicate }
 
 ```rust
 pub enum FilterPredicate {
+    // Value comparison
     Equal { field: String, value: String },
     NotEqual { field: String, value: String },
     Compare { field_a: String, op: CompareOp, field_b: String },
+    CompareLiteral { field: String, op: CompareOp, value: String },
+
+    // String predicates
+    StartsWith { field: String, value: String },
+    EndsWith { field: String, value: String },
+    Contains { field: String, value: String },
+    Strip { field: String, op: CompareOp, value: String },
+    Lower { field: String, op: CompareOp, value: String },
+    Upper { field: String, op: CompareOp, value: String },
+    Replace { field: String, old: String, new: String, op: CompareOp, value: String },
+    Length { field: String, op: CompareOp, value: i64 },
+
+    // Membership
+    In { field: String, values: Vec<String> },
+    NotIn { field: String, values: Vec<String> },
+
+    // Type/null predicates
+    IsNull { field: String },
+    IsType { field: String, field_type: FieldType },
+
+    // Arithmetic
+    ArithmeticCompare {
+        field: String,
+        arith_op: ArithOp,
+        arith_value: f64,
+        cmp_op: CompareOp,
+        cmp_value: f64,
+    },
+
+    // Boolean
+    NotField { field: String },
+    Always(bool),
+
+    // Logical combinators
     And(Box<FilterPredicate>, Box<FilterPredicate>),
     Or(Box<FilterPredicate>, Box<FilterPredicate>),
     Not(Box<FilterPredicate>),
@@ -234,6 +276,24 @@ impl FrozenSchema {
 }
 ```
 
+## DiscoveryOpts { #discoveryopts }
+
+Controls schema discovery behavior.
+
+```rust
+pub struct DiscoveryOpts {
+    pub full_scan_threshold: u64,   // default: 128 MiB
+    pub windows: usize,             // default: 16
+    pub window_bytes: usize,        // default: 2 MiB
+    pub disable_auto_schema: bool,  // default: false
+}
+```
+
+When `disable_auto_schema` is `true`, `discover_schema()` returns an
+empty schema immediately. The engine falls back to full parsing with
+string-typed columns. Use for esoteric formats where discovery is
+unreliable.
+
 ## Python bindings { #python-bindings }
 
 ### execution_plan_from_kwargs { #execution-plan-from-kwars }
@@ -274,18 +334,71 @@ pub fn record_batch_to_pyarrow(
 | `XmlError` | `ParseError` | XML-specific parse error. |
 | `PlanError` | `PyException` | Invalid plan kwargs. |
 | `MergeError` | `PyException` | Schema mismatch between chunks. |
+| `ParserError` | `PyException` | Parser misbehavior (adapter bug). |
 
-### Error enum { #error }
+## Error enum { #error }
 
-`rypipe_core::Error` is the `thiserror` enum returned by every fallible
-engine API:
+```rust
+pub enum Error {
+    Utf8(simd_utf8::Utf8Error),       // invalid UTF-8
+    Io(std::io::Error),                 // I/O errors
+    Plan(String),                       // invalid execution plan
+    Merge(String),                      // chunk merge conflict
+    Arrow(String),                      // Arrow construction failure
+    Parser(String),                     // parser misbehavior (adapter bug)
+    Lifetime(String),                   // borrowed value lifetime violation
+}
+```
 
-| Variant | Payload | Raised when |
-|---------|---------|-------------|
-| `Utf8` | `simdutf8::basic::Utf8Error` | Input bytes are not valid UTF-8. |
-| `Io` | `std::io::Error` | Read, seek, or mmap failure. |
-| `Plan` | `String` | Invalid or inconsistent execution plan. |
-| `Merge` | `String` | Chunk merge conflict (column type mismatch). |
-| `Arrow` | `arrow::error::ArrowError` | Arrow array/batch construction failure. |
-| `Parser` | `String` | The parser returned invalid data. |
-| `Lifetime` | `String` | The parser returned a borrowed value that outlives the input. |
+`Error::Parser` and `Error::Lifetime` are reserved for adapter bugs.
+`Parser` signals that the adapter violated the parse contract (e.g., emitted
+values outside `begin_row`/`end_row`). `Lifetime` signals that a borrowed
+value outlived the chunk's byte buffer.
+
+## rypipe-test crate { #rypipe-test }
+
+Property-based testing helpers for adapter development.
+
+```toml
+[dev-dependencies]
+rypipe-test = "2"
+```
+
+### Strategies { #strategies }
+
+Proptest strategies for generating test data:
+
+| Strategy | Generates |
+|----------|-----------|
+| `arb_field_name()` | Random field names (1-20 chars, ASCII) |
+| `arb_field_value()` | Random field values (empty, ASCII, Unicode) |
+| `arb_record()` | Random `Vec<(String, String)>` records |
+| `arb_records()` | Random `Vec<Vec<(String, String)>>` with 1-100 records |
+| `arb_malformed_utf8()` | Byte sequences with invalid UTF-8 |
+| `arb_nested_quotes()` | Strings with nested quote characters |
+
+### Fixtures { #fixtures }
+
+```rust
+use rypipe_test::fixtures::{MALFORMED_UTF8, NESTED_QUOTES, EMPTY_VALUES};
+```
+
+| Fixture | Description |
+|---------|-------------|
+| `MALFORMED_UTF8` | 5 byte sequences that fail UTF-8 validation |
+| `NESTED_QUOTES` | 5 strings with nested single/double quotes |
+| `EMPTY_VALUES` | 5 empty/blank value variants |
+
+### Helpers { #helpers }
+
+```rust
+use rypipe_test::{parse_test_bytes, assert_batches_equal};
+use rypipe_test::{KeyValueParser, NewlineSplitter};
+```
+
+| Helper | Purpose |
+|--------|---------|
+| `parse_test_bytes(bytes, splitter, parser, plan)` | Parse bytes into `Vec<RecordBatch>` |
+| `assert_batches_equal(batches, expected_rows)` | Assert row count and non-empty batches |
+| `KeyValueParser` | `key=value` parser for test adapters |
+| `NewlineSplitter` | Newline splitter for test adapters |

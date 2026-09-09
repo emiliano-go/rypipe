@@ -203,6 +203,13 @@ fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut impl ColumnarSink) -> Res
     implementations), you must override it explicitly: the default falls back
     to the trait-object version.
 
+    Skip it when the tradeoffs don't pay off: `parse_chunk` remains
+    mandatory anyway, the generic method is not object-safe (custom drivers
+    using `dyn RecordParser` bypass it), and monomorphization costs compile
+    time and binary size per sink type. If you are not CPU-bound in the
+    parse loop — small files, I/O-bound reads — the 5-10% is in the noise.
+    The default impl delegates to `parse_chunk`, so migrating later is safe.
+
 
 ## Technique 8: Implement `skip_regions` { #technique-8-skip-regions }
 

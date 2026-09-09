@@ -53,7 +53,8 @@ pub fn execution_plan_from_kwargs(
     if let Some(ft) = field_types {
         for (name, type_str) in ft {
             let ft = FieldType::from_str(&type_str).ok_or_else(|| {
-                let valid = "string, int64, float64, bool, dictionary, date32, timestamp";
+                let valid = "string, int64, float64, bool, dictionary, date32, \
+                             timestamp, timestamp[s|ms|us|ns], decimal128, decimal128(scale)";
                 PlanError::new_err(format!(
                     "unknown field type '{type_str}' for '{name}'; valid types: {valid}"
                 ))
@@ -215,7 +216,8 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             .ok_or_else(|| PlanError::new_err("is_type filter must include 'value' key"))?
             .extract::<String>()?;
         let field_type = FieldType::from_str(&type_str).ok_or_else(|| {
-            let valid = "string, int64, float64, bool, dictionary, date32, timestamp";
+            let valid = "string, int64, float64, bool, dictionary, date32, \
+                         timestamp, timestamp[s|ms|us|ns], decimal128, decimal128(scale)";
             PlanError::new_err(format!(
                 "unknown field type '{type_str}' in is_type filter; valid types: {valid}"
             ))
