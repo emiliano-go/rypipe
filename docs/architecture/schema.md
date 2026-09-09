@@ -198,10 +198,9 @@ pub struct DiscoveryOpts {
     /// Bytes per window.
     pub window_bytes: usize,
 
-    /// Disable auto-schema discovery entirely. When true, discover_schema()
-    /// returns an empty schema and the engine falls back to full parsing.
-    /// Useful for esoteric formats where discovery may be unreliable.
-    pub disable_auto_schema: bool,
+    /// Whether to always scan the tail of the file to catch
+    /// late-appearing columns.
+    pub always_scan_tail: bool,
 }
 ```
 
@@ -214,7 +213,7 @@ impl Default for DiscoveryOpts {
             full_scan_threshold: 128 * 1024 * 1024, // 128 MiB
             windows: 16,
             window_bytes: 2 * 1024 * 1024, // 2 MiB
-            disable_auto_schema: false,
+            always_scan_tail: true,
         }
     }
 }
@@ -253,33 +252,15 @@ unknown field "LateColumn" not in frozen schema (10 columns, exact=false);
 pass schema=[...] with full column list or use full-scan discovery
 ```
 
-### Escape hatch: disable_auto_schema { #escape-hatch }
+### When discovery is unreliable { #escape-hatch }
 
 For formats where schema discovery is unreliable (extremely sparse or
-heterogeneous data), set `disable_auto_schema = true`:
-
-```rust
-use rypipe_core::DiscoveryOpts;
-
-let opts = DiscoveryOpts {
-    disable_auto_schema: true,
-    ..DiscoveryOpts::default()
-};
-```
-
-When enabled, `discover_schema()` returns an empty schema immediately,
-skipping all window scanning. The engine falls back to full parsing with
-string-typed columns. Combine with explicit `schema_order` and
-`field_types` for maximum control:
-
-```python
-source = MyAdapter(
-    "esoteric.dat",
-    schema=["id", "value", "timestamp"],
-    field_types={"id": "int64", "value": "float64"},
-    disable_auto_schema=True,
-)
-```
+heterogeneous data), pass an explicit `schema` from the API layer. An
+explicit schema pre-declares the columns: listed columns are parsed into
+their declared `field_types` in the given order, columns absent from the
+data come out null-filled, and unlisted fields are skipped at parse
+level. Fields referenced by `filter` are still parsed for predicate
+evaluation, then projected out of the output.
 
 ## Schema cache { #schema-cache }
 

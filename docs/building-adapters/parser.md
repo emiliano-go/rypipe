@@ -257,3 +257,24 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; fini
 Both finish in microseconds, so use them as a smoke test after every
 change to `parse_chunk`. For the end-to-end check through Python, see the
 [walkthrough](walkthrough.md#step-6-build-and-test).
+
+## What the end user sees { #what-the-end-user-sees }
+
+The `wants()` checks and typed `Value` variants in your `parse_chunk` pay
+off as free projection pushdown and typed columns. The user passes a filter
+and type hints; the parser skips dropped fields and the engine builds typed
+Arrow arrays directly:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+# filter is evaluated row-by-row during parsing; "amount" arrives as float64.
+table = rypipe.read(
+    "sample.log",
+    format="log",
+    field_types={"amount": "float64"},
+    filter={"field": "status", "op": "eq", "value": "active"},
+)
+```

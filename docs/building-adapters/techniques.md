@@ -367,3 +367,23 @@ dropped fields never reach `put_field` or a column builder.
 - [Parser](./parser.md): `RecordParser` trait reference
 - [Sink](./sink.md): `ColumnarSink` method reference
 - [Scan primitives](./scan.md): Byte-searching utilities
+
+## What the end user sees { #what-the-end-user-sees }
+
+The single most user-visible technique is schema declaration (Technique 1):
+the same `schema` and `field_types` kwargs you accept and forward are what
+the user passes to skip discovery and get typed columns:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+# The +80% projection win, as two keyword arguments.
+table = rypipe.read(
+    "sample.log",
+    format="log",
+    schema=["id", "amount"],
+    field_types={"id": "int64", "amount": "float64"},
+)
+```

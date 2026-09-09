@@ -78,3 +78,23 @@ The test calls `rypipe_core::decoder::plan_chunk_count` directly:
 `plan_chunk_count(1024, 4, Parallel)` returns 4 (clamped up to the thread
 count), and a 1 GiB file on 8 threads returns 128 in Parallel mode and 64
 in Streaming mode, never exceeding `MAX_SPLIT_CHUNKS` (1024).
+
+## What the end user sees { #what-the-end-user-sees }
+
+Chunk sizing is automatic, but the user's choice of execution mode feeds
+the planner. Passing `memory=` switches the adapter into streaming mode
+(`SplitMode::Streaming`), where the engine plans smaller chunks to hold
+the memory budget:
+
+```python
+import rypipe, rypipe_log
+
+adapter = rypipe_log.LogAdapter()
+rypipe.register_adapter("log", adapter)
+
+# Streaming mode: chunk count and sizes come from plan_chunk_count.
+for batch in adapter.iter_record_batches(
+    "sample.log", memory="64MiB", batch_size=10_000
+):
+    print(batch.num_rows)
+```

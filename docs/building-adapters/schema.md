@@ -311,23 +311,25 @@ column order enables parallel export (~4,980 MB/s, +11%). With `schema_order`
     (`"9" > "10"` is `true`). Always set `field_types` on columns used in
     numeric filters to get native comparison.
 
-## Escape hatch: disable_auto_schema { #escape-hatch }
+## When discovery is unreliable { #escape-hatch }
 
 For formats where schema discovery is unreliable (extremely sparse data,
-heterogeneous records, or non-standard layouts), disable auto-discovery:
+heterogeneous records, or non-standard layouts), pass an explicit `schema`:
 
 ```python
 source = MyAdapter(
     "esoteric.dat",
     schema=["id", "value", "timestamp"],
     field_types={"id": "int64", "value": "float64"},
-    disable_auto_schema=True,
 )
 ```
 
-When `disable_auto_schema` is set, the engine skips all discovery passes
-and relies entirely on the explicit `schema` and `field_types` you
-provide. Unknown fields at parse time raise `MergeError`.
+An explicit `schema` pre-declares the columns, so discovery has nothing to
+get wrong: listed columns are parsed into the declared `field_types` in the
+given order, columns absent from the data come out null-filled, and fields
+not in `schema` are skipped at parse level (the scanner byte-jumps past
+them). Fields referenced by `filter` are still parsed for predicate
+evaluation, then projected out of the output.
 
 ## Troubleshooting { #troubleshooting }
 
@@ -376,3 +378,23 @@ active: string
 
 Note that `schema` fixes column order, not projection: fields discovered
 beyond the list are still appended at the end.
+
+## What the end user sees { #what-the-end-user-sees }
+
+From the user's side, the schema work above is two keyword arguments.
+`schema` sets the output column order, and `field_types` yields typed
+columns; fields the user does not list are never scanned, and listed
+columns missing from some rows come out null-filled:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+table = rypipe.read(
+    "sample.log",
+    format="log",
+    schema=["id", "name", "amount"],          # column order, no discovery pass
+    field_types={"id": "int64", "amount": "float64"},
+)
+```

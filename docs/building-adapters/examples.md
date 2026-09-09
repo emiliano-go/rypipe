@@ -251,3 +251,31 @@ test result: ok. 10 passed; 0 failed
 
 Swap in the example's `Splitter`/`RecordParser` implementations and the
 same commands apply unchanged.
+
+## What the end user sees { #what-the-end-user-sees }
+
+However the adapter is built internally, the finished product is a
+registered format the user drives through plain `rypipe` calls. A full
+session with the log adapter from this guide:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+# One-shot read with projection, types, and a pushed-down filter.
+table = rypipe.read(
+    "sample.log",
+    format="log",
+    schema=["id", "name", "amount"],
+    field_types={"id": "int64", "amount": "float64"},
+    filter={"field": "status", "op": "eq", "value": "active"},
+)
+print(table.num_rows)
+
+# Or stream the same file with bounded memory.
+for batch in rypipe.iter_record_batches(
+    "sample.log", format="log", memory="64MiB", batch_size=10_000
+):
+    print(batch.num_rows)
+```

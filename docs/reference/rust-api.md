@@ -285,14 +285,12 @@ pub struct DiscoveryOpts {
     pub full_scan_threshold: u64,   // default: 128 MiB
     pub windows: usize,             // default: 16
     pub window_bytes: usize,        // default: 2 MiB
-    pub disable_auto_schema: bool,  // default: false
+    pub always_scan_tail: bool,     // default: true
 }
 ```
 
-When `disable_auto_schema` is `true`, `discover_schema()` returns an
-empty schema immediately. The engine falls back to full parsing with
-string-typed columns. Use for esoteric formats where discovery is
-unreliable.
+Internal to the engine: `discover_schema()` builds these from file size
+via the dynamic window heuristics; callers do not construct them.
 
 ## Python bindings { #python-bindings }
 

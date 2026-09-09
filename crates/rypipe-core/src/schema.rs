@@ -42,10 +42,6 @@ pub struct DiscoveryOpts {
     pub window_bytes: usize,
     /// Whether to always scan the tail of the file to catch late-appearing columns.
     pub always_scan_tail: bool,
-    /// Disable auto-discovery entirely. When true, no schema discovery is
-    /// performed and the engine falls back to full parsing. This is an escape
-    /// hatch for esoteric formats where discovery may be unreliable.
-    pub disable_auto_schema: bool,
 }
 
 impl Default for DiscoveryOpts {
@@ -55,7 +51,6 @@ impl Default for DiscoveryOpts {
             windows: 16,
             window_bytes: 2 * 1024 * 1024, // 2 MiB
             always_scan_tail: true,
-            disable_auto_schema: false,
         }
     }
 }
@@ -377,18 +372,5 @@ mod tests {
         assert_eq!(dynamic_window_size(500 * 1024 * 1024), 2 * 1024 * 1024);
         // Large file: 4 MiB windows
         assert_eq!(dynamic_window_size(2 * 1024 * 1024 * 1024), 4 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_disable_auto_schema_default() {
-        let opts = DiscoveryOpts::default();
-        assert!(!opts.disable_auto_schema, "auto_schema should be enabled by default");
-    }
-
-    #[test]
-    fn test_disable_auto_schema_escape_hatch() {
-        let mut opts = DiscoveryOpts::default();
-        opts.disable_auto_schema = true;
-        assert!(opts.disable_auto_schema, "auto_schema should be disabled");
     }
 }

@@ -125,15 +125,6 @@ fn discover_schema<P: crate::decoder::RecordParser>(
     // Explicit schema already handled by caller; this is auto-discovery.
     let opts = DiscoveryOpts::default();
 
-    // Escape hatch: if auto-schema is disabled, return empty schema
-    // and let the engine fall back to full parsing
-    if opts.disable_auto_schema {
-        let elapsed = t0.elapsed().as_nanos() as u64;
-        DISCOVERY_NS.store(elapsed, Ordering::Relaxed);
-        let _ = splitter;
-        return (FrozenSchema::from_plan(&[], plan), Vec::new());
-    }
-
     let file_size = bytes.len() as u64;
 
     // Dynamic sizing: scale window count and size by file size

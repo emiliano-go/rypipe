@@ -96,3 +96,18 @@ The test asserts `find2(b"a=b,c=d", 0, b'=', b',') == Some((1, b'='))`,
 `starts_with(b"a=b,c=d", 3, b",c")`, and that `find2` returns `None` when
 neither byte is present. Note the helpers live in `rypipe_core::scan`,
 not at the crate root.
+
+## What the end user sees { #what-the-end-user-sees }
+
+The scan primitives are invisible by design. Whether your parser uses
+`scan::find` or `find_literal`, the user-facing call is the same plain
+read; the primitives only show up as speed:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+# No scan-related options exist; SIMD byte-search is purely internal.
+table = rypipe.read("sample.log", format="log")
+```

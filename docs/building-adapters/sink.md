@@ -328,3 +328,20 @@ The test builds a plan with `.drop("age").drop("active")`, parses a
 two-row sample, and asserts `batch.num_columns() == 1` and the remaining
 column is `name`. If your sink ignores `wants()`, all three columns
 appear and this test fails.
+
+## What the end user sees { #what-the-end-user-sees }
+
+The sink and its fast paths are engine internals. The user calls `read`
+once and receives a finished `pyarrow.Table`; the per-field method
+hierarchy (`put_field_at`, `put_field_resolved`, ...) only shows up as
+throughput:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+# begin_row/put_field/end_row have already run; this is a plain Arrow table.
+table = rypipe.read("sample.log", format="log")
+print(table.schema)
+```
