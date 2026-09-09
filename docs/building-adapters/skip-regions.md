@@ -103,3 +103,18 @@ openers and closers (quotes), the rejection is conservative: the
 candidate right after the closing quote is dropped too, because the
 backward scan reads the closing quote as an opener. Prefer distinct
 opener/closer pairs (like `<!--` and `-->`) when your format allows it.
+
+## What the end user sees { #what-the-end-user-sees }
+
+Skip regions are a correctness guarantee the user never has to think about.
+Comments and quoted fields are parsed correctly regardless of thread count,
+with no user-facing knob:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+# Correct splitting inside comments/quotes is automatic; nothing to pass.
+table = rypipe.read("sample.log", format="log")
+```

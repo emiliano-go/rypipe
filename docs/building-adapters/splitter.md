@@ -176,3 +176,18 @@ The test asserts `next_record_start(sample, 0) == Some(30)` (first row
 ends at byte 29), `next_record_start(sample, 30) == Some(sample.len())`,
 and `None` past the end. A wrong position here corrupts every chunk
 boundary, so run this before benchmarking anything.
+
+## What the end user sees { #what-the-end-user-sees }
+
+None of this machinery is visible to the person using your adapter. Once a
+correct `Splitter` is registered, the engine picks split points and parallel
+threads on its own:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+# The splitter runs behind the scenes; parallelism is automatic.
+table = rypipe.read("sample.log", format="log")
+```

@@ -236,3 +236,25 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 - [Schema](./schema.md): The biggest performance lever
 - [Splitter](./splitter.md): `Splitter` trait reference
 - [Parser](./parser.md): `RecordParser` trait reference
+
+## What the end user sees { #what-the-end-user-sees }
+
+An adapter that avoids these anti-patterns is one the user can drive with
+a single call: filters are pushed into the parser, drops never get scanned,
+and fused stages stay in Rust instead of falling back to Python:
+
+```python
+import rypipe, rypipe_log
+
+rypipe.register_adapter("log", rypipe_log.LogAdapter())
+
+# Fast because the adapter honors wants(), plan_overrides, and field_types.
+table = rypipe.read(
+    "sample.log",
+    format="log",
+    drop_fields=["id"],
+    field_mapping={"name": "user"},
+    filter={"field": "status", "op": "eq", "value": "active"},
+    field_types={"amount": "float64"},
+)
+```
