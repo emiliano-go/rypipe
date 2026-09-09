@@ -80,13 +80,14 @@ Every adapter must expose these APIs:
 
 ```python
 from rypipe import Source
+from rypipe_log import _rypipe_log
 
 class LogSource(Source):
     def _read_arrow(self, plan_overrides=None):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
-        return _rypipe_log.read(str(self._path), **plan)
+        return _rypipe_log.read_log(str(self._path), **plan)
 ```
 
 The Source class gives users the pipeline `|` operator, caching, and all

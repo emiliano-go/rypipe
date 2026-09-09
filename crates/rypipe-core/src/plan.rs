@@ -148,8 +148,11 @@ impl ExecutionPlan {
         self
     }
 
-    /// Set the output column order. Columns not listed appear after the listed
-    /// ones in first-appearance order.
+    /// Declare the output schema as a **projection + order**: the output
+    /// contains exactly the listed columns, in the listed order.  Fields in
+    /// the data but not listed are skipped during parsing (never
+    /// materialized); listed columns absent from the data come out
+    /// null-filled.  `field_map` renames apply before matching.
     pub fn schema_order<I, S>(mut self, order: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -192,14 +195,69 @@ impl ExecutionPlan {
     /// Resolve a raw field name to its output column name.
     /// Returns `None` if the field should be dropped.
     ///
-    /// Application order: rename first, then drop, matching left-to-right
-    /// pipeline semantics.
+    /// Application order: rename first, then drop, then schema projection,
+    /// matching left-to-right pipeline semantics.
+    ///
+    /// When `schema_order` is non-empty it acts as a **projection**: only the
+    /// listed columns are materialized, so any other resolved name returns
+    /// `None` here (which makes `ColumnarSink::wants`/`resolve` reject the
+    /// field and lets adapters skip extracting it).  Fields referenced by the
+    /// row filter are kept even when absent from `schema_order` so predicates
+    /// still evaluate correctly; they are projected out of the final batch.
     pub fn resolve_field<'a>(&'a self, raw: &'a str) -> Option<&'a str> {
         let resolved = self.field_map.get(raw).map_or(raw, |s| s.as_str());
         if self.drop_fields.contains(resolved) {
             return None;
         }
+        if !self.schema_order.is_empty()
+            && !self.schema_order.iter().any(|n| n == resolved)
+            && !self.filter_references(resolved)
+        {
+            return None;
+        }
         Some(resolved)
+    }
+
+    /// Whether the row filter references `resolved` (a post-rename output
+    /// name).  Used by [`Self::resolve_field`] to keep predicate fields out
+    /// of the schema projection.
+    fn filter_references(&self, resolved: &str) -> bool {
+        fn matches(pred: &FilterPredicate, plan: &ExecutionPlan, resolved: &str) -> bool {
+            // Rename only: drop/projection must not apply here (recursion).
+            fn ren<'x>(plan: &'x ExecutionPlan, f: &'x String) -> &'x str {
+                plan.field_map.get(f).map_or(f.as_str(), |s| s.as_str())
+            }
+            match pred {
+                FilterPredicate::Equal { field, .. }
+                | FilterPredicate::NotEqual { field, .. }
+                | FilterPredicate::CompareLiteral { field, .. }
+                | FilterPredicate::StartsWith { field, .. }
+                | FilterPredicate::EndsWith { field, .. }
+                | FilterPredicate::In { field, .. }
+                | FilterPredicate::NotIn { field, .. }
+                | FilterPredicate::NotField { field, .. }
+                | FilterPredicate::ArithmeticCompare { field, .. }
+                | FilterPredicate::Strip { field, .. }
+                | FilterPredicate::Lower { field, .. }
+                | FilterPredicate::Upper { field, .. }
+                | FilterPredicate::Replace { field, .. }
+                | FilterPredicate::Length { field, .. }
+                | FilterPredicate::Contains { field, .. }
+                | FilterPredicate::IsNull { field, .. }
+                | FilterPredicate::IsType { field, .. } => ren(plan, field) == resolved,
+                FilterPredicate::Always(_) => false,
+                FilterPredicate::Compare {
+                    field_a, field_b, ..
+                } => ren(plan, field_a) == resolved || ren(plan, field_b) == resolved,
+                FilterPredicate::And(a, b) | FilterPredicate::Or(a, b) => {
+                    matches(a, plan, resolved) || matches(b, plan, resolved)
+                }
+                FilterPredicate::Not(inner) => matches(inner, plan, resolved),
+            }
+        }
+        self.filter
+            .as_ref()
+            .is_some_and(|f| matches(f, self, resolved))
     }
 }
 

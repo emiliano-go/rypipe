@@ -12,11 +12,11 @@ Pushdown fusion is the process by which the Python `Pipeline` rewrites a chain o
 ```python
 # Stages are imported from the adapter package; they are the same
 # classes the framework's stage protocol defines.
-from crxml import CrystalXMLSource, RenameFields, DropFields, FilterRows, CastTypes, to_dataframe
+from crxml import CrystalXMLSource, RenameFields, DropFields, FilterRows, CastTypes, to_pandas
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
-df = to_dataframe(
+df = to_pandas(
     source
     | RenameFields({"old_name": "new_name"})
     | DropFields(["internal_id"])
@@ -108,7 +108,7 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 | `RenameFields` | `field_map` | Multiple renames merge into one map. |
 | `DropFields` | `drop_fields` | Merges as a set union. |
 | `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
-| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`), or compiled lambda (comparisons, `startswith`, `endswith`, `in`, arithmetic, compound AND/OR); all are evaluated per-row during parse. |
+| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`), `is_null`, `is_type`, or compiled lambda (comparisons, `startswith`, `endswith`, `contains`, `in`, `strip`, `lower`, `upper`, `replace`, `len`, arithmetic, compound AND/OR); all are evaluated per-row during parse. |
 | `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` | `filter` | `And`, `Or`, `Not` trees built from the same leaf shapes; evaluated per-row with short circuiting; fully fusable. |
 
 `FilterRows` is fusable when it uses a keyword-form predicate (`field`,

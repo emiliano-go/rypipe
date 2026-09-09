@@ -61,7 +61,7 @@ Discovery pass doubles I/O and all values land as strings.
 # Bad: fused stages fall back to Python { #bad-fused-stages-fall-back-to-python }
 class LogSource(Source):
     def _read_arrow(self, **kwargs):
-        return _rypipe_log.read(str(self._path))  # ignores kwargs!
+        return _rypipe_log.read_log(str(self._path))  # ignores kwargs!
 ```
 
 Fused stages (rename, filter) fall back to Python over a full table,
@@ -75,7 +75,7 @@ class LogSource(Source):
         plan = self._build_plan_kwargs()
         if plan_overrides:
             plan.update(plan_overrides)
-        return _rypipe_log.read(str(self._path), **plan)
+        return _rypipe_log.read_log(str(self._path), **plan)
 ```
 
 **Impact:** 10-50x for filtered/rename workloads.

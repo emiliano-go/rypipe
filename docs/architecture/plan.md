@@ -99,9 +99,44 @@ pub enum FieldType {
 
 ```rust
 pub enum FilterPredicate {
+    // Value comparison
     Equal { field: String, value: String },
     NotEqual { field: String, value: String },
     Compare { field_a: String, op: CompareOp, field_b: String },
+    CompareLiteral { field: String, op: CompareOp, value: String },
+
+    // String predicates
+    StartsWith { field: String, value: String },
+    EndsWith { field: String, value: String },
+    Contains { field: String, value: String },
+    Strip { field: String, op: CompareOp, value: String },
+    Lower { field: String, op: CompareOp, value: String },
+    Upper { field: String, op: CompareOp, value: String },
+    Replace { field: String, old: String, new: String, op: CompareOp, value: String },
+    Length { field: String, op: CompareOp, value: i64 },
+
+    // Membership
+    In { field: String, values: Vec<String> },
+    NotIn { field: String, values: Vec<String> },
+
+    // Type/null predicates
+    IsNull { field: String },
+    IsType { field: String, field_type: FieldType },
+
+    // Arithmetic
+    ArithmeticCompare {
+        field: String,
+        arith_op: ArithOp,
+        arith_value: f64,
+        cmp_op: CompareOp,
+        cmp_value: f64,
+    },
+
+    // Boolean
+    NotField { field: String },
+    Always(bool),
+
+    // Logical combinators
     And(Box<FilterPredicate>, Box<FilterPredicate>),
     Or(Box<FilterPredicate>, Box<FilterPredicate>),
     Not(Box<FilterPredicate>),
@@ -119,6 +154,12 @@ numeric promotion via `TypedValue`.
 
 ```rust
 pub enum CompareOp { Gt, Lt, Ge, Le, Eq, Ne }
+```
+
+### ArithOp { #arithop }
+
+```rust
+pub enum ArithOp { Add, Sub, Mul, Div }
 ```
 
 Compare uses native-typed comparison with numeric promotion (Int64↔Float64).
@@ -152,7 +193,14 @@ compare filters have both fields typed or both untyped.
 
 ## Filter predicate evaluation { #filter-predicate-evaluation }
 
-`FilterPredicate::check` evaluates the tree against column values:
+`FilterPredicate::check` evaluates the tree against column values. The
+engine uses two evaluation paths:
+
+1. **Post-commit** (`check`): reads from finished column arrays. Used for
+   predicates that only need committed data.
+2. **Pre-commit** (`eval_predicate`): reads from the row buffer via
+   `get_buffered_value()`. Used for `IsNull` and `IsType` which must
+   inspect the current row before it is committed.
 
 ```rust
 pub fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usize>,
@@ -168,14 +216,25 @@ pub fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usi
             let vb = get_typed_value(columns, field_index, plan, field_b, row_index);
             compare_typed(va, *op, vb)
         }
+        StartsWith { field, value } => columns[idx].get_filter_value(row_index).starts_with(value),
+        EndsWith { field, value } => columns[idx].get_filter_value(row_index).ends_with(value),
+        Contains { field, value } => columns[idx].get_filter_value(row_index).contains(value),
+        In { field, values } => values.contains(columns[idx].get_filter_value(row_index)),
+        IsNull { field } => row_buf.fields.get(field).is_none(),
+        IsType { field, field_type } => is_type_at(field_type, &row_buf.fields),
+        NotField { field } => row_buf.fields.get(field).is_none_or(|v| v.is_empty()),
+        Always(b) => *b,
         And(a, b) => a.check(...) && b.check(...),
         Or(a, b) => a.check(...) || b.check(...),
         Not(a) => !a.check(...),
+        // ... other variants follow same pattern
     }
 }
 ```
 
 Short-circuiting: `And` stops on first `false`, `Or` stops on first `true`.
+`IsNull` and `IsType` read from the row buffer (pre-commit) because the
+current row has not been pushed to column builders yet.
 
 ## C2 reorder optimization { #c2-reorder-optimization }
 

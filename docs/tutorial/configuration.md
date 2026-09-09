@@ -21,7 +21,7 @@ src = CrystalXMLSource(
     filter=None,                # dict: pushdown filter spec
     field_types=None,           # dict[str, str]: type hints, e.g. {"Amount": "float64"}
     dictionary_columns=None,    # list[str]: dictionary-encode columns
-    schema=None,                # list[str]: expected column names and order
+    schema=None,                # list[str]: project exactly these columns, in this order
     auto_dict=False,            # bool: auto dictionary-encode low-cardinality strings
     use_mmap=True,              # bool: memory-mapped file I/O
     batch_size=1024,            # int: rows per internal batch
@@ -43,8 +43,25 @@ print(src.to_arrow().num_rows)  # 12
 ```
 
 The `filter` dict uses the same spec as `FilterRows`. See the
-[filter spec reference](../reference/python-api.md#filter-spec-format) for
+[FilterRows reference](../reference/python-api.md#filterrows) for
 all forms and operators.
+
+## Schema projection { #schema-projection }
+
+`schema=[...]` is a **projection + order declaration**: the output contains
+exactly the listed columns, in the listed order. Fields in the data that are
+not listed are skipped during parsing (never decoded or materialized — this
+is the performance win), listed columns that are absent from some or all
+rows come out null-filled, and extra/unknown fields in the data are ignored
+rather than raising an error. `field_mapping` renames apply before schema
+matching (list the renamed names), `field_types` still applies to schema
+columns, and a column listed in both `schema` and `drop_fields` is dropped
+(`drop_fields` wins).
+
+```python
+src = CrystalXMLSource("report.xml", row_tag="Details", schema=["Name", "Amount"])
+print(src.schema())  # ['Name', 'Amount'] — Department/Status/Date never parsed
+```
 
 !!! tip
 

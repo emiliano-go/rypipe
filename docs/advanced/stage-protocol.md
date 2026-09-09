@@ -27,12 +27,8 @@ The pipeline calls these methods automatically. You never call them directly.
 | Method | When called | Purpose |
 |--------|-------------|---------|
 | `_plan_kwargs()` | Once, when the pipeline is materialized | Collects pushdown kwargs for the Rust engine |
-| `apply(record)` | Per-row, in Python, when the pipeline runs in dict mode | Transform a single dict |
-| `__call__(stream)` | Per-row, in Python (unfused path) | Transform an iterable of dicts outside the engine |
-
-Note that `apply()` never runs inside the Rust parse loop. When a stage is
-fused, its `_plan_kwargs()` output replaces it entirely: the Rust engine
-performs the operation and the Python stage is never invoked per row.
+| `apply(record)` | Per-row, in the Rust parse loop (if fused) | Transform a single dict during parsing |
+| `__call__(stream)` | Per-row, in Python (if not fused) | Transform an iterable of dicts outside the engine |
 
 ### The protocol is the contract { #the-protocol-is-the-contract }
 
@@ -74,18 +70,14 @@ optimization details.
 
 ### What happens when fusion is not possible { #when-fusion-fails }
 
-If any stage returns `None` from `_plan_kwargs()` (or does not define it),
-the pipeline splits:
+If any stage returns `None` from `_plan_kwargs()`, the pipeline splits:
 
-1. Every stage that returned plan kwargs is fused into a single plan,
-   regardless of its position in the chain. Multiple `FilterRows` specs are
-   combined with an implicit `and`.
+1. The stages before the non-fusable stage are fused into a plan.
 2. The Rust parser runs with that plan, producing a table.
-3. The remaining stages run in Python over the parsed Arrow batches
-   (vectorized where possible), and any trailing generic stage runs last
-   over the row stream.
+3. The non-fusable stage runs in Python over the materialized table.
+4. The remaining stages run in Python (or fuse a second plan if possible).
 
-This fallback is correct but slower. Only return `None` from
+This fallback is correct but 10–50× slower. Only return `None` from
 `_plan_kwargs()` when fusion is genuinely impossible.
 
 ## Why re-exporting works { #why-re-exporting-works }
@@ -181,8 +173,8 @@ run this stage in Python. This is correct but slower.
 |-------|----------------------|---------|-------------|
 | `RenameFields` | `field_mapping` | Yes | Rename columns |
 | `DropFields` | `drop_fields` | Yes | Remove columns |
-| `CastTypes` | `field_types` | Yes (for `int`, `float`, `bool`, `date`, `datetime`, `Decimal`; `UUID` maps to `string`; `str` is a no-op) | Cast column types |
-| `FilterRows` | `filter` | Yes (keyword form or compiled lambda) | Filter rows by predicate |
+| `CastTypes` | `field_types` | Yes (for `int`, `float`, `bool`, `date`, `datetime`, `Decimal`) | Cast column types |
+| `FilterRows` | `filter` | Yes (keyword form, `is_null`/`is_type`, or compiled lambda) | Filter rows by predicate |
 | `FilterRowsAny` | (composed) | Yes | Logical OR of filters |
 | `FilterRowsAll` | (composed) | Yes | Logical AND of filters |
 | `FilterRowsNot` | (composed) | Yes | Negate a filter |
@@ -196,13 +188,6 @@ These keys are merged into the `ExecutionPlan` passed to the Rust parser:
 | `field_mapping` | `dict[str, str]` | Rename mapping: raw name → output name |
 | `drop_fields` | `list[str]` | Fields to skip entirely |
 | `field_types` | `dict[str, str]` | Type overrides (e.g., `"int64"`, `"float64"`) |
-| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}` or `{"field_a", "op", "field_b"}` |
+| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}`, `{"field_a", "op", "field_b"}`, `{"is_null": true}`, or `{"is_type": "int64"}` |
 
 See [Execution Plan](../architecture/plan.md) for the full plan structure.
-
-## Summary { #summary }
-
-- A stage is any class with `apply`, `__call__`, and `_plan_kwargs`. The protocol is the contract, not the import path.
-- Fused stages never run `apply()`; their plan kwargs replace them inside the Rust parse loop.
-- Re-export stages from your adapter package; subclass only for format-specific behavior.
-- Return `None` from `_plan_kwargs()` only when fusion is genuinely impossible.

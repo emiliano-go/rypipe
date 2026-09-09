@@ -23,10 +23,15 @@ parsed values with no intermediate strings.
 
 ## The two schema knobs { #the-two-schema-knobs }
 
-### `schema_order`: column names and output order { #schema_order }
+### `schema_order`: projection and output order { #schema_order }
 
-`schema_order` tells the engine which columns exist and in what order they
-appear in the output. When set, the engine skips column discovery entirely.
+`schema_order` declares the output schema as a **projection + order**: the
+output contains exactly the listed columns, in the listed order. Fields in
+the data that are not listed are skipped during parsing — `wants()` returns
+`false` for them, so the adapter never scans, decodes, or materializes them.
+Listed columns that are absent from (some rows of) the data come out
+null-filled; extra/unknown fields in the data are ignored, not an error.
+When set, the engine also skips column discovery entirely.
 
 ```rust
 use rypipe_core::ExecutionPlan;
@@ -211,6 +216,9 @@ In your Python adapter, accept `schema` and `field_types` kwargs and pass
 them to the Rust reader:
 
 ```python
+from rypipe_log import _rypipe_log
+
+
 class LogSource(Source):
     def _read_arrow(self, path, *, schema=None, field_types=None, **kwargs):
         # Forward schema kwargs to the Rust core
@@ -219,7 +227,7 @@ class LogSource(Source):
             plan_kwargs["schema"] = schema
         if field_types:
             plan_kwargs["field_types"] = field_types
-        return _rypipe_log.read(path, **plan_kwargs, **kwargs)
+        return _rypipe_log.read_log(path, **plan_kwargs, **kwargs)
 ```
 
 ### Step 2: Build the plan in Rust { #step-2-build-plan }
@@ -303,6 +311,23 @@ column order enables parallel export (~4,980 MB/s, +11%). With `schema_order`
     (`"9" > "10"` is `true`). Always set `field_types` on columns used in
     numeric filters to get native comparison.
 
+## Escape hatch: disable_auto_schema { #escape-hatch }
+
+For formats where schema discovery is unreliable (extremely sparse data,
+heterogeneous records, or non-standard layouts), disable auto-discovery:
+
+```python
+source = MyAdapter(
+    "esoteric.dat",
+    schema=["id", "value", "timestamp"],
+    field_types={"id": "int64", "value": "float64"},
+    disable_auto_schema=True,
+)
+```
+
+When `disable_auto_schema` is set, the engine skips all discovery passes
+and relies entirely on the explicit `schema` and `field_types` you
+provide. Unknown fields at parse time raise `MergeError`.
 
 ## Troubleshooting { #troubleshooting }
 

@@ -30,6 +30,8 @@ If `openers()` is empty, the function returns `false` immediately (O(1)).
 ## Implementation example: XML comments + CDATA { #implementation-example-xml-comments-cdata }
 
 ```rust
+use rypipe_core::decoder::SkipRegionFinder;
+
 struct XmlSkipRegions;
 
 impl SkipRegionFinder for XmlSkipRegions {
@@ -54,6 +56,8 @@ impl Splitter for MyXmlSplitter {
 ## Implementation example: CSV quoted fields { #implementation-example-csv-quoted-fields }
 
 ```rust
+use rypipe_core::decoder::SkipRegionFinder;
+
 struct CsvSkipRegions;
 
 impl SkipRegionFinder for CsvSkipRegions {

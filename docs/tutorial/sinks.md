@@ -13,7 +13,7 @@ with sink *functions*. This page shows one short example of each.
 | Get a Polars DataFrame | `src.to_polars()` |
 | Write a Parquet file | `src.to_parquet(path)` |
 | Get rows from a pipeline | `collect(pipeline)` |
-| Get a DataFrame from a pipeline | `to_dataframe(pipeline)` |
+| Get a DataFrame from a pipeline | `to_pandas(pipeline)` |
 | Write a pipeline to CSV | `to_csv(pipeline, path)` |
 | Free the cached table | `src.clear_cache()` |
 
@@ -113,6 +113,8 @@ functions from `crxml`:
 
 ### collect() { #collect }
 
+Runs the pipeline and returns all rows as a `list` of `dict`s:
+
 ```python
 from crxml import collect
 
@@ -120,12 +122,12 @@ rows = collect(pipeline)
 print(len(rows), rows[0]["Name"])  # 12 Alice Johnson
 ```
 
-### to_dataframe() (function) { #to-dataframe-function }
+### to_pandas() (function) { #to-pandas-function }
 
 ```python
-from crxml import to_dataframe
+from crxml import to_pandas
 
-df = to_dataframe(pipeline)
+df = to_pandas(pipeline)
 ```
 
 ### to_csv() { #to-csv-function }
@@ -151,7 +153,7 @@ to_csv(pipeline, "active.csv")
 
 * Source methods: `.to_arrow()`, `.to_pandas()`,
   `.to_polars()`, `.to_parquet(path)`, `.clear_cache()`.
-* Pipeline functions: `collect()`, `to_dataframe()`, `to_csv()`.
+* Pipeline functions: `collect()`, `to_pandas()`, `to_csv()`.
 * Source results are cached; pipelines re-run each time you consume them.
 * In ETL loops over many files, call `.clear_cache()` after each file's
   final sink to free its table.

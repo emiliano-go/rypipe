@@ -362,6 +362,15 @@ def __dir__():
 The `__init__.py` uses lazy loading: modules are only imported when accessed.
 This avoids loading the Rust extension until it is actually needed.
 
+### `rypipe_log/stages.py` { #stages-py }
+
+The `_modules` map above points the stage names at a `.stages` module, so
+create it. It just re-exports the standard stages from **rypipe**:
+
+```python
+from rypipe.stages import CastTypes, DropFields, FilterRows, RenameFields  # noqa: F401
+```
+
 ### `rypipe_log/source.py` { #source-py }
 
 The Source subclass is the pipeline-capable entry point. It implements
@@ -486,14 +495,15 @@ Pattern 2 uses the Source directly with the pipeline `|` operator; fused
 stages are pushed into the Rust parse:
 
 ```python
+from rypipe.sinks import to_pandas
 from rypipe_log import LogSource, CastTypes, FilterRows
 
 src = LogSource("test.log")
-df = (
+df = to_pandas(
     src
     | CastTypes({"age": int})
     | FilterRows(field="active", op="==", value="true")
-).to_pandas()
+)
 print(df)
 ```
 

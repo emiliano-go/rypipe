@@ -22,7 +22,7 @@ source = MyAdapter(
 )
 ```
 
-The Python `schema` kwarg maps to `ExecutionPlan::schema_order` on the Rust side. With a declared schema, the engine does not need to discover column names. It also sorts columns to this order at finish time, making output deterministic. Columns not listed appear after the listed ones in first-appearance order.
+The Python `schema` kwarg maps to `ExecutionPlan::schema_order` on the Rust side. It is a **projection + order declaration**: the output contains exactly the listed columns, in the listed order. With a declared schema, the engine does not need to discover column names, and fields in the data that are not listed are skipped during parsing — `wants()`/`resolve()` reject them, so adapters never scan or decode them. Listed columns that are absent from the data come out null-filled; extra/unknown fields are ignored, not an error.
 
 ## Stable column order across chunks { #stable-column-order-across-chunks }
 

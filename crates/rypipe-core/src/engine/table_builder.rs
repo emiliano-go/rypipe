@@ -61,6 +61,14 @@ pub struct TableBuilder {
     /// `None` when `plan.filter` is `None`; unfiltered parses carry zero
     /// overhead from predicate machinery.
     pub(crate) row_buf: Option<Box<RowBuffer>>,
+    /// Cached projection mask for `wanted_mask()`/`row_satisfied()`: bit `i`
+    /// set iff column `i` is wanted by the schema projection (declared schema
+    /// columns plus any extra fields the row filter needs).  Computed once in
+    /// `with_plan` after schema columns are pre-declared, so it is complete
+    /// from the first row — unlike a mask derived from `field_index` at call
+    /// time, which only covers columns already seen in the data.  0 when no
+    /// schema projection is active (short-circuit disabled).
+    pub(crate) cached_wanted_mask: u64,
     /// Per-ordinal layout expectation: after row 1, each ordinal maps to a
     /// (slot_index, raw_name) pair.  The adapter can memcmp the raw bytes
     /// in-place instead of running the full attribute scan → UTF-8 decode →
@@ -84,6 +92,7 @@ impl TableBuilder {
             frozen: None,
             unknown_error: None,
             row_buf: None,
+            cached_wanted_mask: 0,
             ordinal_expect: Vec::new(),
             current_ordinal: 0,
         }
@@ -101,13 +110,14 @@ impl TableBuilder {
             frozen: None,
             unknown_error: None,
             row_buf: None,
+            cached_wanted_mask: 0,
             ordinal_expect: Vec::new(),
             current_ordinal: 0,
         }
     }
 
     pub fn with_plan(cap: usize, plan: Arc<ExecutionPlan>) -> Self {
-        Self {
+        let mut b = Self {
             columns: Vec::new(),
             field_index: HashMap::default(),
             column_order: Vec::new(),
@@ -130,9 +140,72 @@ impl TableBuilder {
             } else {
                 None
             },
+            cached_wanted_mask: 0,
             ordinal_expect: Vec::new(),
             current_ordinal: 0,
+        };
+        b.predeclare_schema_columns();
+        b.cached_wanted_mask = b.compute_wanted_mask();
+        b
+    }
+
+    /// Pre-create the declared schema columns (plus any extra columns the row
+    /// filter needs) when `schema_order` is a projection.  This makes the
+    /// output layout, per-row null-filling, and `cached_wanted_mask` stable
+    /// from the first row, regardless of which fields appear in the data or
+    /// in what order.  No-op when no schema projection is declared.
+    fn predeclare_schema_columns(&mut self) {
+        if self.plan.schema_order.is_empty() {
+            return;
         }
+        let mut names: Vec<String> = Vec::new();
+        for name in &self.plan.schema_order {
+            // drop_fields wins over schema: a column listed in both is dropped
+            // (dropping is an explicit exclusion; silently null-filling it
+            // would resurrect a column the user asked to remove).
+            if !self.plan.drop_fields.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        // Filter-referenced fields are materialized even when not in the
+        // schema so predicates evaluate correctly; finish() projects them out.
+        if let Some(ref filter) = self.plan.filter {
+            let mut pred_names: SmallVec<[String; 4]> = SmallVec::new();
+            Self::collect_predicate_field_names(filter, &self.plan, &mut pred_names);
+            names.extend(pred_names);
+        }
+        for name in names {
+            if self.field_index.contains_key(&name) || self.plan.drop_fields.contains(&name) {
+                continue;
+            }
+            let ty = self.plan.column_type(&name);
+            let col = ColumnBuilder::with_capacity(self.estimated_rows.max(64), &ty);
+            self.columns.push(col);
+            self.field_index.insert(name.clone(), self.columns.len() - 1);
+            self.column_order.push(name);
+        }
+        let words = self.columns.len().div_ceil(64);
+        self.row_dirty.resize(words, 0);
+    }
+
+    /// Bitmask of wanted columns for the projection short-circuit.  All
+    /// wanted columns are pre-declared by `predeclare_schema_columns`, and
+    /// non-wanted fields are rejected by `plan.resolve_field`, so the set of
+    /// columns existing at construction time is exactly the wanted set.
+    /// Returns 0 (short-circuit disabled) when no projection is declared or
+    /// when more than 64 columns are wanted.
+    fn compute_wanted_mask(&self) -> u64 {
+        if self.plan.schema_order.is_empty() {
+            return 0;
+        }
+        let mut mask = 0u64;
+        for &idx in self.field_index.values() {
+            if idx >= 64 {
+                return 0;
+            }
+            mask |= 1u64 << idx;
+        }
+        mask
     }
 
     /// Pre-size all columns from a `FrozenSchema`.
@@ -202,6 +275,7 @@ impl TableBuilder {
             row_dirty: vec![0; self.columns.len().div_ceil(64)],
             frozen: self.frozen.clone(),
             unknown_error: None,
+            cached_wanted_mask: self.cached_wanted_mask,
             row_buf: if self.plan.filter.is_some() {
                 Some(Box::new(RowBuffer {
                     fields: SmallVec::new(),
@@ -495,8 +569,11 @@ impl TableBuilder {
     #[inline]
     fn push_field(&mut self, name: &str, value: Value<'_>) {
         // #[inline]: fast-path (no rename/drop) is a single branch + delegate.
-        // Fast path: no rename/drop configured; zero allocation.
-        if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+        // Fast path: no rename/drop/projection configured; zero allocation.
+        if self.plan.field_map.is_empty()
+            && self.plan.drop_fields.is_empty()
+            && self.plan.schema_order.is_empty()
+        {
             self.push_field_resolved(name, value);
             return;
         }
@@ -1771,7 +1848,10 @@ impl ColumnarSink for TableBuilder {
         #[cfg(feature = "profile")]
         RESOLVE_AND_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
         if self.plan.filter.is_none() {
-            if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+            if self.plan.field_map.is_empty()
+                && self.plan.drop_fields.is_empty()
+                && self.plan.schema_order.is_empty()
+            {
                 self.push_field_resolved(name, value);
             } else {
                 if let Some(resolved) = self.plan.resolve_field(name) {
@@ -1783,7 +1863,10 @@ impl ColumnarSink for TableBuilder {
         }
         // Adaptive: late predicate → push directly, pop-on-reject at end_row.
         if self.row_buf.as_ref().is_some_and(|b| !b.buffer_worthwhile) {
-            if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+            if self.plan.field_map.is_empty()
+                && self.plan.drop_fields.is_empty()
+                && self.plan.schema_order.is_empty()
+            {
                 self.push_field_resolved(name, value);
             } else {
                 if let Some(resolved) = self.plan.resolve_field(name) {
@@ -1823,7 +1906,10 @@ impl ColumnarSink for TableBuilder {
             }
         }
         // Buffered path: resolve → slot, buffer (slot, value).
-        if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+        if self.plan.field_map.is_empty()
+            && self.plan.drop_fields.is_empty()
+            && self.plan.schema_order.is_empty()
+        {
             // No rename/drop, raw == resolved
             let resolved = name;
             if self.frozen.is_some() && !self.field_index.contains_key(resolved) {
@@ -1959,24 +2045,11 @@ impl ColumnarSink for TableBuilder {
 
     #[inline]
     fn wanted_mask(&self) -> u64 {
-        // Build mask from plan schema_order or field_index.
-        if !self.plan.schema_order.is_empty() {
-            let mut mask = 0u64;
-            for name in &self.plan.schema_order {
-                if let Some(&idx) = self.field_index.get(name.as_str()) {
-                    if idx < 64 {
-                        mask |= 1u64 << idx;
-                    }
-                }
-            }
-            mask
-        } else {
-            // No explicit schema_order: all columns are wanted (even if
-            // field_map or drop_fields is active). Return 0 to disable
-            // projection short-circuit. Only short-circuit when the user
-            // has explicitly declared which columns they want via schema_order.
-            0
-        }
+        // Precomputed in with_plan after schema columns are pre-declared.
+        // Complete from the first row; 0 when no projection is active (the
+        // short-circuit stays disabled unless the user explicitly declared
+        // which columns they want via schema_order).
+        self.cached_wanted_mask
     }
 
     #[inline]
@@ -1992,6 +2065,43 @@ impl ColumnarSink for TableBuilder {
         }
 
         self.auto_dict_upgrade();
+
+        // Schema projection: emit exactly the declared columns, in the
+        // declared order.  Columns declared but absent from the data are
+        // null-filled; materialized non-schema columns (e.g. filter-only
+        // fields kept for predicate evaluation) are projected out.
+        if !self.plan.schema_order.is_empty() {
+            let order = self.plan.schema_order.clone();
+            let mut fields = Vec::with_capacity(order.len());
+            let mut arrays = Vec::with_capacity(order.len());
+            for name in &order {
+                // drop_fields wins over schema (see predeclare_schema_columns).
+                if self.plan.drop_fields.contains(name) {
+                    continue;
+                }
+                let idx = match self.field_index.get(name.as_str()) {
+                    Some(&i) => i,
+                    None => {
+                        // Declared but never seen: all-null column.
+                        let ty = self.plan.column_type(name);
+                        let mut b = ColumnBuilder::with_capacity(self.row_count.max(1), &ty);
+                        for _ in 0..self.row_count {
+                            b.push(None);
+                        }
+                        let idx = self.columns.len();
+                        self.columns.push(b);
+                        self.field_index.insert(name.clone(), idx);
+                        idx
+                    }
+                };
+                let b = &mut self.columns[idx];
+                fields.push(ArrowField::new(name.as_str(), b.arrow_datatype(), true));
+                arrays.push(b.to_arrow_array()?);
+            }
+            let schema = Arc::new(Schema::new(fields));
+            return Ok(RecordBatch::try_new(schema, arrays)?);
+        }
+
         self.sort_columns();
 
         let mut fields = Vec::with_capacity(self.column_order.len());
@@ -2787,5 +2897,192 @@ mod tests {
 
         assert_eq!(tb.column_names(), &["renamed", "other"]);
         assert_eq!(tb.resolve_raw(b"raw"), Some("renamed"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema projection semantics: schema=[...] declares exactly which
+    // columns are extracted, in order.  Unlisted fields are skipped during
+    // parsing (wants()/resolve() reject them); listed columns absent from
+    // the data are null-filled.
+    // -----------------------------------------------------------------------
+
+    /// Parser that mimics adapter projection behavior (e.g. crxml's scanner):
+    /// skips fields the sink rejects via `resolve()` and byte-jumps to the
+    /// end of the row once `row_satisfied()` reports all wanted columns seen.
+    struct SkippingParser;
+
+    impl RecordParser for SkippingParser {
+        fn validate(&self, bytes: &[u8]) -> Result<()> {
+            simdutf8::basic::from_utf8(bytes)?;
+            Ok(())
+        }
+
+        fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+            let text = std::str::from_utf8(bytes).map_err(|e| crate::Error::Plan(e.to_string()))?;
+            for line in text.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                sink.begin_row();
+                for token in line.split_whitespace() {
+                    if sink.row_satisfied() {
+                        break; // byte-jump to row close: remaining fields skipped
+                    }
+                    if let Some((k, v)) = token.split_once('=') {
+                        if sink.resolve(k).is_some() {
+                            sink.resolve_and_put(k, Value::Str(Cow::Borrowed(v)));
+                        }
+                    }
+                }
+                sink.end_row();
+            }
+            Ok(())
+        }
+    }
+
+    fn parse_skipping(bytes: &[u8], plan: ExecutionPlan) -> TableBuilder {
+        let mut sink = TableBuilder::with_plan((bytes.len() / 16).max(4), Arc::new(plan));
+        SkippingParser.parse_chunk(bytes, &mut sink).unwrap();
+        sink
+    }
+
+    fn batch_names(tb: &mut TableBuilder) -> Vec<String> {
+        tb.finish()
+            .unwrap()
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    }
+
+    const REPORT: &[u8] = b"Name=n1 Department=d1 Amount=1 Status=s1 Date=2024\n\
+                            Name=n2 Department=d2 Amount=2 Status=s2 Date=2024\n";
+
+    #[test]
+    fn schema_projection_subset() {
+        // schema=["Name","Department"] must yield exactly those two columns,
+        // in that order.  Regression: the old wanted_mask was derived from
+        // field_index mid-row, so row_satisfied fired after "Name" on row 1
+        // and "Department" was never materialized (output was ["Name"]).
+        let mut tb = parse_skipping(REPORT, ExecutionPlan::new().schema_order(["Name", "Department"]));
+        assert_eq!(batch_names(&mut tb), vec!["Name", "Department"]);
+    }
+
+    #[test]
+    fn schema_projection_single_non_first_column() {
+        // Regression: the old code emitted ["Department", "Name"] here —
+        // "Name" was materialized because resolve_field did no projection.
+        let mut tb = parse_skipping(REPORT, ExecutionPlan::new().schema_order(["Department"]));
+        assert_eq!(batch_names(&mut tb), vec!["Department"]);
+    }
+
+    #[test]
+    fn schema_projection_full_natural_order() {
+        let mut tb = parse_skipping(
+            REPORT,
+            ExecutionPlan::new().schema_order(["Name", "Department", "Amount", "Status", "Date"]),
+        );
+        assert_eq!(
+            batch_names(&mut tb),
+            vec!["Name", "Department", "Amount", "Status", "Date"]
+        );
+    }
+
+    #[test]
+    fn schema_projection_reversed_order() {
+        let mut tb = parse_skipping(
+            REPORT,
+            ExecutionPlan::new().schema_order(["Date", "Status", "Amount", "Department", "Name"]),
+        );
+        assert_eq!(
+            batch_names(&mut tb),
+            vec!["Date", "Status", "Amount", "Department", "Name"]
+        );
+    }
+
+    #[test]
+    fn schema_projection_absent_column_null_filled() {
+        // Schema is a superset of the data: the absent column is null-filled.
+        let mut tb = parse_skipping(REPORT, ExecutionPlan::new().schema_order(["Name", "Missing"]));
+        let batch = tb.finish().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let missing = batch.column_by_name("Missing").unwrap().as_string::<i32>();
+        assert!(missing.is_null(0) && missing.is_null(1));
+        let name = batch.column_by_name("Name").unwrap().as_string::<i32>();
+        assert_eq!(name.value(0), "n1");
+    }
+
+    #[test]
+    fn schema_projection_wants_rejects_unlisted_fields() {
+        // The perf contract: unlisted fields are rejected by wants()/resolve()
+        // so adapters skip extracting them entirely.
+        let plan = ExecutionPlan::new().schema_order(["Name"]);
+        let tb = TableBuilder::with_plan(4, Arc::new(plan));
+        assert!(tb.wants("Name"));
+        assert!(!tb.wants("Department"));
+        assert_eq!(tb.resolve("Amount"), None);
+    }
+
+    #[test]
+    fn schema_projection_rename_then_match() {
+        // field_mapping applies before schema matching: the schema lists the
+        // renamed (output) column name.
+        let plan = ExecutionPlan::new()
+            .rename("Name", "Employee")
+            .schema_order(["Employee", "Amount"]);
+        let mut tb = parse_skipping(REPORT, plan);
+        assert_eq!(batch_names(&mut tb), vec!["Employee", "Amount"]);
+    }
+
+    #[test]
+    fn schema_projection_field_types_apply() {
+        let plan = ExecutionPlan::new()
+            .type_as("Amount", FieldType::Int64)
+            .schema_order(["Name", "Amount"]);
+        let mut tb = parse_skipping(REPORT, plan);
+        let batch = tb.finish().unwrap();
+        let amount = batch.column_by_name("Amount").unwrap();
+        assert!(matches!(amount.data_type(), arrow::datatypes::DataType::Int64));
+        assert_eq!(amount.as_primitive::<arrow::datatypes::Int64Type>().value(1), 2);
+    }
+
+    #[test]
+    fn schema_projection_filter_on_unlisted_field() {
+        // Filter fields are materialized for predicate evaluation even when
+        // not in the schema, but are projected out of the final batch.
+        let plan = ExecutionPlan::new()
+            .schema_order(["Name"])
+            .filter_eq("Status", "s2");
+        let mut tb = parse_skipping(REPORT, plan);
+        let batch = tb.finish().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.schema().fields().len(), 1);
+        let name = batch.column_by_name("Name").unwrap().as_string::<i32>();
+        assert_eq!(name.value(0), "n2");
+    }
+
+    #[test]
+    fn schema_projection_drop_wins_over_schema() {
+        // A column listed in both schema and drop_fields is dropped:
+        // dropping is an explicit exclusion and would otherwise be
+        // resurrected as a null-filled column.
+        let plan = ExecutionPlan::new()
+            .schema_order(["Name", "Department"])
+            .drop("Department");
+        let mut tb = parse_skipping(REPORT, plan);
+        assert_eq!(batch_names(&mut tb), vec!["Name"]);
+    }
+
+    #[test]
+    fn schema_projection_no_parser_cooperation() {
+        // Even when the adapter pushes every field (no wants/resolve checks),
+        // the projection still holds: unlisted fields are never materialized.
+        let mut tb = parse_bytes(REPORT, ExecutionPlan::new().schema_order(["Department", "Name"]));
+        let batch = tb.finish().unwrap();
+        let names: Vec<String> = batch.schema().fields().iter().map(|f| f.name().clone()).collect();
+        assert_eq!(names, vec!["Department", "Name"]);
+        let dept = batch.column_by_name("Department").unwrap().as_string::<i32>();
+        assert_eq!(dept.value(0), "d1");
     }
 }
