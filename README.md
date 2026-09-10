@@ -46,17 +46,14 @@ or any other row-oriented format once you provide a small adapter.
 Add a new format by implementing two small traits: `Splitter` and
 `RecordParser`.
 
-`rypipe` itself does **not** ship parsers. Those live in separate adapter
-packages. Install the engine plus the adapters you need.
+### Origin: crxml { #origin-crxml }
 
-### Origin: crxml
-
-rypipe was originally developed as the ingestion engine for `crxml`, a
-Crystal Reports XML adapter. The engine's design, performance characteristics,
-and API were shaped by real-world production use with crxml. We use crxml
-as the primary example throughout the documentation because it demonstrates
-the full power of the framework: complex nested schemas, large files,
-parallel processing, and advanced filtering.
+> rypipe was originally developed as the ingestion engine for `crxml`, a
+> Crystal Reports XML adapter. The engine's design, performance characteristics,
+> and API were shaped by real-world production use with crxml. We use crxml
+> as the primary example throughout the documentation because it demonstrates
+> the full power of the framework: complex nested schemas, large files,
+> parallel processing, and advanced filtering.
 
 ## Quick start
 
