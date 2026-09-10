@@ -46,8 +46,6 @@ or any other row-oriented format once you provide a small adapter.
 Add a new format by implementing two small traits: `Splitter` and
 `RecordParser`.
 
-### Origin: crxml
-
 > rypipe was originally developed as the ingestion engine for
 > [crxml](https://github.com/emiliano-go/crxml), a Crystal Reports XML
 > adapter. The engine's design, performance characteristics, and API were
