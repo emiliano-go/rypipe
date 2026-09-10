@@ -10,18 +10,19 @@ See [Execution](./execution.md) for implementation details of each mode.
 
 ```
 Pipeline::read_bytes(bytes)
-  → InputBuffer::open → as_slice
   → TableBuilder::with_plan(cap, plan)
   → parser.validate(bytes)
-  → parser.parse_chunk(bytes, &mut sink)
+  → parser.parse_chunk_generic(bytes, &mut sink)
     loop: begin_row → put_field × N → end_row
   → TableBuilder::finish()
     normalize → auto_dict_upgrade → sort_columns → to_arrow_array
   → RecordBatch
 ```
 
-One `RecordBatch` returned. `InputBuffer::Owned` holds bytes for the
-duration. `ExecutionPlan` applied per row in `finish_row` (`filter.check`).
+One `RecordBatch` returned. `read_bytes` works directly on the caller's
+slice; `InputBuffer::Owned` holds the bytes for the duration only when the
+input came from `read_path`. `ExecutionPlan` applied per row in `finish_row`
+(`filter.check`).
 
 ## Parallel { #parallel }
 
@@ -33,49 +34,80 @@ Pipeline::read_bytes_par(bytes, num_chunks)
     each range:
       TableBuilder::with_plan(est, plan.clone())
       parser.validate(&bytes[range])
-      parser.parse_chunk(&bytes[range], &mut sink)
+      parser.parse_chunk_generic(&bytes[range], &mut sink)
       Ok(sink)
   → collect::<Result<Vec<TableBuilder>>>()
   → if !auto_dict && schemas_consistent:
       engines_to_record_batches (fast path)
-    else:
+    else if auto_dict:
+      per-chunk auto_dict_upgrade in parallel,
+      unify + remap dictionaries,
+      engines_to_record_batches (still fast path)
+    else (schemas inconsistent):
       merged.extend(each engine) → merged.finish() (merge path)
+      apply_compare_filter if plan.filter set
   → Vec<RecordBatch>
 ```
 
-Fast path: one batch per chunk, unified schema, parallel array build.
-Merge path: single merged batch, sequential extend with promotion.
+Fast path: one batch per chunk, unified schema, parallel array build. With
+`auto_dict`, chunks are upgraded in parallel and dictionaries unified, so
+execution stays on the fast path.
+Merge path: single merged batch, sequential extend with promotion, followed
+by a final filter pass.
 
 ## Bounded memory { #bounded-memory }
 
 ```
 Pipeline::read_bytes_stream(bytes, budget)
   → BoundedExecutor::plan_chunks(bytes, splitter)
-    bytes_per_row = estimate_bytes_per_row(bytes)
-    rows_per_batch = budget.bytes() / bytes_per_row
-    num_batches = total_rows / rows_per_batch
+    bytes_per_row = estimate_bytes_per_row(bytes).max(1)
+    total_rows_est = bytes.len() / bytes_per_row
+    rows_per_batch = (budget.bytes() / bytes_per_row)
+      .max(1).min(total_rows_est.max(1))
+    num_batches = (total_rows_est / rows_per_batch).max(1)
+      capped at split_cap (default MAX_SPLIT_CHUNKS = 100_000,
+      overridable via plan.max_split_chunks)
     chunks = splitter.find_split_points(bytes, num_batches)
   → batch_engine = TableBuilder::with_plan(...)
   → for chunk in chunks:
       chunk_engine = TableBuilder::with_plan(...)
       parser.validate(chunk_bytes)
-      parser.parse_chunk(chunk_bytes, &mut chunk_engine)
+      parser.parse_chunk_generic(chunk_bytes, &mut chunk_engine)
       batch_engine.extend(chunk_engine)
-      if rows_in_batch >= rows_per_batch:
-        batches.push(batch_engine.finish())
-        batch_engine.reset()
-  → flush remainder
-  → apply_plan_filter (Compare/And reapplication only)
+      while rows_in_batch >= rows_per_batch
+         or batch_engine.bytes_used() >= budget.bytes():
+        n = rows_per_batch.min(num_rows)
+          (shrunk by a bytes-based estimate when bytes_used is the trigger)
+        to_consume = batch_engine.split_off(n)
+        batch = to_consume.finish()
+        apply_compare_filter(batch, filter) if plan.filter set
+        batches.push(batch)
+  → flush remainder (same finish + apply_compare_filter)
   → Vec<RecordBatch>
 ```
 
 Constant RSS regardless of file size. Mmap path: drop mapping after
 plan_chunks, reopen for seek+read per chunk.
 
+## Parallel streaming { #parallel-streaming }
+
+`Pipeline::read_path_stream_par` combines parallel parsing with bounded
+memory: it returns a `ParallelStreamingBatchIterator` that yields
+`RecordBatch`es as worker threads produce them, instead of collecting a
+`Vec`. This mode uses channels for inter-thread communication.
+
+Bounded mode also has consumer variants (`read_bytes_stream_consumer`,
+`read_path_stream_consumer`) that deliver each flushed batch to a
+`BatchConsumer` callback rather than collecting a `Vec<RecordBatch>`.
+
 ## Column lifecycle inside a row { #column-lifecycle-inside-a-row }
 
 ```
-begin_row (no op, row tracked by row_count + row_dirty)
+begin_row
+  no filter: no op (row tracked by row_count + row_dirty)
+  with plan.filter: reset current_ordinal, clear the RowBuffer, and run the
+    adaptive late-predicate check (if predicate_ordinal >= ncols * 4 / 5,
+    buffering is deemed not worthwhile and rows fall back to direct push)
   put_field(k, v):
     resolve(k) → ExecutionPlan::resolve_field (one hash)
     ensure_column_idx (single hash for field_index + Vec push if new)
@@ -90,13 +122,25 @@ begin_row (no op, row tracked by row_count + row_dirty)
   put_field_at(slot, v):
     set dirty → push_value
     (skips resolve hash + ensure_column_idx)
-end_row → finish_row:
-  for each column:
-    if bit not set → push(None)  // null fill only missing
-    else → clear bit
-  filter.check → if false, pop all, return
-  row_count += 1
+end_row:
+  no filter (or late-predicate fallback) → finish_row:
+    for each column:
+      if bit not set → push(None)  // null fill only missing
+      else → clear bit
+    filter.check → if false, pop all, return
+    row_count += 1
+  with plan.filter (buffered path):
+    evaluate_against_null if predicate still undecided
+    drain_buffered(pass): flush buffered values on pass, drop them on reject
 ```
+
+### Observer hooks { #observer-hooks }
+
+When `plan.observer` is set, the sink fires hooks as rows move through:
+`on_begin_row` in `begin_row`, `on_put_field` in `put_field`,
+`on_row_accepted` / `on_row_rejected` in `finish_row`, and
+`on_chunk_finished` in `finish`. With a filtered plan, `on_put_field` may
+fire for a row that is later rejected; `on_row_rejected` still reports it.
 
 ## Memory management across modes { #memory-management-across-modes }
 
@@ -120,8 +164,9 @@ end_row → finish_row:
 - InputBuffer holds the entire file (or mmap)
 - One TableBuilder accumulates, flushed periodically
 - After each flush: batch is exported and dropped.
-- Peak memory: O(budget + per_chunk_overhead).
-- RSS stays constant regardless of file size.
+- Peak memory: O(budget + batch); the budget is a soft target enforced by a
+  `bytes_used` trigger, not a hard bound.
+- RSS stays roughly constant regardless of file size.
 
 ### Key difference: parallel vs bounded { #key-difference-parallel-vs-bounded }
 
@@ -165,14 +210,16 @@ internals, `InputBuffer`, or `ExecutionPlan`.
 
 - Parse time: O(bytes / (row_size × threads)) × cost_per_field
 - Memory: O(bytes / chunks × cols) per thread + O(rows × cols) for merge
-- Threading overhead: rayon work-stealing + channel communication
+- Threading overhead: rayon work-stealing + per-chunk panic capture
 - Best for: large files (>= 100 MB), full-RAM mode
 - Scaling: typically 3-5× on 8 cores (limited by parse cost, not I/O)
 
 ### Bounded memory { #bounded-memory }
 
 - Parse time: O(bytes / row_size) × cost_per_field (same as single)
-- Memory: bounded by `budget.bytes()` regardless of file size
+- Memory: O(budget + batch); the budget is a soft target enforced by the
+  `bytes_used` flush trigger, not a hard bound (batches may exceed it when
+  the required batch count hits the split cap)
 - RSS: O(budget + per-chunk overhead)
 - Best for: files larger than available RAM, streaming pipelines
 - Trade-off: sequential processing, no parallelism within a batch

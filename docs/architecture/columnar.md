@@ -44,8 +44,9 @@ without per-cell `String` allocation.
   returns `Option<&str>`.
 
 - **`append(&mut self, other)`**: Merges another column by base-shifting
-  offsets: `base = self.data.len() as i32`, then extends offsets. O(n) in
-  offsets, not in bytes.
+  offsets: `base = self.data.len() as i32`, then copies `other.data` into
+  `self.data` and extends offsets. O(n) in both bytes and offsets; the
+  base shift only avoids recomputing offsets.
 
 - **`to_arrow()`**: Builds Arrow `StringArray` by wrapping three buffers
   with `OffsetBuffer`, `ScalarBuffer`, `Buffer`, and `NullBuffer`. Block
@@ -74,7 +75,8 @@ pub(crate) enum ColumnBuilder {
     Float64(PrimColumn<f64>),
     Boolean(PrimColumn<bool>),
     Date32(PrimColumn<i32>),
-    Timestamp(TimeUnit, PrimColumn<i64>),
+    Timestamp(TimeUnit, Option<Box<str>>, PrimColumn<i64>),
+    Decimal128(u8, PrimColumn<i128>),
     Dictionary {
         codes: NullableColumn<i32>,
         data: Vec<u8>,
@@ -84,8 +86,12 @@ pub(crate) enum ColumnBuilder {
 }
 ```
 
-Each variant stores a `PrimColumn<T>` (or `StrColumn` for strings). Created
-by `ExecutionPlan::column_type` at first use.
+Each variant stores a `PrimColumn<T>` (or `StrColumn` for strings).
+`Timestamp` carries the unit and an optional chrono format string (tried
+before the built-in ISO layouts when parsing); `Decimal128` carries the
+scale, storing `value * 10^scale` as `i128`. Created by
+`ColumnBuilder::with_capacity(est, &ty)` in `TableBuilder::ensure_columns`,
+where `ty` comes from `ExecutionPlan::column_type`.
 
 ### PrimColumn<T> { #primcolumnt }
 
@@ -96,16 +102,25 @@ pub(crate) struct PrimColumn<T: Copy> {
 }
 ```
 
-Flat contiguous array. Zero-copy Arrow export via `to_arrow()` which moves
-`Vec<T>` into `ScalarBuffer`. Boolean specialization via `to_arrow_bool()`.
+Flat contiguous array. `to_arrow()` moves the buffers out via
+`std::mem::take` but converts per element
+(`data.into_iter().map(A::Native::from).collect()`), so it allocates a new
+`ScalarBuffer` rather than moving the `Vec` wholesale. Boolean specialization
+via `to_arrow_bool()`, which maps to bytes and repacks into a
+`BooleanBuffer`.
 
 ### Push paths { #push-paths }
 
 `push_value(Value<'_>)` is called for every field:
 
 - `Value::Str(s)` → `push_str(Some(s))` → parse according to column type
+  (Decimal128 parses to a scaled `i128` via `parse_decimal128`)
 - `Value::Int64(i)` into Int64 is native, into Float64 widens
-- Cross-type mismatches become `None`
+- `Value::Float64(f)` into Float64 is native, into Int64 narrows (`f as i64`)
+- Typed values (`Int64`/`Float64`/`Bool`/`Date32`/`Timestamp`) into String
+  columns are formatted as text (`"42"`, `"true"`, ISO dates and timestamps);
+  into Dictionary columns the same text is dict-encoded
+- Other cross-type mismatches become `None`
 
 `dict_code(dict, index, v)` does hash lookup + insert. Average O(1).
 
@@ -135,7 +150,8 @@ dictionaries. The incremental path:
 2. Find first divergent dictionary across chunks
 3. Build `SeedDict` from first chunk
 4. `unify_dictionaries`: global dict + per-chunk remap tables (O(dict_size))
-5. `remap_codes`: in-place code remap via `get_unchecked` (parallel)
+5. `remap_codes`: in-place code remap via `get_unchecked` (serial loop over
+   chunk engines; only step 1 runs under rayon)
 6. `replace_dict`: swap local dict for unified dict
 
 This avoids the serial merge path while keeping the fast export path.
@@ -147,6 +163,7 @@ This avoids the serial merge path while keeping the fast export path.
 - String via `StrColumn::append` (base shift)
 - Numeric via `Vec::append`
 - Timestamp checks `unit_a == unit_b` else `Error::Merge`
+- Decimal128 checks `scale_a == scale_b` else `Error::Merge`
 - Dictionary remaps via `dict_code` per value
 
 `unify_variants(a, b)` reconciles: same→same, int64+float64→float64,
@@ -164,9 +181,16 @@ pub(crate) enum TypedValue<'a> {
 ```
 
 Borrowed view for filter evaluation. `get_typed_value` borrows directly from
-storage without allocation. `get_filter_value` formats as `String` for
-`Equal`/`NotEqual` predicates (dates via `format_date32`, timestamps via
-`format_timestamp`).
+storage without allocation. The string-filter path tries `get_filter_view`
+first, which borrows `&str` with no allocation for String and Dictionary
+columns; typed columns return `None` there and fall back to
+`get_filter_value`, which formats as `String` (dates via `format_date32`,
+timestamps via `format_timestamp`).
+
+Related helpers: `is_type_at` backs the `IsType` predicate, `parses_as`
+checks whether a string parses into a declared `FieldType` for strict-types
+mode, and `variant_key` returns the storage-variant tag (including timestamp
+unit and decimal scale) used to keep schemas consistent across chunks.
 
 ## Performance characteristics { #performance-characteristics }
 
@@ -204,11 +228,17 @@ Cost: ~5 ns per value (amortized O(1) lookup).
 
 ### Arrow export { #arrow-export }
 
-`to_arrow_array` uses `std::mem::take` to move internal buffers into Arrow
-arrays. This is zero-copy, no data copying, just pointer moves.
+`to_arrow_array` uses `std::mem::take` to move internal buffers out, but
+zero-copy holds only for `StrColumn` (and the dictionary data/offsets
+buffers): `PrimColumn<T>` converts per element
+(`data.into_iter().map(A::Native::from).collect()`) into a new allocation,
+and booleans are additionally repacked into a bit-packed `BooleanBuffer`.
 
 For `StrColumn`: moves `data`, `offsets`, and `validity` into `StringArray`.
-For `PrimColumn<T>`: moves `data` and `validity` into `PrimitiveArray`.
+For `PrimColumn<T>`: per-element conversion of `data` into the Arrow native
+type; `validity` moves into the null buffer. Decimal128 exports as Arrow
+`Decimal128(38, scale)`.
 For Dictionary: moves `codes`, `dict` into `DictionaryArray`.
 
-Cost: ~100 ns per column (buffer moves + schema construction).
+Cost: ~100 ns per column for `StrColumn`/Dictionary (buffer moves + schema
+construction); typed columns pay one linear conversion pass.

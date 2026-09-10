@@ -127,15 +127,14 @@ engine applies them while parsing, before any Python object is created:
 | `RenameFields` | Always | `field_mapping` |
 | `DropFields` | Always | `drop_fields` |
 | `CastTypes` | `int`, `float`, `bool` | `field_types` |
-| `FilterRows` | Keyword form (constant, column comparison, `is_null`, `is_type`) or a lambda matching a known pattern | `filter` |
+| `FilterRows` | Keyword form (constant, column comparison, `is_null`, `is_type`, `regex`) or an expression predicate (`col(...)`) | `filter` |
 
 Stages that cannot be expressed as plan options are **non-fusable**. They run
-in Python over the parsed batches. For `FilterRows`, that only happens when
-the lambda uses a pattern [the compiler](../architecture/lambda-compiler.md)
-does not recognize (calling your own
-functions, for example); comparisons, string methods, membership tests, and
-`and`/`or`/`not` logic all compile. See
-[Stages: callable predicate](stages.md#filterrows-callable) for the full list.
+in Python over the parsed batches. For `FilterRows`, that happens when the
+predicate is a plain lambda or function; comparisons, string methods, regex,
+membership tests, and `and`/`or`/`not` logic all fuse when written with
+`col(...)` expressions. See
+[Stages: expression predicates](stages.md#filterrows-expr) for the full list.
 
 ### Why plans matter { #why-plans-matter }
 

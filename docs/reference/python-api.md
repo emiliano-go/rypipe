@@ -169,6 +169,7 @@ class Source(ABC):
         dictionary_columns=None,       # list[str]
         schema=None,                   # list[str]: project exactly these columns, in this order
         auto_dict=False,               # bool
+        observer=None,                 # dict[str, callable] | None: row observer hooks
         use_mmap=True,                 # bool
         batch_size=1024,               # int
     )
@@ -310,23 +311,56 @@ Cast column values. Supported callables: `int`, `float`, `str`, `bool`.
 
 ```python
 FilterRows(
-    predicate=None,            # Callable: arbitrary filter
+    predicate=None,            # Callable or rypipe.expr.Predicate
     *,
     field=None,                # str: column name (constant filter)
     op=None,                   # str: operator
     value=None,                # str: value (constant filter)
     field_a=None,              # str: left column (comparison)
     field_b=None,              # str: right column (comparison)
-    is_null=None,              # bool: keep rows where field is null/missing
+    is_null=None,              # bool: True keeps null/missing rows, False drops them
     is_type=None,              # str: keep rows where field matches this type
 )
 ```
 
-**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `not in`, `startswith`, `endswith`, `contains`, `strip`, `lower`, `upper`, `replace`, `len`
+**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, and `regex`
+(the value is a regular expression, searched against the string form of the
+field; invalid patterns raise at construction time)
 
 **Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 
 **Type check values:** `string`, `int64`, `float64`, `bool`, `date32`, `timestamp`, `decimal128`
+
+`predicate` may also be an expression predicate built with
+[`col()`](#expression-api); those fuse into the Rust parse loop just like the
+keyword forms. A plain callable (lambda or function) runs in Python as a
+fallback and is not fusable.
+
+### Expression API { #expression-api }
+
+```python
+from rypipe import col
+
+FilterRows(col("amount") > 100)
+FilterRows((col("age") >= 18) & col("name").startswith("A"))
+```
+
+`col(name)` references a column. Comparisons (`==`, `!=`, `>`, `<`, `>=`,
+`<=`) accept a literal or another `col(...)`. Methods:
+
+| Method | Meaning |
+|--------|---------|
+| `isin(values)` / `not_in(values)` | Membership test |
+| `startswith(s)` / `endswith(s)` / `contains(s)` | String prefix/suffix/substring |
+| `matches(pattern)` | Regex search (validated at construction) |
+| `between(lo, hi)` | Inclusive range, `lo <= x <= hi` |
+| `is_null()` / `is_not_null()` | Null presence checks |
+| `is_type(t)` | Type check (same values as `is_type=`) |
+
+Predicates compose with `&` (and), `|` (or), `~` (not) into arbitrarily
+nested trees. Everything an expression builds is fusable; anything the spec
+language cannot express raises at construction time. See
+[Expression filters](../architecture/expressions.md).
 
 ### FilterRowsAny { #filterrowsany }
 
@@ -343,6 +377,32 @@ FilterRowsAll(*filters: FilterRows)  # requires >= 2 filters
 ```
 
 Keep rows matching **all** filters (AND).
+
+### ObservedStage { #observedstage }
+
+Base class for stages whose side effects must survive fusion. Override
+`observer_hooks()` to return a hook dict:
+
+```python
+from rypipe.stages import ObservedStage
+
+class CountRejected(ObservedStage):
+    def __init__(self):
+        self.count = 0
+
+    def observer_hooks(self):
+        return {"on_row_rejected": self._count}
+
+    def _count(self, row_index):
+        self.count += 1
+```
+
+Valid hook keys: `on_begin_row(row_index)`, `on_put_field(row_index, name,
+slot, value)`, `on_row_accepted(row_index)`, `on_row_rejected(row_index)`,
+`on_chunk_finished(total, accepted, rejected)`. Hooks fire from parse
+threads; they must be thread-safe, and exceptions in hooks are printed and
+swallowed. The same dict can be passed to a source as `observer=`.
+See [Observer hooks](../advanced/stage-protocol.md#observer-hooks).
 
 ### FilterRowsNot { #filterrowsnot }
 

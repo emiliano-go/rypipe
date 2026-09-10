@@ -261,20 +261,16 @@ change to `parse_chunk`. For the end-to-end check through Python, see the
 ## What the end user sees { #what-the-end-user-sees }
 
 The `wants()` checks and typed `Value` variants in your `parse_chunk` pay
-off as free projection pushdown and typed columns. The user passes a filter
-and type hints; the parser skips dropped fields and the engine builds typed
-Arrow arrays directly:
+off as free projection pushdown and typed columns. The user chains a filter
+stage and passes type hints; the parser skips dropped fields and the engine
+builds typed Arrow arrays directly:
 
 ```python
-import rypipe, rypipe_log
+from rypipe_log import LogSource, FilterRows
 
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
-
-# filter is evaluated row-by-row during parsing; "amount" arrives as float64.
-table = rypipe.read(
-    "sample.log",
-    format="log",
-    field_types={"amount": "float64"},
-    filter={"field": "status", "op": "eq", "value": "active"},
-)
+# The filter is evaluated row-by-row during parsing; "amount" arrives as float64.
+table = (
+    LogSource("sample.log", field_types={"amount": "float64"})
+    | FilterRows(field="status", op="eq", value="active")
+).to_arrow()
 ```

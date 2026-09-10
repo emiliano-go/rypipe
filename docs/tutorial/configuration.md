@@ -50,7 +50,7 @@ all forms and operators.
 
 `schema=[...]` is a **projection + order declaration**: the output contains
 exactly the listed columns, in the listed order. Fields in the data that are
-not listed are skipped during parsing (never decoded or materialized — this
+not listed are skipped during parsing (never decoded or materialized; this
 is the performance win), listed columns that are absent from some or all
 rows come out null-filled, and extra/unknown fields in the data are ignored
 rather than raising an error. `field_mapping` renames apply before schema
@@ -60,7 +60,7 @@ columns, and a column listed in both `schema` and `drop_fields` is dropped
 
 ```python
 src = CrystalXMLSource("report.xml", row_tag="Details", schema=["Name", "Amount"])
-print(src.schema())  # ['Name', 'Amount'] — Department/Status/Date never parsed
+print(src.schema())  # ['Name', 'Amount']: Department/Status/Date never parsed
 ```
 
 !!! tip

@@ -87,14 +87,11 @@ the planner. Passing `memory=` switches the adapter into streaming mode
 the memory budget:
 
 ```python
-import rypipe, rypipe_log
-
-adapter = rypipe_log.LogAdapter()
-rypipe.register_adapter("log", adapter)
+from rypipe_log import LogSource
 
 # Streaming mode: chunk count and sizes come from plan_chunk_count.
-for batch in adapter.iter_record_batches(
-    "sample.log", memory="64MiB", batch_size=10_000
+for batch in LogSource("sample.log").iter_record_batches(
+    memory="64MiB", batch_size=10_000
 ):
     print(batch.num_rows)
 ```

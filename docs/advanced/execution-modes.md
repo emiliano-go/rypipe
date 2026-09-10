@@ -76,20 +76,20 @@ The key to bounded memory is the **in-flight cap**: at most `threads × 2` chunk
 
 ```
 Main thread                Worker pool              Coordinator
-──────────                ───────────              ───────────
+──────────                 ───────────              ───────────
                            ┌─ thread 1 ──┐
-submit chunk 0 ──────────►│  parse chunk │──► channel ──┐
-submit chunk 1 ──────────►│  parse chunk │──► channel    │
-                           └──────────────┘              │
-                           ┌─ thread 2 ──┐              │
-submit chunk 2 ──────────►│  parse chunk │──► channel    ├──► BTreeMap
-submit chunk 3 ──────────►│  parse chunk │──► channel    │    pending
-                           └──────────────┘              │    (ordered
-                                                         │     by seq)
-                           ... (max 2 chunks/thread) ... │
-                                                         │
-                                          deliver in order ◄── file_order
-                                          to BatchConsumer
+submit chunk 0 ──────────► │ parse chunk │──► channel ─────┐
+submit chunk 1 ──────────► │ parse chunk │──► channel      │
+                           └─────────────┘                 │
+                           ┌─ thread 2 ──┐                 │
+submit chunk 2 ──────────► │ parse chunk │──► channel      ├──► BTreeMap
+submit chunk 3 ──────────► │ parse chunk │──► channel      │    pending
+                           └─────────────┘                 │    (ordered
+                                                           │     by seq)
+                           ... (max 2 chunks/thread) ...   │
+                                                           │
+                                                    deliver in order ◄── file_order
+                                                    to BatchConsumer
 ```
 
 - **Backpressure**: the `sync_channel(max_in_flight)` blocks the main thread when the channel is full, preventing more than `threads × 2` chunks from being in flight at once.

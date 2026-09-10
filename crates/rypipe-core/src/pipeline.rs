@@ -100,12 +100,18 @@ where
         bytes: &[u8],
         budget: MemoryBudget,
     ) -> Result<Vec<RecordBatch>> {
-        BoundedExecutor::new(budget).run_bytes(
-            bytes,
-            &self.splitter,
-            self.parser.clone(),
-            Arc::clone(&self.plan),
-        )
+        BoundedExecutor::new(budget)
+            .with_split_cap(
+                self.plan
+                    .max_split_chunks
+                    .unwrap_or(crate::MAX_SPLIT_CHUNKS),
+            )
+            .run_bytes(
+                bytes,
+                &self.splitter,
+                self.parser.clone(),
+                Arc::clone(&self.plan),
+            )
     }
 
     /// Parse a file into a single `RecordBatch`.
@@ -151,13 +157,19 @@ where
         budget: MemoryBudget,
         prefault: bool,
     ) -> Result<Vec<RecordBatch>> {
-        BoundedExecutor::new(budget).run(
-            path.as_ref(),
-            &self.splitter,
-            self.parser.clone(),
-            Arc::clone(&self.plan),
-            prefault,
-        )
+        BoundedExecutor::new(budget)
+            .with_split_cap(
+                self.plan
+                    .max_split_chunks
+                    .unwrap_or(crate::MAX_SPLIT_CHUNKS),
+            )
+            .run(
+                path.as_ref(),
+                &self.splitter,
+                self.parser.clone(),
+                Arc::clone(&self.plan),
+                prefault,
+            )
     }
 
     /// Parse an in-memory byte slice in bounded-memory batches, calling
@@ -171,13 +183,19 @@ where
     where
         C: crate::consumer::BatchConsumer,
     {
-        BoundedExecutor::new(budget).run_bytes_stream(
-            bytes,
-            &self.splitter,
-            self.parser.clone(),
-            Arc::clone(&self.plan),
-            consumer,
-        )
+        BoundedExecutor::new(budget)
+            .with_split_cap(
+                self.plan
+                    .max_split_chunks
+                    .unwrap_or(crate::MAX_SPLIT_CHUNKS),
+            )
+            .run_bytes_stream(
+                bytes,
+                &self.splitter,
+                self.parser.clone(),
+                Arc::clone(&self.plan),
+                consumer,
+            )
     }
 
     /// Parse a file in bounded-memory batches, calling `consumer` per batch
@@ -192,14 +210,20 @@ where
     where
         C: crate::consumer::BatchConsumer,
     {
-        BoundedExecutor::new(budget).run_stream(
-            path.as_ref(),
-            &self.splitter,
-            self.parser.clone(),
-            Arc::clone(&self.plan),
-            prefault,
-            consumer,
-        )
+        BoundedExecutor::new(budget)
+            .with_split_cap(
+                self.plan
+                    .max_split_chunks
+                    .unwrap_or(crate::MAX_SPLIT_CHUNKS),
+            )
+            .run_stream(
+                path.as_ref(),
+                &self.splitter,
+                self.parser.clone(),
+                Arc::clone(&self.plan),
+                prefault,
+                consumer,
+            )
     }
 }
 

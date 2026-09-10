@@ -12,7 +12,9 @@ value). For 10 fields per row, this was 20 HashMap operations per row.
 **After:** `Vec<ColumnBuilder>` + `field_index: HashMap<String, usize>`.
 One hash probe (name → index via `field_index.get`), then `columns[idx]`
 is a bounds-checked array access. The `push_field_resolved` hot path does
-one hash, one bit set, one conditional pop, and one push_value.
+one hash, a frozen-schema check, a strict-types check, an observer
+notification, first-row ordinal tracking, one bit set, one conditional
+pop, and one push_value.
 
 **Impact:** Eliminates the second hash probe for every field. For 10 fields
 per row at ~10 ns per hash, this saves ~100 ns per row. On a 533 MB file
@@ -29,16 +31,22 @@ for b in &mut columns {
 This pushed `None` for every missing column, even when most columns were
 present. For 10 columns where 8 are present, 2 null pushes per row.
 
-**After:** `row_dirty: Vec<u64>` bitmask. In `finish_row`:
+**After:** `row_dirty: Vec<u64>` bitmask. In `finish_row`, a dense-row
+`is_full` check (every dirty bit set) skips the per-column loop entirely;
+otherwise only missing columns get null-filled:
 ```rust
-for (i, b) in columns.iter_mut().enumerate() {
-    let word = i / 64;
-    let bit = i % 64;
-    if (row_dirty[word] >> bit) & 1 == 0 {
-        b.push(None);  // Only missing columns get null-filled
+if is_full {
+    self.row_dirty.fill(0);  // Dense row: no loop at all
+} else {
+    for (i, b) in columns.iter_mut().enumerate() {
+        let word = i / 64;
+        let bit = i % 64;
+        if (row_dirty[word] >> bit) & 1 == 0 {
+            b.push(None);  // Only missing columns get null-filled
+        }
     }
+    self.row_dirty.fill(0);  // Clear all bits for next row
 }
-self.row_dirty.fill(0);  // Clear all bits for next row
 ```
 
 **Impact:** For 10 columns where 8 are present, saves 80% of null-fill pushes.
@@ -56,7 +64,8 @@ predicate as soon as the predicate column arrives. On Fail, discard buffer
 
 **Impact:** For selective filters (e.g., 10% selectivity), eliminates 90%
 of column push/pop cycles. The adaptive strategy disables buffering when
-the predicate column is late (> 4/5 of columns), falling back to direct
+the predicate column's slot is at or beyond 4/5 of the column count
+(`ordinal >= ncols * 4 / 5`), falling back to direct
 push + pop-on-reject.
 
 ## 4. resolve + put_field_resolved (single hash) { #4-resolve-put_field_resolved }
@@ -89,7 +98,8 @@ per field. ~17% on the hot path. Works for formats with stable field order
 **Before:** Scan all fields even when only 3 of 11 are wanted.
 
 **After:** `row_satisfied()` returns true when all wanted columns have
-values. Scanner byte-jumps to row close via `find_row_close`.
+values. Scanner byte-jumps to row close via `find_close_after` with the
+precomputed close finder (see section 9).
 
 **Impact:** For projections, skips scanning 60-80% of fields. Measured:
 +123% on drop_half parallel (533 MB: 3,394 → 7,571 MB/s).
@@ -163,14 +173,14 @@ All chunks must be merged before dict upgrade.
 
 | # | Optimization | Measured gain | Where |
 |---|-------------|---------------|-------|
-| 1 | Dense column storage | Eliminates 1 hash probe/field | engine.rs |
-| 2 | Dirty bitmask null-fill | 80% fewer null pushes | engine.rs |
-| 3 | Predicate-first | 90% fewer push/pop cycles | engine.rs |
-| 4 | Single hash resolve | 100 ns/row saved | engine.rs |
-| 5 | expect_slot layout | 17% on hot path | scanner.rs |
-| 6 | row_satisfied | +123% on drop_half | scanner.rs |
-| 7 | wanted_mask | Eliminates vtable dispatch | scanner.rs |
-| 8 | Ordinal threading | Enables 5 and 6 | scanner.rs |
+| 1 | Dense column storage | Eliminates 1 hash probe/field | engine/table_builder.rs |
+| 2 | Dirty bitmask null-fill | 80% fewer null pushes | engine/table_builder.rs |
+| 3 | Predicate-first | 90% fewer push/pop cycles | engine/table_builder.rs |
+| 4 | Single hash resolve | 100 ns/row saved | engine/table_builder.rs |
+| 5 | expect_slot layout | 17% on hot path | decoder.rs, scanner.rs |
+| 6 | row_satisfied | +123% on drop_half | decoder.rs, scanner.rs |
+| 7 | wanted_mask | Eliminates vtable dispatch | decoder.rs |
+| 8 | Ordinal threading | Enables 5 and 6 | decoder.rs, scanner.rs |
 | 9 | Precomputed close finder | Eliminates per-row alloc | scanner.rs |
 | 10 | Scan primitives | 15% on next_lt | scan/mod.rs |
 | 11 | Splitter default | Eliminates bug class | decoder.rs |

@@ -253,6 +253,30 @@ For a 533 MB file on a Ryzen 5800X:
 | Column building | ~20% | Engine handles this |
 | Export | ~5% | Zero-copy, engine handles this |
 
+## Extension tiers { #extension-tiers }
+
+Users and adapter authors extend **rypipe** at four tiers. Each tier down
+is faster and harder; each tier up is easier and slower. Pick the highest
+tier that expresses what you need, and document the price when you expose
+a lower one:
+
+| Tier | Mechanism | Cost | Audience |
+|------|-----------|------|----------|
+| Declarative | Plan kwargs: `schema`, `field_types`, `filter` specs | Zero: compiled into the Rust parse | End users |
+| Expression | `_plan_kwargs()` on a stage returning plan data | Zero: fuses into the plan | Stage authors |
+| Rust trait | `Splitter`, `RecordParser`, `RowObserver` with default no-op methods | Zero to near-zero: static dispatch via `parse_chunk_generic` | Adapter authors |
+| Python hook | Observer callables, stage `apply()` | GIL acquisition per call (~50 ns); fine per row, painful per field | Debugging, prototyping |
+
+Two rules keep the ecosystem fast:
+
+- **Extend with data, not code.** If a feature can be expressed as plan
+  kwargs (a new filter op, a new type), add it there. It fuses for free
+  and works identically in every adapter.
+- **No Python callbacks in the hot loop.** Per-row Python hooks are a
+  debugging tool; per-field Python hooks cost ~0.5 s per 1M rows at 10
+  fields. If a hook gets hot, promote it: Python callable to expression,
+  expression to plan op, plan op to Rust trait method.
+
 ## Build and test { #build-and-test }
 
 Every adapter in this guide builds and tests the same way: compile the

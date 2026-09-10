@@ -197,8 +197,10 @@ class _MockSource(Source):
         self._dictionary_columns = kwargs.get("dictionary_columns", [])
         self._schema = kwargs.get("schema", [])
         self._auto_dict = kwargs.get("auto_dict", False)
+        self._strict_types = kwargs.get("strict_types", False)
         self._use_mmap = kwargs.get("use_mmap", True)
         self._batch_size = kwargs.get("batch_size", 1024)
+        self._observer = kwargs.get("observer")
         self._cached_arrow = None
         self._table = table
 
@@ -474,27 +476,31 @@ def test_filter_rows_invalid_compare_op():
         FilterRows(field_a="x", op="like", field_b="y")
 
 
-def test_lambda_compiler_field_gt_literal():
-    """Lambda: r['age'] > '28' should be compiled and fused."""
+def test_expr_field_gt_literal():
+    """col('age') > '28' should build a fusable spec."""
+    from rypipe import col
+
     src = _MockSource(pa.table({
         "name": ["Alice", "Bob", "Carol"],
         "age": ["30", "25", "35"],
     }))
-    f = FilterRows(lambda r: r["age"] > "28")
+    f = FilterRows(col("age") > "28")
     assert f._filter_spec is not None
     assert f._filter_spec["op"] == ">"
     rows = collect(src | f)
     assert sorted([r["name"] for r in rows]) == ["Alice", "Carol"]
 
 
-def test_lambda_compiler_field_a_gt_field_b():
-    """Lambda: r['price'] > r['cost'] should be compiled and fused."""
+def test_expr_field_a_gt_field_b():
+    """col('price') > col('cost') should compile to a column comparison."""
+    from rypipe import col
+
     src = _MockSource(pa.table({
         "item": ["A", "B"],
         "price": ["700", "50"],
         "cost": ["60", "80"],
     }))
-    f = FilterRows(lambda r: r["price"] > r["cost"])
+    f = FilterRows(col("price") > col("cost"))
     assert f._filter_spec is not None
     assert f._filter_spec["op"] == ">"
     rows = collect(src | f)
@@ -502,12 +508,13 @@ def test_lambda_compiler_field_a_gt_field_b():
     assert rows[0]["item"] == "A"
 
 
-def test_lambda_compiler_startswith():
-    """Lambda: r['name'].startswith('A') should be compiled and fused."""
+def test_expr_startswith():
+    from rypipe import col
+
     src = _MockSource(pa.table({
         "name": ["Alice", "Bob", "Carol"],
     }))
-    f = FilterRows(lambda r: r["name"].startswith("A"))
+    f = FilterRows(col("name").startswith("A"))
     assert f._filter_spec is not None
     assert f._filter_spec["op"] == "starts_with"
     rows = collect(src | f)
@@ -515,13 +522,14 @@ def test_lambda_compiler_startswith():
     assert rows[0]["name"] == "Alice"
 
 
-def test_lambda_compiler_compound_and():
-    """Lambda: r['age'] > '28' and r['name'].startswith('A') should compile."""
+def test_expr_compound_and():
+    from rypipe import col
+
     src = _MockSource(pa.table({
         "name": ["Alice", "Bob", "Carol"],
         "age": ["30", "25", "35"],
     }))
-    f = FilterRows(lambda r: r["age"] > "28" and r["name"].startswith("A"))
+    f = FilterRows((col("age") > "28") & col("name").startswith("A"))
     assert f._filter_spec is not None
     assert "and" in f._filter_spec
     rows = collect(src | f)
@@ -529,29 +537,21 @@ def test_lambda_compiler_compound_and():
     assert rows[0]["name"] == "Alice"
 
 
-def test_lambda_compiler_closure_fallback():
-    """Lambda with closure variable should now be resolved at construction time."""
+def test_lambda_plain_fallback():
+    """Plain lambdas are no longer analyzed; they run as Python fallback."""
     threshold = 100
     f = FilterRows(lambda r: r["amount"] > threshold)
-    # Closure variable is now resolved; compiles to filter spec
-    assert f._filter_spec is not None
-    assert f._filter_spec["value"] == "100"
-
-
-def test_lambda_compiler_complex_fallback():
-    """Complex lambda (method chain) should fall back to Python for single method."""
-    f = FilterRows(lambda r: r["name"].strip().lower() == "alice")
-    # Single method (strip) should compile, but chain (lower) falls back
-    # Actually strip().lower() is a chain, so it falls back
     assert f._filter_spec is None
+    assert f._plan_kwargs() is None
 
 
-def test_lambda_compiler_not_startswith():
-    """not r['name'].startswith('A') should compile."""
+def test_expr_not_startswith():
+    from rypipe import col
+
     src = _MockSource(pa.table({
         "name": ["Alice", "Bob", "Carol"],
     }))
-    f = FilterRows(lambda r: not r["name"].startswith("A"))
+    f = FilterRows(~col("name").startswith("A"))
     assert f._filter_spec is not None
     assert "not" in f._filter_spec
     rows = collect(src | f)
@@ -559,72 +559,45 @@ def test_lambda_compiler_not_startswith():
     assert {r["name"] for r in rows} == {"Bob", "Carol"}
 
 
-def test_lambda_compiler_not_endswith():
-    """not r['name'].endswith('l') should compile."""
-    src = _MockSource(pa.table({
-        "name": ["Alice", "Bob", "Carol"],
-    }))
-    f = FilterRows(lambda r: not r["name"].endswith("l"))
-    assert f._filter_spec is not None
-    assert "not" in f._filter_spec
-    rows = collect(src | f)
-    assert len(rows) == 2
-    assert {r["name"] for r in rows} == {"Alice", "Bob"}
+def test_expr_nested_compound_or_and():
+    from rypipe import col
 
-
-def test_lambda_compiler_nested_compound_or_and():
-    """(r['a'] > 1 or r['b'] < 2) and r['c'] == 'x' should compile."""
     src = _MockSource(pa.table({
         "a": ["1", "3", "1", "5"],
         "b": ["3", "1", "5", "1"],
         "c": ["x", "x", "y", "x"],
     }))
-    f = FilterRows(lambda r: (r["a"] > "1" or r["b"] < "2") and r["c"] == "x")
+    f = FilterRows(((col("a") > "1") | (col("b") < "2")) & (col("c") == "x"))
     assert f._filter_spec is not None
-    # Flat detector finds AND with OR on left, simple on right
     assert "and" in f._filter_spec
     rows = collect(src | f)
     assert len(rows) == 2
     assert {r["a"] for r in rows} == {"3", "5"}
 
 
-def test_lambda_compiler_nested_compound_and_or():
-    """r['a'] > 1 and (r['b'] < 2 or r['c'] == 'x') should compile."""
+def test_expr_nested_compound_and_or():
+    from rypipe import col
+
     src = _MockSource(pa.table({
         "a": ["1", "3", "5", "3"],
         "b": ["3", "1", "3", "3"],
         "c": ["y", "y", "x", "x"],
     }))
-    f = FilterRows(lambda r: r["a"] > "1" and (r["b"] < "2" or r["c"] == "x"))
+    f = FilterRows((col("a") > "1") & ((col("b") < "2") | (col("c") == "x")))
     assert f._filter_spec is not None
-    # Flat detector finds AND with simple on left, OR on right
     assert "and" in f._filter_spec
     rows = collect(src | f)
-    # a>"1": rows 2,3,4; (b<"2" or c=="x"): rows 2(b<"2"),3(c=="x"),4(c=="x")
     assert len(rows) == 3
     assert {r["a"] for r in rows} == {"3", "5"}
 
 
-def test_lambda_compiler_closure_resolved():
-    """Closure variable should be resolved at construction time."""
-    threshold = 100
-    src = _MockSource(pa.table({
-        "amount": ["50", "150", "200"],
-    }))
-    f = FilterRows(lambda r: r["amount"] > threshold)
-    assert f._filter_spec is not None
-    assert f._filter_spec["value"] == "100"
-    # String comparison: "150" > "100" (True), "200" > "100" (True), "50" > "100" (True, lexicographic)
-    rows = collect(src | f)
-    assert len(rows) == 3  # All pass due to string comparison
+def test_expr_contains():
+    from rypipe import col
 
-
-def test_lambda_compiler_contains():
-    """r['name'].contains('Ali') should compile."""
     src = _MockSource(pa.table({
         "name": ["Alice", "Bob", "Carol"],
     }))
-    f = FilterRows(lambda r: r["name"].contains("Ali"))
+    f = FilterRows(col("name").contains("li"))
     assert f._filter_spec is not None
     assert f._filter_spec["op"] == "contains"
     rows = collect(src | f)
@@ -632,88 +605,78 @@ def test_lambda_compiler_contains():
     assert rows[0]["name"] == "Alice"
 
 
-def test_lambda_compiler_strip():
-    """r['name'].strip() == 'alice' should compile."""
-    src = _MockSource(pa.table({
-        "name": ["  Alice  ", "Bob", "  Carol  "],
-    }))
-    f = FilterRows(lambda r: r["name"].strip() == "Alice")
-    assert f._filter_spec is not None
-    assert f._filter_spec["op"] == "strip"
-    assert f._filter_spec["cmp_op"] == "=="
-    rows = collect(src | f)
-    assert len(rows) == 1
-    assert rows[0]["name"] == "  Alice  "
+def test_expr_isin():
+    from rypipe import col
 
-
-def test_lambda_compiler_lower():
-    """r['name'].lower() == 'alice' should compile."""
-    src = _MockSource(pa.table({
-        "name": ["Alice", "BOB", "carol"],
-    }))
-    f = FilterRows(lambda r: r["name"].lower() == "alice")
-    assert f._filter_spec is not None
-    assert f._filter_spec["op"] == "lower"
-    assert f._filter_spec["cmp_op"] == "=="
-    rows = collect(src | f)
-    assert len(rows) == 1
-    assert rows[0]["name"] == "Alice"
-
-
-def test_lambda_compiler_upper():
-    """r['name'].upper() == 'ALICE' should compile."""
-    src = _MockSource(pa.table({
-        "name": ["Alice", "Bob", "Carol"],
-    }))
-    f = FilterRows(lambda r: r["name"].upper() == "ALICE")
-    assert f._filter_spec is not None
-    assert f._filter_spec["op"] == "upper"
-    assert f._filter_spec["cmp_op"] == "=="
-    rows = collect(src | f)
-    assert len(rows) == 1
-    assert rows[0]["name"] == "Alice"
-
-
-def test_lambda_compiler_len():
-    """len(r['name']) > 3 should compile."""
-    src = _MockSource(pa.table({
-        "name": ["Alice", "Bob", "Carol"],
-    }))
-    f = FilterRows(lambda r: len(r["name"]) > 3)
-    assert f._filter_spec is not None
-    assert f._filter_spec["op"] == "length"
-    assert f._filter_spec["cmp_op"] == ">"
-    rows = collect(src | f)
-    assert len(rows) == 2
-    assert {r["name"] for r in rows} == {"Alice", "Carol"}
-
-
-def test_lambda_compiler_replace():
-    """r['name'].replace('o', 'x') should compile."""
-    src = _MockSource(pa.table({
-        "name": ["Alice", "Bob", "Carol"],
-    }))
-    f = FilterRows(lambda r: r["name"].replace("o", "x") == "Bxb")
-    assert f._filter_spec is not None
-    assert f._filter_spec["old"] == "o"
-    assert f._filter_spec["new"] == "x"
-    assert f._filter_spec["cmp_op"] == "=="
-    rows = collect(src | f)
-    assert len(rows) == 1
-    assert rows[0]["name"] == "Bob"
-
-
-def test_lambda_compiler_in_frozenset():
-    """r['status'] in frozenset({...}) should compile."""
     src = _MockSource(pa.table({
         "status": ["active", "inactive", "pending"],
     }))
-    f = FilterRows(lambda r: r["status"] in frozenset({"active", "pending"}))
+    f = FilterRows(col("status").isin(["active", "pending"]))
     assert f._filter_spec is not None
     assert f._filter_spec["op"] == "in"
     rows = collect(src | f)
     assert len(rows) == 2
     assert {r["status"] for r in rows} == {"active", "pending"}
+
+
+def test_expr_matches_regex():
+    from rypipe import col
+
+    f = FilterRows(col("code").matches(r"^ERR\d+$"))
+    assert f._filter_spec == {"field": "code", "op": "regex", "value": r"^ERR\d+$"}
+    # Python fallback semantics
+    assert f._predicate({"code": "ERR42"}) is True
+    assert f._predicate({"code": "WARN42"}) is False
+    assert f._predicate({}) is False
+    assert f._predicate({"code": None}) is False
+    with pytest.raises(Exception):
+        col("code").matches("(")
+
+
+def test_expr_between():
+    from rypipe import col
+
+    f = FilterRows(col("age").between(20, 30))
+    assert f._filter_spec == {
+        "and": [
+            {"field": "age", "op": ">=", "value": "20"},
+            {"field": "age", "op": "<=", "value": "30"},
+        ]
+    }
+    src = _MockSource(pa.table({
+        "name": ["Alice", "Bob", "Carol"],
+        "age": ["30", "25", "35"],
+    }))
+    rows = collect(src | f)
+    assert sorted([r["name"] for r in rows]) == ["Alice", "Bob"]
+
+
+def test_expr_is_null_and_not_null():
+    from rypipe import col
+
+    f = FilterRows(col("city").is_null())
+    assert f._filter_spec == {"field": "city", "op": "is_null"}
+    f = FilterRows(col("city").is_not_null())
+    assert f._filter_spec == {"not": {"field": "city", "op": "is_null"}}
+
+
+def test_filter_rows_regex_keyword_form():
+    f = FilterRows(field="code", op="regex", value=r"^ERR")
+    assert f._filter_spec == {"field": "code", "op": "regex", "value": r"^ERR"}
+    assert f._predicate({"code": "ERR1"}) is True
+    assert f._predicate({"code": "OK"}) is False
+    assert f._predicate({}) is False
+    with pytest.raises(Exception):
+        FilterRows(field="code", op="regex", value="(")
+
+
+def test_expr_fusion_round_trip():
+    """Expression predicates must survive plan_split into plan_overrides."""
+    from rypipe import col
+
+    overrides, remaining = plan_split([FilterRows(col("x") >= 18)])
+    assert remaining == []
+    assert overrides["filter"] == {"field": "x", "op": ">=", "value": "18"}
 
 
 def test_drop_fields_rejects_string():
@@ -735,8 +698,10 @@ class _TableAdapter(Adapter):
         self._dictionary_columns = kwargs.get("dictionary_columns", [])
         self._schema = kwargs.get("schema", [])
         self._auto_dict = kwargs.get("auto_dict", False)
+        self._strict_types = kwargs.get("strict_types", False)
         self._use_mmap = kwargs.get("use_mmap", True)
         self._batch_size = kwargs.get("batch_size", 1024)
+        self._observer = kwargs.get("observer")
         self._cached_arrow = None
 
     def read(self, path: str, **kwargs):
@@ -889,3 +854,41 @@ def test_filter_compare_inside_or(sample_table):
     b = FilterRows(field="name", op="==", value="Nobody")
     rows = collect(_MockSource(sample_table) | FilterRowsAny(a, b))
     assert len(rows) == 3  # all rows satisfy self-compare
+
+
+def test_filter_rows_is_null_spec_and_fallback():
+    f = FilterRows(field="city", is_null=True)
+    assert f._filter_spec == {"field": "city", "op": "is_null"}
+    assert f._predicate({"city": None}) is True
+    assert f._predicate({}) is True
+    assert f._predicate({"city": "LA"}) is False
+
+
+def test_filter_rows_is_null_false_spec():
+    f = FilterRows(field="city", is_null=False)
+    assert f._filter_spec == {"not": {"field": "city", "op": "is_null"}}
+    assert f._plan_kwargs() == {"filter": {"not": {"field": "city", "op": "is_null"}}}
+
+
+def test_filter_rows_is_null_false_python_fallback():
+    stage = FilterRows(field="city", is_null=False)
+    rows = [{"city": "LA"}, {"city": None}, {"other": 1}]
+    assert list(stage(rows)) == [{"city": "LA"}]
+
+
+def test_filter_rows_field_alone_still_errors():
+    with pytest.raises(ValueError, match="is_null"):
+        FilterRows(field="city")
+
+
+def test_filter_rows_not_null_pipeline_fusion(sample_table):
+    """The not-null spec must survive the fusion path into plan_overrides."""
+    overrides, _remaining = plan_split([FilterRows(field="city", is_null=False)])
+    assert overrides["filter"] == {"not": {"field": "city", "op": "is_null"}}
+
+
+def test_source_strict_types_kwarg_forwarded(sample_table):
+    src = _MockSource(sample_table, strict_types=True)
+    assert src._build_plan_kwargs()["strict_types"] is True
+    src = _MockSource(sample_table)
+    assert "strict_types" not in src._build_plan_kwargs()

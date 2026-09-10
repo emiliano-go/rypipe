@@ -151,8 +151,29 @@ work.
 
 ## The projection fast path { #the-projection-fast-path }
 
-When a projection selects 3 of 11 columns and all 3 arrive by field 4, the
-scanner can byte-jump to the row close tag, skipping fields 5-11.
+**Projection** is the relational operation of selecting a subset of columns
+from each row and discarding the rest. In rypipe it comes from three sources:
+`schema_order` (the output contains exactly the listed columns),
+`.drop(...)` / `DropFields` (named columns removed), and filter columns
+(parsed for predicate evaluation, then projected out of the output).
+
+**Projection pushdown** means moving that selection to the earliest possible
+point in the pipeline: the byte scanner itself. The theoretical win is that
+an unwanted column costs nothing at every stage it never reaches: no byte
+scanning, no UTF-8 decoding, no hash lookup, no allocation, no Arrow builder
+append. The engine exposes this as a chain of increasingly coarse signals:
+
+1. `wants(name)` / `resolve()`: per-field; skip this field's value.
+2. `wanted_mask()`: per-row; a bitmask answering `wants()` for all slots at
+   once.
+3. `row_satisfied()`: per-row short-circuit; once every wanted column in
+   the row has a value, the remaining fields can only be unwanted, so the
+   scanner may skip them without even reading their names.
+
+The third signal is what makes projection a scanner optimization rather than
+just a storage optimization. When a projection selects 3 of 11 columns and
+all 3 arrive by field 4, the scanner can byte-jump to the row close tag,
+skipping fields 5-11.
 
 ```
 sink.row_satisfied()  →  true  →  scanner calls find_row_close()
@@ -192,57 +213,177 @@ per field.
 
 ## The layout prediction fast path { #the-layout-prediction-fast-path }
 
-After the first row, the engine knows which slot each ordinal maps to.
-`expect_slot(ordinal)` returns `(slot, raw_name_bytes)`. The adapter compares
-raw bytes via memcmp instead of running the full attribute scan → UTF-8 decode
-→ hash → lookup pipeline.
+The generic per-field path does four pieces of work before a value lands in
+a column:
 
 ```
-expect_slot(ordinal)  →  Some((slot, expected))
-  memcmp(raw, expected) == 0  →  put_field_at(slot, value)  // skip decode + resolve
-  memcmp(raw, expected) != 0  →  layout_broken(ordinal)     // invalidate, fall back
+raw name bytes → UTF-8/entity decode → hash lookup → resolve (rename/drop) → slot
 ```
+
+The observation behind this fast path: in most row-oriented formats the
+**layout is stable**, meaning field number 3 of every row is the same
+column. Once one row has been parsed generically, the mapping
+`ordinal → (slot, name)` is known, and verifying it costs a single memcmp
+instead of the whole pipeline. (An *ordinal* is the field's position within
+the row, 0-based: first field is 0, second is 1, and so on.)
+
+The learning side is automatic: every generic `put_field` call records
+`(slot, name_bytes)` for its ordinal when no entry exists yet, so the first
+row (and any re-learn after an invalidation) costs nothing extra. Your
+adapter only opts into *using* the mapping. For each field:
+
+1. Ask `sink.expect_slot(ordinal)`. `None` means "nothing learned yet":
+   take the generic path, which learns the entry as a side effect.
+2. `Some((slot, expected))`: memcmp the field's raw name bytes against
+   `expected`.
+3. Match: push with `sink.put_field_at(slot, value)`. No decode, no hash,
+   no resolve.
+4. Mismatch: call `sink.layout_broken(ordinal)` to drop the stale entry,
+   then fall through to the generic path, which re-learns the ordinal from
+   this row's actual name.
+
+A complete adapter loop:
+
+```rust
+fn parse_row(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+    sink.begin_row();
+    let mut ordinal = 0u32;
+    for (raw_name, raw_value) in self.scan_fields(bytes) {
+        // Fast path: the engine cached a slot for this ordinal and the
+        // raw name bytes match. Skip decode + resolve entirely.
+        if let Some((slot, expected)) = sink.expect_slot(ordinal) {
+            if raw_name == expected {
+                sink.put_field_at(slot, Value::Str(Cow::Borrowed(raw_value)));
+                ordinal += 1;
+                continue;
+            }
+            // Layout changed (reordered, missing, or extra field).
+            // Invalidate so the generic path below re-learns the ordinal.
+            sink.layout_broken(ordinal);
+        }
+        // Generic path: decode + resolve + push. Also (re)learns the
+        // ordinal → (slot, name) mapping as a side effect.
+        let name = decode_name(raw_name);
+        if sink.wants(&name) {
+            sink.put_field(&name, Value::Str(Cow::Borrowed(raw_value)));
+        }
+        ordinal += 1;
+    }
+    sink.end_row();
+    Ok(())
+}
+```
+
+Three rules keep this sound:
+
+1. **Always memcmp before `put_field_at`.** `put_field_at` writes blindly to
+   a slot; without the comparison, a shifted layout puts values in the
+   wrong columns silently.
+2. **Always `layout_broken(ordinal)` on mismatch.** Otherwise the stale
+   entry either mismatches forever (you pay `expect_slot` + memcmp per row
+   for nothing) or, worse, matches a *different* field that happens to carry
+   the old name at this ordinal and writes it to the wrong slot.
+3. **Never cache slot numbers yourself.** Slots are only valid through
+   `expect_slot` for the current layout; a drop, rename, or schema change
+   invalidates them.
+
+One subtlety: the engine stores the **resolved** (post-rename) name bytes,
+so the memcmp only hits when the raw bytes are already the final name. A
+field whose name contains an entity (`&amp;`) or escapes never matches in
+raw form and always falls through to the generic path. That is correct,
+just not fast.
 
 **Cost comparison:**
 
 - Generic path: ~25 ns (find_attr_value + decode_attr + resolve + put_field)
 - Fast path: ~8 ns (memcmp + put_field_at)
 
-**When it helps:** Formats with stable field order across rows (CSV columns,
-XML attributes, JSONL keys). The first row learns the layout; subsequent rows
-skip the expensive resolution.
+**When it helps:** formats with stable field order across rows (CSV columns,
+XML attributes, JSONL keys). The first row learns the layout; subsequent
+rows skip the expensive resolution.
 
-**When it doesn't help:** Formats where field order changes between rows, or
+**When it doesn't help:** formats where field order changes between rows
+(every memcmp fails, so you pay for the attempt and the generic path), or
 where field names contain entities that need decoding before comparison.
 
 ## The predicate-first fast path { #the-predicate-first-fast-path }
 
-When a filter is active, the engine buffers fields until the predicate resolves.
-If the predicate passes mid-row, the engine switches to direct mode and drains
-the buffer.
+A filter creates a dilemma for the engine: a rejected row's values are
+wasted work, but you cannot know whether a row passes until its predicate
+column arrives, and that column may sit anywhere in the row. The two naive
+strategies both lose:
+
+- **Push everything, delete on reject:** values are materialized into Arrow
+  builders before the verdict; a rejected row pays full column writes plus
+  a per-column pop to remove them.
+- **Buffer the whole row, decide at `end_row`:** rejected rows cost nothing
+  in the columns, but every value of every *passing* row pays a buffer copy
+  first, even when the filter was decidable after field 2.
+
+Predicate-first is the middle ground: buffer only **until the predicate
+resolves**, then commit to one of the two strategies for the rest of the
+row. Fields arrive as `(slot, value)` pairs in a per-row buffer, and after
+each field the engine re-evaluates the predicate using the values seen so
+far:
 
 ```
-begin_row → [put_field × N] → end_row
-                │
-                ▼
-         check predicate slot
-         ├── Pass → direct mode (push remaining fields directly)
-         ├── Fail → discard buffer, skip row
-         └── Undecided → continue buffering
+begin_row → [buffered put_field × N] → end_row
+                  │
+                  ▼  after each field
+           predicate state
+           ├── Pass      → drain buffer into columns, switch to direct
+           │               mode: remaining fields push unbuffered
+           ├── Fail      → row_rejected() = true; end_row discards the
+           │               buffer (zero Arrow writes for this row)
+           └── Undecided → keep buffering
 ```
 
-The scanner checks `sink.row_rejected()` after each child element:
+A **Pass mid-row** means the buffer drains once and the rest of the row
+costs the same as an unfiltered parse. A **Fail mid-row** means nothing was
+ever written to a column, and the scanner can stop reading the row
+immediately. A rejected row therefore costs only its buffered fields up to
+the predicate column; a passing row pays the buffer only up to the
+predicate column too.
+
+Your adapter's part is one check per field: after pushing, ask
+`sink.row_rejected()` and byte-jump out of the row when the filter has
+already decided against it:
 
 ```rust
-if sink.row_rejected() {
-    let after = find_row_close(bytes, cur, row_tag, regions);
-    sink.end_row();
-    return Flow::At(after);
+sink.begin_row();
+for (raw_name, raw_value) in self.scan_fields(bytes) {
+    let name = decode_name(raw_name);
+    if sink.wants(&name) {
+        sink.put_field(&name, Value::Str(Cow::Borrowed(raw_value)));
+    }
+    // Filter decided against this row mid-row: skip to the row close,
+    // end_row throws the buffered fields away.
+    if sink.row_rejected() {
+        let after = find_row_close(bytes, cur, row_tag, regions);
+        sink.end_row();
+        return Ok(Flow::At(after));
+    }
 }
+sink.end_row();
 ```
 
-**Adaptive strategy:** If the predicate column appears late (> 4/5 of columns),
-buffering is a net loss. The engine switches to direct push + pop-on-reject.
+Two things worth knowing when combining this with other features:
+
+- `wants()` returns `true` for predicate columns even when they are
+  projected out of the output, because the engine needs their values to
+  evaluate the filter. They are parsed, used, and dropped at `finish()`.
+- Buffering is why `Cow::Borrowed` values must borrow from the chunk, not
+  from a temporary: the engine may hold a value past the point where your
+  per-field temporary is gone (see
+  [Parser: Cow::Borrowed](parser.md#1-use-cowborrowed-for-non-entity-text)).
+
+**Adaptive strategy:** buffering only pays when the predicate resolves
+early. The engine records the predicate column's ordinal on the first row;
+if it appears late (beyond 4/5 of the columns), buffering whole rows is a
+net loss, so from row 2 onward the engine switches to direct push +
+pop-on-reject: values go straight into the columns, and a row that fails at
+`end_row` has its values popped back out. The adapter code above is
+unchanged; `row_rejected()` simply stays `false` mid-row in that mode.
 
 ## Example: minimal sink { #example-minimal-sink }
 
@@ -331,17 +472,15 @@ appear and this test fails.
 
 ## What the end user sees { #what-the-end-user-sees }
 
-The sink and its fast paths are engine internals. The user calls `read`
-once and receives a finished `pyarrow.Table`; the per-field method
-hierarchy (`put_field_at`, `put_field_resolved`, ...) only shows up as
-throughput:
+The sink and its fast paths are engine internals. The user calls
+`to_arrow()` once and receives a finished `pyarrow.Table`; the per-field
+method hierarchy (`put_field_at`, `put_field_resolved`, ...) only shows up
+as throughput:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # begin_row/put_field/end_row have already run; this is a plain Arrow table.
-table = rypipe.read("sample.log", format="log")
+table = LogSource("sample.log").to_arrow()
 print(table.schema)
 ```

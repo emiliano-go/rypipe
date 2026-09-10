@@ -11,8 +11,9 @@ pub enum FieldType {
     Dictionary,
     /// Calendar date: days since the Unix epoch.
     Date32,
-    /// Point in time with an explicit unit.
-    Timestamp(TimeUnit),
+    /// Point in time with an explicit unit and an optional chrono format
+    /// string for parsing non-ISO input (e.g. `timestamp[ms,format=%Y%m%d]`).
+    Timestamp(TimeUnit, Option<Box<str>>),
     /// Fixed-precision decimal with given scale (default 18).
     Decimal128(u8),
 }
@@ -27,11 +28,7 @@ impl FieldType {
             "bool" | "boolean" => Some(FieldType::Boolean),
             "dictionary" => Some(FieldType::Dictionary),
             "date32" => Some(FieldType::Date32),
-            "timestamp" => Some(FieldType::Timestamp(TimeUnit::Microsecond)),
-            "timestamp[s]" => Some(FieldType::Timestamp(TimeUnit::Second)),
-            "timestamp[ms]" => Some(FieldType::Timestamp(TimeUnit::Millisecond)),
-            "timestamp[us]" | "timestamp[µs]" => Some(FieldType::Timestamp(TimeUnit::Microsecond)),
-            "timestamp[ns]" => Some(FieldType::Timestamp(TimeUnit::Nanosecond)),
+            s if s.starts_with("timestamp") => parse_timestamp_spec(s),
             "decimal128" => Some(FieldType::Decimal128(18)),
             s if s.starts_with("decimal128(") => {
                 let scale = s
@@ -46,10 +43,50 @@ impl FieldType {
     }
 }
 
+/// Parse a timestamp type spec: `timestamp`, `timestamp[unit]`, or
+/// `timestamp[unit,format=…]` (unit defaults to `us`; format is a chrono
+/// format string tried before the built-in ISO layouts).
+fn parse_timestamp_spec(s: &str) -> Option<FieldType> {
+    let rest = s.strip_prefix("timestamp")?;
+    if rest.is_empty() {
+        return Some(FieldType::Timestamp(TimeUnit::Microsecond, None));
+    }
+    let inner = rest.strip_prefix('[')?.strip_suffix(']')?;
+    let (unit_str, format) = match inner.split_once(',') {
+        Some((unit, opt)) => {
+            let fmt = opt.strip_prefix("format=")?;
+            if fmt.is_empty() {
+                return None;
+            }
+            (unit, Some(fmt))
+        }
+        None => {
+            if let Some(fmt) = inner.strip_prefix("format=") {
+                if fmt.is_empty() {
+                    return None;
+                }
+                ("us", Some(fmt))
+            } else {
+                (inner, None)
+            }
+        }
+    };
+    let unit = match unit_str {
+        "" | "us" | "µs" => TimeUnit::Microsecond,
+        "s" => TimeUnit::Second,
+        "ms" => TimeUnit::Millisecond,
+        "ns" => TimeUnit::Nanosecond,
+        _ => return None,
+    };
+    let format: Option<Box<str>> =
+        format.and_then(|f| if f.is_empty() { None } else { Some(f.into()) });
+    Some(FieldType::Timestamp(unit, format))
+}
+
 /// A compiled execution plan that controls field renaming, dropping,
 /// type assignment, dictionary encoding, row filtering, and column ordering.
 /// Default (empty) is a no-op.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ExecutionPlan {
     /// Map from raw field name to output column name.
     pub field_map: HashMap<String, String>,
@@ -74,6 +111,34 @@ pub struct ExecutionPlan {
     /// Auto-dict tuning: maximum dictionary size (distinct values) allowed for
     /// an upgrade. Defaults to `256` when `None`.
     pub dict_max_size: Option<usize>,
+    /// When true, a non-null value that fails to parse into its declared
+    /// `field_types` type aborts the parse with an error instead of silently
+    /// becoming null. Genuine nulls (missing fields) stay null regardless.
+    pub strict_types: bool,
+    /// Cap on the number of bounded-streaming batches/chunks. Defaults to
+    /// `MAX_SPLIT_CHUNKS` (100,000) when `None`.
+    pub max_split_chunks: Option<usize>,
+    /// Optional row observer; hooks fire from parse threads during the read.
+    pub observer: Option<std::sync::Arc<dyn crate::RowObserver>>,
+}
+
+impl std::fmt::Debug for ExecutionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutionPlan")
+            .field("field_map", &self.field_map)
+            .field("drop_fields", &self.drop_fields)
+            .field("field_types", &self.field_types)
+            .field("dictionary_columns", &self.dictionary_columns)
+            .field("filter", &self.filter)
+            .field("schema_order", &self.schema_order)
+            .field("auto_dict", &self.auto_dict)
+            .field("dict_threshold", &self.dict_threshold)
+            .field("dict_max_size", &self.dict_max_size)
+            .field("strict_types", &self.strict_types)
+            .field("max_split_chunks", &self.max_split_chunks)
+            .field("observer", &self.observer.is_some())
+            .finish()
+    }
 }
 
 impl ExecutionPlan {
@@ -181,6 +246,26 @@ impl ExecutionPlan {
         self
     }
 
+    /// Enable strict typing: a non-null value that cannot be parsed into its
+    /// `field_types`-declared type becomes an error at `finish()` instead of
+    /// a silent null.
+    pub fn with_strict_types(mut self, yes: bool) -> Self {
+        self.strict_types = yes;
+        self
+    }
+
+    /// Override the bounded-streaming split cap (default 100,000 chunks).
+    pub fn with_max_split_chunks(mut self, cap: usize) -> Self {
+        self.max_split_chunks = Some(cap);
+        self
+    }
+
+    /// Attach a row observer; hooks fire from parse threads during the read.
+    pub fn with_observer(mut self, observer: std::sync::Arc<dyn crate::RowObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     /// Determine the storage type for an output column name.
     pub fn column_type(&self, name: &str) -> FieldType {
         if let Some(ft) = self.field_types.get(name) {
@@ -244,7 +329,8 @@ impl ExecutionPlan {
                 | FilterPredicate::Length { field, .. }
                 | FilterPredicate::Contains { field, .. }
                 | FilterPredicate::IsNull { field, .. }
-                | FilterPredicate::IsType { field, .. } => ren(plan, field) == resolved,
+                | FilterPredicate::IsType { field, .. }
+                | FilterPredicate::Regex { field, .. } => ren(plan, field) == resolved,
                 FilterPredicate::Always(_) => false,
                 FilterPredicate::Compare {
                     field_a, field_b, ..
@@ -386,19 +472,16 @@ pub enum FilterPredicate {
         value: String,
     },
     /// Keep row if `field_value.contains(value)`.
-    Contains {
-        field: String,
-        value: String,
-    },
+    Contains { field: String, value: String },
     /// Keep row if the field is null or missing.
-    IsNull {
-        field: String,
-    },
+    IsNull { field: String },
     /// Keep row if the field is of the given type (e.g., Int64, Float64, String).
     IsType {
         field: String,
         field_type: FieldType,
     },
+    /// Keep row if `field_value` matches the regular expression.
+    Regex { field: String, re: RegexSpec },
     /// Keep row if both sub-predicates pass. Short-circuits on the first
     /// failure.
     And(Box<FilterPredicate>, Box<FilterPredicate>),
@@ -407,6 +490,36 @@ pub enum FilterPredicate {
     Or(Box<FilterPredicate>, Box<FilterPredicate>),
     /// Keep row if the sub-predicate fails.
     Not(Box<FilterPredicate>),
+}
+
+/// A compiled regex plus its pattern. Equality and debug output use the
+/// pattern string; the compiled form is the execution representation.
+#[derive(Clone)]
+pub struct RegexSpec {
+    pub pattern: String,
+    pub compiled: regex::Regex,
+}
+
+impl RegexSpec {
+    pub fn new(pattern: impl Into<String>) -> std::result::Result<Self, regex::Error> {
+        let pattern = pattern.into();
+        let compiled = regex::Regex::new(&pattern)?;
+        Ok(Self { pattern, compiled })
+    }
+}
+
+impl std::fmt::Debug for RegexSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegexSpec")
+            .field("pattern", &self.pattern)
+            .finish()
+    }
+}
+
+impl PartialEq for RegexSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
 }
 
 impl FilterPredicate {
@@ -571,7 +684,13 @@ impl FilterPredicate {
                     None => false,
                 }
             }
-            FilterPredicate::Replace { field, old, new, op, value } => {
+            FilterPredicate::Replace {
+                field,
+                old,
+                new,
+                op,
+                value,
+            } => {
                 let actual = get_value(columns, field_index, field, plan, row_index);
                 match actual {
                     Some(s) => {
@@ -602,6 +721,13 @@ impl FilterPredicate {
             FilterPredicate::IsNull { field } => {
                 let actual = get_value(columns, field_index, field, plan, row_index);
                 actual.is_none()
+            }
+            FilterPredicate::Regex { field, re } => {
+                let actual = get_value(columns, field_index, field, plan, row_index);
+                match actual {
+                    Some(s) => re.compiled.is_match(s.as_ref()),
+                    None => false,
+                }
             }
             FilterPredicate::IsType { field, field_type } => {
                 let resolved = resolve(field, plan);
@@ -761,7 +887,8 @@ fn pred_ordinal(
         | FilterPredicate::Length { field, .. }
         | FilterPredicate::Contains { field, .. }
         | FilterPredicate::IsNull { field, .. }
-        | FilterPredicate::IsType { field, .. } => field_index
+        | FilterPredicate::IsType { field, .. }
+        | FilterPredicate::Regex { field, .. } => field_index
             .get(resolve(field, plan))
             .copied()
             .unwrap_or(usize::MAX),
@@ -783,5 +910,45 @@ fn pred_ordinal(
             pred_ordinal(a, field_index, plan).min(pred_ordinal(b, field_index, plan))
         }
         FilterPredicate::Not(inner) => pred_ordinal(inner, field_index, plan),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timestamp_spec_plain() {
+        assert_eq!(
+            FieldType::from_str("timestamp"),
+            Some(FieldType::Timestamp(TimeUnit::Microsecond, None))
+        );
+        assert_eq!(
+            FieldType::from_str("timestamp[ns]"),
+            Some(FieldType::Timestamp(TimeUnit::Nanosecond, None))
+        );
+    }
+
+    #[test]
+    fn test_timestamp_spec_format() {
+        assert_eq!(
+            FieldType::from_str("timestamp[ms,format=%Y%m%d %H:%M]"),
+            Some(FieldType::Timestamp(
+                TimeUnit::Millisecond,
+                Some("%Y%m%d %H:%M".into())
+            ))
+        );
+        // Unit omitted: defaults to microseconds.
+        assert_eq!(
+            FieldType::from_str("timestamp[format=%d/%m/%Y]"),
+            Some(FieldType::Timestamp(
+                TimeUnit::Microsecond,
+                Some("%d/%m/%Y".into())
+            ))
+        );
+        // Unknown unit or unknown option key: rejected.
+        assert_eq!(FieldType::from_str("timestamp[fortnights]"), None);
+        assert_eq!(FieldType::from_str("timestamp[us,color=red]"), None);
+        assert_eq!(FieldType::from_str("timestamp[us,format=]"), None);
     }
 }

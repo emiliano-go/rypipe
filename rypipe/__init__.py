@@ -32,6 +32,7 @@ from typing import Any, Iterable, Iterator
 import _rypipe
 
 from .source import Adapter, Source
+from .expr import col
 from .pipeline import Pipeline
 from .stages import (
     CastTypes,
@@ -64,6 +65,7 @@ __all__ = [
     "RenameFields",
     "DropFields",
     "CastTypes",
+    "col",
     "FilterRows",
     "FilterRowsAny",
     "FilterRowsAll",

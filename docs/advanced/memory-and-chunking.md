@@ -1,12 +1,16 @@
 # Memory and chunking { #memory-and-chunking }
 
-`rypipe` tries to parse as fast as the hardware allows while staying inside a memory budget. Two knobs control that trade-off:
+`rypipe` parses as fast as the hardware allows while staying inside a memory budget. Two knobs control that trade-off:
 
-- `memory`: maximum bytes the parser should hold in flight. A string like `"512MiB"` is parsed into bytes.
-
-Unit handling depends on the API layer. `rypipe` itself accepts `B`, `KB`, `MB`, `GB`, `TB` (decimal, 1000-based) and `KiB`, `MiB`, `GiB`, `TiB` (binary, 1024-based), or a plain integer number of bytes. Adapters may parse strings differently: `crxml` accepts `B`/`KB`/`MB`/`GB`/`TB` with 1024-based multipliers (case-insensitive, no space before the unit), so `"64MiB"` is rejected there. Check your adapter's documentation.
-
-- `chunks`: number of chunks for parallel mode. More chunks improve load balancing but increase scheduling overhead.
+- `memory`: the maximum bytes the parser holds in flight. Pass a plain
+  integer (bytes) or a string with a unit. `rypipe` understands `B`, `KB`,
+  `MB`, `GB`, `TB` (decimal, 1000-based) and `KiB`, `MiB`, `GiB`, `TiB`
+  (binary, 1024-based). Adapters may parse strings differently: `crxml`
+  accepts the same units with 1024-based multipliers throughout
+  (case-insensitive, no space before the unit), so `KB` means 1024 bytes
+  there, not 1000. Check your adapter's documentation.
+- `chunks`: number of chunks for parallel mode. More chunks improve load
+  balancing but increase scheduling overhead.
 
 This page explains how `BoundedExecutor` enforces the budget and how to size chunks for files larger or smaller than RAM.
 
@@ -18,7 +22,10 @@ This page explains how `BoundedExecutor` enforces the budget and how to size chu
 2. Estimates `bytes_per_row` from `Splitter::estimate_bytes_per_row`.
 3. Computes `rows_per_batch` from the budget.
 4. Splits the file into batches sized to fit the memory budget, capped at 100,000
-   split points as an internal safeguard against pathological chunk counts.
+   split points by default. The cap is a safeguard against pathological chunk
+   counts, and it is configurable via `max_split_chunks` on the plan. Raise it
+   for very large files with small budgets: once the required batch count
+   exceeds the cap, each batch grows past the budget and peak RSS follows.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates.
 
@@ -90,7 +97,7 @@ If the file is small but the parser is slow (for example, complex XML), parallel
 ## Summary { #summary }
 
 - Use `memory` to cap builder storage; leave headroom for export and downstream work.
-- `BoundedExecutor` derives `rows_per_batch` from the budget and the splitter's `estimate_bytes_per_row`, and caps the batch count at 100,000 split points.
+- `BoundedExecutor` derives `rows_per_batch` from the budget and the splitter's `estimate_bytes_per_row`, and caps the batch count at 100,000 split points (`max_split_chunks` overrides the cap).
 - Start with `chunks = 4 * physical_cores` and tune by measurement.
 - Reduce the budget when row size variance is high.
 - Use stream mode for files larger than RAM; use columnar mode for small files.

@@ -58,7 +58,7 @@
 - [Storage and export](https://rypipe.emiliano-go.com/architecture/storage/): Arrow export, null handling, compare filter
 - [Schema](https://rypipe.emiliano-go.com/architecture/schema/): FrozenSchema, DiscoveryOpts, layout_signature caching
 - [Optimizations](https://rypipe.emiliano-go.com/architecture/optimizations/): Every optimization and why it matters
-- [Lambda compiler](https://rypipe.emiliano-go.com/architecture/lambda-compiler/): Compiling Python lambdas to native filters
+- [Expression filters](https://rypipe.emiliano-go.com/architecture/expressions/): Fusable filter predicates built with col()
 
 ## Reference
 - [Python API](https://rypipe.emiliano-go.com/reference/python-api/): rypipe.read, Source, Adapter, Pipeline, stages, sinks, exceptions

@@ -22,7 +22,7 @@ source = MyAdapter(
 )
 ```
 
-The Python `schema` kwarg maps to `ExecutionPlan::schema_order` on the Rust side. It is a **projection + order declaration**: the output contains exactly the listed columns, in the listed order. With a declared schema, the engine does not need to discover column names, and fields in the data that are not listed are skipped during parsing — `wants()`/`resolve()` reject them, so adapters never scan or decode them. Listed columns that are absent from the data come out null-filled; extra/unknown fields are ignored, not an error.
+The Python `schema` kwarg maps to `ExecutionPlan::schema_order` on the Rust side. It is a **projection + order declaration**: the output contains exactly the listed columns, in the listed order. With a declared schema, the engine does not need to discover column names, and fields in the data that are not listed are skipped during parsing: `wants()`/`resolve()` reject them, so adapters never scan or decode them. Listed columns that are absent from the data come out null-filled; extra/unknown fields are ignored, not an error.
 
 ## Stable column order across chunks { #stable-column-order-across-chunks }
 
@@ -59,10 +59,38 @@ Supported type strings (as accepted by `FieldType::from_str`):
 | `dictionary` | `FieldType::Dictionary` | Dictionary encoding; equivalent to listing the column in `dictionary_columns`. |
 | `date32` | `FieldType::Date32` | ISO dates (`YYYY-MM-DD`) stored as days since the Unix epoch. |
 | `timestamp`, `timestamp[s]`, `timestamp[ms]`, `timestamp[us]`, `timestamp[ns]` | `FieldType::Timestamp(unit)` | ISO-8601 timestamps stored as integers in the given unit (default µs). |
+| `timestamp[unit,format=…]` | `FieldType::Timestamp(unit, format)` | Custom chrono format tried before the ISO layouts, e.g. `timestamp[ms,format=%Y%m%d %H:%M]`. Unit may be omitted: `timestamp[format=%d/%m/%Y]`. |
 | `decimal128`, `decimal128(N)` | `FieldType::Decimal128(scale)` | Fixed-precision decimal; default scale 18, or `N` when given. |
 
 There are no `str`, `int`, or `float` aliases; an unknown type string raises
 `PlanError` at construction time.
+
+### Null and malformed values { #null-and-malformed-values }
+
+Parse-time casting is lenient by design:
+
+- A field that is missing from a row (or null in the data) comes out null,
+  regardless of the declared type. `field_types` never rejects nullability.
+- A value that does not parse as the declared type (say `"abc"` in an
+  `int64` column) also comes out null. The row is kept, no error is raised.
+
+This keeps dirty real-world files parseable, but it means a typo'd column
+or a format change can silently turn a whole column into nulls. Pass
+`strict_types=True` to make malformed values an error instead:
+
+```python
+source = MyAdapter(
+    "data.log",
+    field_types={"amount": "float64"},
+    strict_types=True,   # "abc" in amount raises instead of becoming null
+)
+```
+
+Under `strict_types`, the first value that fails to parse into its declared
+type aborts the read with an error naming the column, the value, the
+declared type, and the row index. Missing or null fields are still allowed;
+strict mode is about malformed data, not nullability. The default is
+`False`, and a fused `CastTypes` stays lenient either way.
 
 `field_types={"status": "dictionary"}` and `dictionary_columns=["status"]` are
 two spellings of the same storage decision; prefer `dictionary_columns` (or

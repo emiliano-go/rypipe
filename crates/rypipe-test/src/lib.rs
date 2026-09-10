@@ -72,8 +72,8 @@ impl RecordParser for KeyValueParser {
     }
 
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> rypipe_core::Result<()> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
 
         for line in text.lines() {
             if line.is_empty() {
@@ -174,33 +174,33 @@ pub fn assert_batches_equal(
 pub mod fixtures {
     /// Malformed UTF-8 sequences that should be rejected or handled gracefully.
     pub const MALFORMED_UTF8: &[&[u8]] = &[
-        &[0xFF],                         // Single invalid byte
-        &[0xFE],                         // Another invalid byte
-        &[0xC0, 0xAF],                   // Overlong encoding
-        &[0xE0, 0x80, 0x80],            // Overlong 3-byte
-        &[0xF0, 0x80, 0x80, 0x80],      // Overlong 4-byte
-        &[0xED, 0xA0, 0x80],            // Surrogate half
-        b"\xC3\xA9",                     // Valid: é
-        b"\xE2\x82\xAC",                // Valid: €
+        &[0xFF],                   // Single invalid byte
+        &[0xFE],                   // Another invalid byte
+        &[0xC0, 0xAF],             // Overlong encoding
+        &[0xE0, 0x80, 0x80],       // Overlong 3-byte
+        &[0xF0, 0x80, 0x80, 0x80], // Overlong 4-byte
+        &[0xED, 0xA0, 0x80],       // Surrogate half
+        b"\xC3\xA9",               // Valid: é
+        b"\xE2\x82\xAC",           // Valid: €
     ];
 
     /// Nested quote patterns that commonly appear in CSV-like formats.
     pub const NESTED_QUOTES: &[&str] = &[
-        r#""field""#,                     // Simple quoted field
-        r#""field with spaces""#,         // Quoted with spaces
-        r#""field,""with""quotes""#,      // Nested quotes
-        r#""field\nwith\nnewlines""#,     // Newlines in quotes
-        r#""field\twith\ttabs""#,        // Tabs in quotes
+        r#""field""#,                 // Simple quoted field
+        r#""field with spaces""#,     // Quoted with spaces
+        r#""field,""with""quotes""#,  // Nested quotes
+        r#""field\nwith\nnewlines""#, // Newlines in quotes
+        r#""field\twith\ttabs""#,     // Tabs in quotes
     ];
 
     /// Edge cases for empty and whitespace-only values.
     pub const EMPTY_VALUES: &[&str] = &[
-        "",                               // Empty string
-        " ",                              // Single space
-        "  ",                             // Multiple spaces
-        "\t",                             // Tab
-        "\n",                             // Newline
-        "\r\n",                           // CRLF
+        "",     // Empty string
+        " ",    // Single space
+        "  ",   // Multiple spaces
+        "\t",   // Tab
+        "\n",   // Newline
+        "\r\n", // CRLF
     ];
 
     /// Very long column names that test buffer limits.

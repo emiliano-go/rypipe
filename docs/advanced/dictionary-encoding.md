@@ -11,6 +11,25 @@ Arrow dictionaries store string values as integer indices into a separate value 
 - an `offsets: Vec<i32>` byte offsets into `data` for each entry;
 - an `index: FxHashMap<Box<str>, i32>` lookup from value to code.
 
+For a `status` column with rows `["active", "pending", "active", null, "active"]`:
+
+```
+row values    "active"   "pending"   "active"     null     "active"
+                 │           │           │          │          │
+                 ▼           ▼           ▼          ▼          ▼
+codes         [    0    ,     1     ,    0    ,   null  ,    0    ]   i32 per row
+
+index          "active"  ──► 0        FxHashMap<Box<str>, i32>
+               "pending" ──► 1        built on first sight of each value
+
+offsets        [0, 6, 13]             byte range of each entry in data
+data           "activepending"        every value stored once, contiguous
+```
+
+Reading row `i` means: take `codes[i]`, slice `data[offsets[code]..offsets[code+1]]`.
+Writing a value means: look it up in `index` (one hash probe), or append it
+to `data`/`offsets` and insert it into `index` on first sight.
+
 On Arrow export, these become a `DictionaryArray` with `Int32` indices and a `StringArray` dictionary. The layout is exactly what Arrow compute kernels expect, so downstream filters and group-by operations can use the encoded form directly.
 
 ## Explicit `dictionary_columns` { #explicit-dictionary_columns }

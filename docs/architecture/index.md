@@ -11,16 +11,18 @@ dive into the subpages for the component you care about.
 
 ## Pages { #pages }
 
-| Page | Lines | Focus |
-|------|-------|-------|
+| Page | Focus |
+|------|-------|
 | [Engine](./engine.md) | TableBuilder: row handling, dirty tracking, column dispatch |
 | [Columnar storage](./columnar.md) | StrColumn, ColumnBuilder variants, dictionary, promotions |
 | [Execution plan](./plan.md) | ExecutionPlan, FieldType, FilterPredicate trees |
+| [Expressions](./expressions.md) | col/Predicate expression API for filter pushdown |
 | [Execution](./execution.md) | Pipeline, Parallel, Bounded, InputBuffer |
 | [Decoder API](./decoder.md) | Splitter, RecordParser, ColumnarSink |
 | [Data flow](./data-flow.md) | Diagrams for single, parallel, bounded modes |
 | [Optimizations](./optimizations.md) | Every optimization and why it matters |
 | [Storage and export](./storage.md) | Arrow export, null handling, compare filter |
+| [Schema](./schema.md) | FrozenSchema, discovery, layout signature caching |
 
 ## Design philosophy { #design-philosophy }
 
@@ -49,7 +51,7 @@ input bytes
     |
     v
 +---------------------+  (ADAPTER) format specific
-|   Splitter          |  find_split_points, estimate_bytes_per_row
+|   Splitter          |  next_record_start, estimate_bytes_per_row
 +----------+----------+
            | Vec<Range<usize>>  (CORE) split_points_to_ranges
            v
@@ -90,7 +92,7 @@ typing, and Arrow logic in one place.
 |--------|---------------|
 | `value` | `Value<'a>` enum: Str(Cow), Int64, Float64, Bool, Date32, Timestamp, Null |
 | `plan` | ExecutionPlan, FieldType, FilterPredicate trees, CompareOp |
-| `columnar` | StrColumn, ColumnBuilder (7 variants), dictionary, promotions |
+| `columnar` | StrColumn, ColumnBuilder (8 variants), dictionary, promotions |
 | `engine` | TableBuilder with ColumnarSink impl, dirty bitmask, predicate-first |
 | `decoder` | Splitter, RecordParser, ColumnarSink traits, plan_chunk_count |
 | `pipeline` | Pipeline<S,P> wiring splitter + parser to TableBuilder |
@@ -109,7 +111,10 @@ See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `parallel_stream` | ParallelStreamingExecutor, discovery, ordered/unordered delivery |
 | `streaming` | StreamingBatchIterator: channel-based pull iterator |
 | `consumer` | BatchConsumer, CollectingConsumer, DiscardingConsumer |
-| `error` | Error enum (Utf8, Io, Plan, Merge, Arrow), Result type alias |
+| `error` | Error enum (Utf8, Io, Plan, Merge, Arrow, Parser, Lifetime), Result type alias |
+| `observer` | RowObserver trait for per-row callbacks |
+| `auto` | resolve_engine, AutoConfig, EngineMode: picks an execution mode |
+| `alloc_stats` | Allocation statistics (behind alloc-stats feature) |
 
 ### rypipe-python (PyO3 bindings) { #rypipe-python }
 
@@ -118,6 +123,7 @@ See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `lib.rs` | Extension module, exception types |
 | `plan_kwargs.rs` | Python kwargs to ExecutionPlan conversion |
 | `export.rs` | Arrow to PyArrow via C Data Interface |
+| `py_observer.rs` | PyObserver: Python-side RowObserver bridge |
 
 ## State and ownership { #state-and-ownership }
 
@@ -140,7 +146,7 @@ Every optimization has a test that verifies correctness:
 - Splitter tests: monotonic points, coverage, comment/CDATA rejection.
 - Engine tests: extend, last-write-wins, rename, drop, filter, typed columns.
 - Columnar tests: push/pop, split_off, arrow export, dictionary upgrade.
-- Integration tests: whole-file parse == N-chunk parse for N in {1, 2, 7, 64}.
+- Integration tests: single, parallel, and streaming parses of the same input produce identical batches.
 
 ## Next steps { #next-steps }
 
@@ -152,6 +158,8 @@ Every optimization has a test that verifies correctness:
 - [Optimizations](./optimizations.md) for every change from the original design
 - [Storage and export](./storage.md) for Arrow type mapping and null handling
 - [Execution plan](./plan.md) for pushdown plans and filter predicates
+- [Expressions](./expressions.md) for the col/Predicate filter expression API
+- [Schema](./schema.md) for frozen schemas, discovery, and layout caching
 
 ## Key invariants { #key-invariants }
 

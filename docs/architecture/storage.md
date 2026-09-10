@@ -13,11 +13,15 @@ path. See [Columnar storage](./columnar.md) for the storage types themselves.
 | Float64(PrimColumn<f64>) | Float64 | Float64Array |
 | Boolean(PrimColumn<bool>) | Boolean | BooleanArray (BooleanBuffer) |
 | Date32(PrimColumn<i32>) | Date32 | Date32Array |
-| Timestamp(unit, PrimColumn<i64>) | Timestamp(unit, None) | PrimitiveArray<TimestampXType> |
-| Dictionary { codes, dict, index } | Dictionary(Int32, Utf8) | DictionaryArray<Int32Type> |
+| Timestamp(TimeUnit, Option<Box<str>>, PrimColumn<i64>) | Timestamp(unit, None) | PrimitiveArray<TimestampXType> |
+| Decimal128(u8, PrimColumn<i128>) | Decimal128(38, scale) | Decimal128Array |
+| Dictionary { codes, data, offsets, index } | Dictionary(Int32, Utf8) | DictionaryArray<Int32Type> |
 
 `arrow_datatype()` maps each variant to its Arrow type. `to_arrow_array()`
-builds the native array via zero-copy `std::mem::take` on internal buffers.
+moves internal buffers into the native array via `std::mem::take` (zero-copy
+for `StrColumn` and Dictionary). `PrimColumn<T>` exports collect into a fresh
+`ScalarBuffer`, and `to_arrow_bool` repacks into a `BooleanBuffer`, so
+primitive and boolean exports copy.
 
 ## Null handling { #null-handling }
 
@@ -42,9 +46,12 @@ of the unified type. This is a block fill, not per-cell.
 
 ### Value::Null and unparseable strings { #valuenull-and-unparseable-strings }
 
-Both become `None` in the column builder. `push_str` returns `None` for
-unparseable strings (e.g., "abc" into Int64 column). `Value::Null` is
-explicitly null.
+Both become `None` in the column builder. `push_str` returns `()`; the column
+stores `None` for unparseable strings (e.g., "abc" into Int64 column).
+`Value::Null` is explicitly null. Exception: with `plan.strict_types` set,
+a non-null string that fails `parses_as` for the declared `field_types` type
+is recorded as a strict violation and surfaced as an error by `finish()` (see
+the finish path below) instead of becoming `None`.
 
 ## String arena { #string-arena }
 
@@ -58,8 +65,9 @@ offsets: [0,     5,          10]             ← byte boundaries
 ### push { #push }
 
 `push(Some("hello"))` appends 5 bytes to `data`, pushes `data.len()` (=5)
-to `offsets`, pushes `true` to validity. `push(None)` pushes 0 to offsets
-and `false` to validity. No per-cell allocation beyond arena growth.
+to `offsets`, pushes `true` to validity. `push(None)` appends nothing to
+`data`, so the current offset is repeated, and pushes `false` to validity.
+No per-cell allocation beyond arena growth.
 
 ### pop { #pop }
 
@@ -69,8 +77,9 @@ for last-write-wins (duplicate field in same row) and row rejection.
 ### append { #append }
 
 Merges another column by base-shifting offsets: `base = self.data.len()`.
-Then extends `self.offsets` with `other.offsets[1..].map(|o| o + base)`.
-O(n) in offsets, not in bytes.
+Then extends `self.offsets` with `other.offsets[1..].map(|o| o + base)` and
+copies `other.data` via `extend_from_slice`. O(n) in offsets plus O(n) in
+bytes for the arena memcpy.
 
 ### Capacity { #capacity }
 
@@ -84,14 +93,24 @@ When a `Value::Str` is pushed to a typed column, the string is parsed:
 
 - **Int64**: `lexical::parse::<i64, _>(s.as_bytes())`: fast, SIMD-optimized
 - **Float64**: `lexical::parse::<f64, _>(s.as_bytes())`
-- **Boolean**: `s.parse::<bool>()`: accepts "true"/"false"/"1"/"0"
+- **Boolean**: `s.parse::<bool>()`: accepts only "true"/"false"; other
+  spellings become null (the wider "1"/"0"/"yes"/"no" set is used only by
+  the `is_type_at` type-detection path)
 - **Date32**: `chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")` minus Unix epoch
-- **Timestamp**: tries `"%Y-%m-%dT%H:%M:%S%.f"`, then
-  `"%Y-%m-%d %H:%M:%S%.f"`, then bare date as midnight. Converts via `and_utc()` to the target TimeUnit.
+- **Decimal128**: `parse_decimal128(s, scale)`: sign, integer, and fraction
+  parts are combined into a scaled `i128`; extra fraction digits beyond
+  `scale` are truncated
+- **Timestamp**: if the column declares `format=`, the custom chrono format
+  is tried first (as `NaiveDateTime`, then `NaiveDate` at midnight). Then
+  the built-ins: `"%Y-%m-%dT%H:%M:%S%.f"`, `"%Y-%m-%d %H:%M:%S%.f"`, and
+  bare date as midnight. Converts via `and_utc()` to the target TimeUnit.
 
-Unparseable strings become `None`. Cross-type `Value::Int64` into `Float64`
-widens; into `String` stringifies; into `Dictionary` encodes. Other
-cross-type cases become `None`.
+Unparseable strings become `None`. Cross-type conversions mostly succeed:
+`Value::Int64` into `Float64` widens, into `String` stringifies, into
+`Dictionary` encodes; `Float64` into `Int64` truncates; `Bool` converts into
+`String`/`Dictionary`; `Date32` and `Timestamp` convert into
+`Int64`/`Float64`/`String`/`Dictionary`. Cases with no defined conversion
+become `None`.
 
 ## Dictionary { #dictionary }
 
@@ -130,21 +149,33 @@ Used in `merge::extend` and `engines_to_record_batches`.
 
 `TableBuilder::finish()` does:
 
-1. **normalize**: truncate any column with `len > row_count` (partial row
+1. **Deferred errors**: returns `Err` if `unknown_error` (frozen-schema
+   violation) or `strict_error` (`strict_types` violation) was recorded
+   during ingestion.
+2. **Observer hook**: calls `observer.on_chunk_finished(accepted + rejected,
+   accepted, rejected)` when the plan declares an observer.
+3. **normalize**: truncate any column with `len > row_count` (partial row
    from truncated chunk), clear `row_dirty`. Idempotent.
-2. Early return with `RecordBatch::new_empty` if `column_order` is empty.
-3. **auto_dict_upgrade**: if `plan.auto_dict`, iterate columns and upgrade
+4. Early return with `RecordBatch::new_empty` if `column_order` is empty.
+5. **auto_dict_upgrade**: if `plan.auto_dict`, iterate columns and upgrade
    String builders with low cardinality to Dictionary. Threshold: 5% distinct
-   ratio, max 256 entries, min 512 rows.
-4. **sort_columns**: reorder `column_order` by `schema_order` rank. Does
-   not reorder `columns` or `field_index`; those stay insertion-ordered.
-5. **Build fields + arrays**: iterate `column_order`, look up each builder
+   ratio, max 256 entries, min 512 rows. The distinct cap is floored at 16
+   entries (`(len * ratio).max(16)`) so tiny columns can still upgrade.
+6. **Schema projection** (when `schema_order` is non-empty): build fields and
+   arrays directly from `schema_order`. Columns declared but absent from the
+   data are null-filled; non-schema columns are projected out. `sort_columns`
+   is not called on this branch.
+7. **sort_columns** (only when `schema_order` is empty, where it no-ops):
+   reorder `column_order` by `schema_order` rank. Does not reorder `columns`
+   or `field_index`; those stay insertion-ordered.
+8. **Build fields + arrays**: iterate `column_order`, look up each builder
    via `field_index`, call `arrow_datatype` and `to_arrow_array`.
-6. **Schema::new(fields)** + **RecordBatch::try_new**.
+9. **Schema::new(fields)** + **RecordBatch::try_new**.
 
 No borrowed bytes outlive `finish`. `StrColumn` owns its data and numeric
-Vecs are owned. The `to_arrow_array` methods use `std::mem::take` to move
-internal buffers into Arrow arrays (zero-copy export).
+Vecs are owned. `to_arrow_array` moves string and dictionary buffers into
+Arrow arrays via `std::mem::take` (zero-copy); primitive exports collect
+into fresh buffers.
 
 ## Compare filter reapplication { #compare-filter-reapplication }
 
@@ -157,7 +188,7 @@ This exists for callers that filter an already-built `RecordBatch` (e.g.,
 after merging chunks). It is not the per-row filter. Per-row
 `FilterPredicate::check` is authoritative; `apply_compare_filter` only
 reapplies pure Compare/And via `compare_columns` (casts to Float64 or Utf8,
-then `gt`/`lt`/`eq`/`neq`/`and`) and `filter_record_batch`.
+then `gt`/`lt`/`gt_eq`/`lt_eq`/`eq`/`neq`/`and`) and `filter_record_batch`.
 
 ## Memory layout { #memory-layout }
 
@@ -168,7 +199,8 @@ For a 533 MB XML file with 480K rows and 10 columns:
 - **PrimColumn<f64>**: ~3.8 MB data + ~60 KB validity
 - **Dictionary**: ~500 entries × ~20 bytes = ~10 KB dict + ~1.9 MB codes
 - **Total per chunk** (16 chunks): ~15 MB per chunk, ~240 MB total
-- **Arrow export**: moves buffers, no additional allocation
+- **Arrow export**: string and dictionary buffers move (zero-copy);
+  primitive exports collect into fresh buffers
 
 The arena-based `StrColumn` is the dominant memory consumer. For files with
 many unique strings, the arena can grow to 2-3× the raw data size. For

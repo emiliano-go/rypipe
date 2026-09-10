@@ -161,6 +161,13 @@ Properties:
 - **`exact = false`**: sampled discovery may miss rare columns.
 - **Order**: follows discovery order (file order, then document order).
 
+### Construction: partial explicit schema { #construction-partial-schema }
+
+`FrozenSchema::from_partial_plan` is a third mode: like `from_plan`, but
+with `exact = false`. Declared columns keep their specified order; fields
+in the file that are not listed are appended in discovery order instead of
+causing an error.
+
 ### Resolution: the hot path { #resolution-the-hot-path }
 
 `FrozenSchema::resolve` maps a raw field name to its output slot:
@@ -172,8 +179,12 @@ pub fn resolve(&self, raw_name: &str) -> Option<u32> {
 }
 ```
 
-This is called in the hot path for every field in every row. With
-`FxHashMap`, it costs ~15 cycles per probe (one hash, one comparison).
+`resolve` is used at schema boundaries (and in tests). The per-field hot
+path inside `TableBuilder` resolves names via `plan.resolve_field` plus a
+`field_index` hash probe (`resolve_and_slot`), and after the first row of a
+stable layout mostly bypasses hashing entirely via the `expect_slot`
+ordinal/memcmp fast path (`put_field_at`). An `FxHashMap` probe costs
+~15 cycles (one hash, one comparison).
 
 The `Option<u32>` return value:
 
@@ -227,12 +238,15 @@ impl Default for DiscoveryOpts {
 - Exact: every column is found
 - Cost: one I/O pass + parsing
 
-**Large files (>128 MiB)**:
+**Large files (>128 MiB)**: window count and size scale with file size
+(`dynamic_window_count` / `dynamic_window_size`):
 
-- Sample 16 windows of 2 MiB each (32 MiB total, ~6% of 533 MiB)
+- 128 MiB to 1 GiB: 16 windows of 2 MiB (32 MiB total)
+- 1 GiB to 10 GiB: 32 windows of 4 MiB (128 MiB total)
+- 10 GiB and up: 64 windows of 4 MiB (256 MiB total)
 - Windows are strided evenly through the file
 - Columns found in any window are included
-- Cost: ~5.3 ms on 16 threads (parallel sampling)
+- Cost: ~5.3 ms for a 533 MB file on 16 threads (parallel sampling)
 
 ### Accuracy { #accuracy }
 
@@ -245,7 +259,7 @@ typical CR XML exports:
 - A column appearing only in the last 1% of the file would be missed
 
 When a missed column is encountered at parse time, the engine raises
-`MergeError` with the message:
+`Error::Merge` with the message:
 
 ```
 unknown field "LateColumn" not in frozen schema (10 columns, exact=false);
@@ -367,12 +381,22 @@ that all columns from the `FrozenSchema` exist in the `TableBuilder`.
 
 ```rust
 pub fn ensure_schema(&mut self, schema: &FrozenSchema) -> Result<()> {
-    for (idx, name) in schema.column_names().iter().enumerate() {
-        if !self.column_names().contains(&name.to_string()) {
-            let ty = schema.column_types()[idx];
-            self.add_typed_column(name, ty, self.num_rows());
+    for (slot, name) in schema.column_names().iter().enumerate() {
+        if self.field_index.contains_key(name) {
+            continue; // already present
         }
+        let ty = schema.column_types()[slot].clone();
+        let col = ColumnBuilder::with_capacity(self.estimated_rows, &ty);
+        self.columns.push(col);
+        self.field_index.insert(name.to_string(), self.columns.len() - 1);
+        self.column_order.push(name.to_string());
     }
+    // Resize row_dirty bitmask to cover all columns.
+    let words = self.columns.len().div_ceil(64);
+    self.row_dirty.resize(words, 0);
+    // Freeze: any later field not in this schema is an unknown field
+    // and must hard-error on finish().
+    self.frozen = Some(Arc::new(schema.clone()));
     Ok(())
 }
 ```
@@ -380,12 +404,13 @@ pub fn ensure_schema(&mut self, schema: &FrozenSchema) -> Result<()> {
 Steps:
 
 1. Iterate over all columns in the schema.
-2. For each column not already in the builder:
-   a. Create a typed column builder for the correct `FieldType`.
-   b. Pre-fill with nulls up to the current row count.
-3. After this call, the builder has all declared columns.
+2. For each column not already in the builder, create a capacity-reserved
+   typed column builder for the correct `FieldType`. No rows are pre-filled:
+   `ensure_schema` runs before parsing, when the builder is empty.
+3. Freeze the schema on the builder so unknown fields hard-error at finish.
+4. After this call, the builder has all declared columns.
 
-### Why pre-fill with nulls? { #why-pre-fill-with-nulls }
+### Why pre-declare the columns? { #why-pre-fill-with-nulls }
 
 Consider a file where column "D" appears only in rows 500-1000. Without
 `ensure_schema`:
@@ -396,7 +421,8 @@ Consider a file where column "D" appears only in rows 500-1000. Without
 
 With `ensure_schema`:
 
-- Chunk 1: column "D" is added with 500 nulls
+- Chunk 1: column "D" exists as an empty builder; each row that lacks it is
+  null-filled per row by `finish_row`'s dirty-mask pass
 - Chunk 2: column "D" has values
 - At export time: batches have identical schemas
 
@@ -409,7 +435,7 @@ adds ~0.1 ms total (negligible vs parse time).
 
 `sort_columns` reorders the internal column list to match `schema_order`.
 Note: when `schema_order` is non-empty, `finish()` takes the projection
-path instead — it emits exactly the declared columns in the declared order
+path instead: it emits exactly the declared columns in the declared order
 (schema columns are pre-declared in `with_plan`, and any still missing are
 created null-filled), so `sort_columns` is effectively vestigial for the
 projection path.
@@ -421,24 +447,17 @@ pub fn sort_columns(&mut self) {
     if self.plan.schema_order.is_empty() {
         return;
     }
-
     let order = &self.plan.schema_order;
-    let mut indices: Vec<usize> = (0..self.columns.len()).collect();
-
-    indices.sort_by_key(|&i| {
-        let name = &self.column_names()[i];
-        order.iter().position(|n| n == name)
-            .unwrap_or(order.len() + i)
-    });
-
-    // Reorder columns and their metadata
-    self.reorder_columns(&indices);
+    let rank =
+        |name: &String| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
+    self.column_order.sort_by_key(rank);
 }
 ```
 
 Properties:
 
-- **Stable sort**: columns not in `schema_order` preserve relative order.
+- **Stable sort**: columns not in `schema_order` (key `usize::MAX`) preserve
+  relative order after the ordered ones.
 - **O(n log n)** where n = number of columns (typically <100).
 - **Called once**: at finish time, not per row.
 
@@ -446,12 +465,12 @@ Properties:
 
 Given columns `["D", "A", "C", "B"]` and `schema_order = ["A", "B", "C"]`:
 
-1. `["D", "A", "C", "B"]` with sort keys `[5, 0, 3, 1]`
-   - "D" not in schema_order -> key = 5 + 0 = 5
+1. `["D", "A", "C", "B"]` with rank keys `[usize::MAX, 0, 2, 1]`
+   - "D" not in schema_order -> key = `usize::MAX`
    - "A" at position 0 -> key = 0
    - "C" at position 2 -> key = 2
    - "B" at position 1 -> key = 1
-2. Sorted: `["A", "B", "C", "D"]`
+2. Sorted (stable): `["A", "B", "C", "D"]`
 
 ## Fast path vs merge path { #fast-path-vs-merge-path }
 
@@ -462,44 +481,56 @@ have identical schemas.
 
 Conditions:
 
-- `auto_dict` is false
-- All batches have identical schemas (guaranteed by `ensure_schema` +
-  `schema_order`)
+- `auto_dict` is false, and all chunks agree on column variant keys
+  (guaranteed by `ensure_schema` + `schema_order`), OR
+- `auto_dict` is true and schemas are consistent after a parallel per-chunk
+  `auto_dict_upgrade` (dictionaries are unified across chunks first when
+  needed)
 
 Behavior:
 
 - Each batch is exported independently in parallel
-- `engines_to_record_batches` builds one `RecordBatch` per chunk
-- No merge step needed
+- `engines_to_record_batches` builds one `RecordBatch` per chunk; it also
+  runs `unify_variants` / `promote_to_variant` to reconcile storage variants
+  across chunks before export
+- No sequential merge step needed
 - Throughput: ~4,980 MB/s on 533 MB
 
 ### Merge path (sequential export) { #merge-path }
 
 Conditions:
 
-- `auto_dict` is true, OR
-- Batches may have different schemas (auto discovery without `schema_order`)
+- Chunk schemas are inconsistent after upgrade (or inconsistent without
+  `auto_dict`): chunks disagree on a column's storage variant in a way the
+  per-chunk export cannot reconcile ahead of time
 
 Behavior:
 
-- Batches are merged sequentially via `extend`
-- `unify_variants` reconciles column types
-- `promote_to_variant` handles type mismatches
+- Batches are merged sequentially into one `TableBuilder` via `extend`
+- `merged.finish()` produces a single batch
 - Throughput: ~4,497 MB/s on 533 MB (-10%)
 
 ### Path selection { #path-selection }
 
+Simplified from `ParallelExecutor::parse`:
+
 ```rust
-fn select_export_path(
-    auto_dict: bool,
-    schemas_consistent: bool,
-) -> ExportPath {
-    if !auto_dict && schemas_consistent {
-        ExportPath::Fast
-    } else {
-        ExportPath::Merge
+if !plan.auto_dict && schemas_consistent(&engines) {
+    return engines_to_record_batches(engines, &plan);
+}
+if plan.auto_dict {
+    engines.par_iter_mut().for_each(|e| e.auto_dict_upgrade());
+    if schemas_consistent(&engines) {
+        unify_dictionaries_across_chunks(&mut engines);
+        return engines_to_record_batches(engines, &plan);
     }
 }
+// Merge path.
+let mut merged = TableBuilder::with_plan(...);
+for engine in engines {
+    merged.extend(engine)?;
+}
+Ok(vec![merged.finish()?])
 ```
 
 `schemas_consistent` checks that all engines agree on column variant keys.
@@ -534,42 +565,32 @@ Priority:
 
 This is called during `ensure_schema` to create the correct column builder.
 
-## UnknownFieldPolicy { #unknownfieldpolicy }
+## Unknown fields and strict types { #unknownfieldpolicy }
 
-When a field appears in the file but not in the schema, the engine needs to
-know what to do.
-
-```rust
-pub enum UnknownFieldPolicy {
-    /// Return an error (default).
-    Error,
-    /// Ignore the field, count occurrences, report at end.
-    Skip,
-}
-```
+The crate declares an `UnknownFieldPolicy` enum (`Error` / `Skip`) and
+re-exports it, but no code path currently reads it; it is reserved for
+future use. The actual behavior is fixed:
 
 ### Error behavior (default) { #error-behavior }
 
-With explicit schema (`exact = true`), unknown fields cause a hard error:
+With explicit schema (`exact = true`), unknown fields are recorded during
+parsing and cause a hard error at `finish()`:
 
 ```
-unknown field "LateColumn" not in frozen schema (10 columns, exact=false);
+unknown field "LateColumn" not in frozen schema (10 columns, exact=true);
 pass schema=[...] with full column list or use full-scan discovery
 ```
 
-This is the safe default: it prevents silent data loss.
+The same error with `exact=false` fires when sampled discovery missed a
+rare column (see [Accuracy](#accuracy)). This is the safe default: it
+prevents silent data loss. With a partial schema (`from_partial_plan`,
+`exact = false`), unknown fields are instead appended as new columns in
+discovery order.
 
-### Skip behavior { #skip-behavior }
-
-With `UnknownFieldPolicy::Skip`, unknown fields are ignored. The engine
-counts occurrences and reports at the end:
-
-```
-Warning: 3 unknown fields skipped (field_99, field_100, field_101)
-```
-
-Use this when the file may contain fields not in the schema and you want
-to process only the known fields.
+Unknown fields surface as `Error::Merge`. A related parse-time error mode
+is `strict_types`: when set, a non-null string value that does not parse
+as the declared `field_types` type is recorded and surfaced at `finish()`
+as `Error::Plan`.
 
 ## Integration with the pipeline { #integration-with-the-pipeline }
 
@@ -591,11 +612,12 @@ ExecutionPlan
     |         |
     |         +---> TableBuilder.ensure_schema (per chunk)
     |         |         |
-    |         |         +---> add_typed_column (per missing column)
+    |         |         +---> ColumnBuilder::with_capacity (per missing column)
+    |         |         +---> freeze schema on the builder
     |         |
     |         +---> sort_columns (at finish)
     |         |         |
-    |         |         +---> reorder columns to match schema_order
+    |         |         +---> stable-sort column_order to match schema_order
     |         |
     |         +---> engines_to_record_batches (fast path)
     |                   |
@@ -603,10 +625,16 @@ ExecutionPlan
     |
     +---> TableBuilder.push_field
               |
-              +---> schema.resolve(raw_name)
+              +---> plan.resolve_field(raw_name) + field_index probe
               |         |
               |         +---> Some(slot) -> put into column slot
               |         +---> None -> skip (dropped)
+              |
+              +---> expect_slot memcmp fast path (stable layout, row 2+)
+              |
+              +---> observer hooks (if plan.observer is set):
+              |         on_begin_row / on_put_field /
+              |         on_row_accepted / on_row_rejected
               |
               +---> column_type(name) -> typed builder
 ```
@@ -618,7 +646,7 @@ are rejected by `plan.resolve_field`, so `wants("unlisted_field")` returns
 `false` and the parser skips the field entirely (no scanning, no decoding).
 The wanted-column set (schema columns plus filter-referenced fields) is
 pre-declared in `TableBuilder::with_plan`, which makes the
-`wanted_mask`/`row_satisfied` short-circuit stable from the first row —
+`wanted_mask`/`row_satisfied` short-circuit stable from the first row, so
 adapters can byte-jump to the row close as soon as every wanted column has
 a value. At finish time the batch contains exactly the declared columns in
 the declared order; filter-only columns are projected out, and declared
@@ -657,10 +685,17 @@ During parsing:
 
 When `FilterRows` is used, the plan's `filter` is populated. During parsing:
 
-- After each row, the engine checks the predicate
-- If the row fails, all column values are popped (via `pop_row`)
-- If `field_types` is set, the predicate uses native comparison
-- If `field_types` is not set, the predicate falls back to string comparison
+- Predicate-first buffered evaluation: field values are buffered per row;
+  the predicate is evaluated as soon as its fields are seen
+  (`eval_predicate`), and at end of row the buffer is either committed to
+  the columns (`drain_buffered`) or discarded without touching them.
+- Adaptive fallback: when the predicate column's ordinal is >= 4/5 of the
+  column count, buffering is disabled (`buffer_worthwhile = false`) and the
+  engine falls back to direct push with pop-on-reject in `finish_row`
+  (`pop()` per column when the predicate fails).
+- Comparison flavor is per predicate: `Equal`/`NotEqual` are string-based;
+  `Compare`/`CompareLiteral` are typed using the columns' `field_types`,
+  with numeric promotion (Int64 vs Float64 compares as float).
 
 ## Performance budget { #performance-budget }
 
@@ -678,7 +713,7 @@ Without explicit schema:
 
 | Phase | Time | Notes |
 |-------|------|-------|
-| Discovery (parallel) | 5.3 ms | 16x2 MiB sampling. |
+| Discovery (parallel) | 5.3 ms | 16x2 MiB sampling at 533 MB; window count and size scale with file size. |
 | `from_discovered` | 0.01 ms | Apply renames/drops. |
 | `ensure_schema` | 0.1 ms | Same as above. |
 | `sort_columns` | 0.01 ms | Same as above. |
