@@ -64,11 +64,12 @@ See [Skip regions](../building-adapters/skip-regions.md) for the full interface.
 
 The default implementation handles everything:
 
-1. `plan_chunk_count` determines chunk count (2 MiB floor, thread caps)
-2. Nominal offsets at `bytes.len() * i / n`
-3. `par_iter` over nominals calling `next_record_start`
-4. Skip-region rejection via `in_skip_region`
-5. Dedup, sort, prepend 0, append `bytes.len()`
+1. Early return `vec![0, bytes.len()]` when `max_chunks <= 1` or input is empty
+2. `plan_chunk_count` determines chunk count (2 MiB floor, thread caps)
+3. Nominal offsets at `bytes.len() * i / n`
+4. `par_iter` over nominals calling `next_record_start`
+5. Skip-region rejection via `in_skip_region`
+6. Dedup, sort, prepend 0, append `bytes.len()`
 
 Override only with a measured reason. The default applies the 2 MiB floor
 that prevents sub-MB chunk collapse.
@@ -151,6 +152,8 @@ pub trait ColumnarSink {
 
 - **`needs_value()`**: `false` = locate-only (skip text extraction).
 - **`needs_resolve()`**: `false` = traverse-only (skip resolve).
+  `#[doc(hidden)]` and experimental: intended for benchmarking/profiling
+  harnesses, so do not rely on it in production adapters.
 - **`row_rejected()`**: `true` = filter rejected; scanner byte-jumps.
 
 ### Projection { #projection }
@@ -237,12 +240,32 @@ begin_row → [put_field × N] → end_row
         └── Undecided → continue buffering
 ```
 
-Adaptive: if predicate column is late (> 4/5 of columns), disable buffering.
+Adaptive: if the predicate column is late (`ordinal >= ncols * 4 / 5`), disable
+buffering. The check runs after the first committed row (earlier rows may not
+have created all columns yet) and prefers the frozen schema or `schema_order`
+column count over `columns.len()`, which is unreliable for sparse files.
 
 ### Thread safety { #thread-safety }
 
-`ColumnarSink` is `Send` but not `Sync`. Each chunk gets its own instance.
-The engine creates one `TableBuilder` per chunk and merges after completion.
+`ColumnarSink` declares no `Send`/`Sync` supertraits; the concrete
+`TableBuilder` is both `Send` and `Sync`. Each chunk gets its own instance.
+In the parallel executor's fast path (no `auto_dict`, schema-consistent
+chunks) each chunk's builder is exported as its own batch with no merge; the
+merge path only runs for `auto_dict` upgrades or schema-inconsistent chunks.
+Bounded and streaming executors emit batches incrementally via `split_off`
+and never run a final merge.
+
+### Observer hooks { #observer-hooks }
+
+An optional `plan.observer` (`RowObserver: Send + Sync`) receives hooks from
+`TableBuilder` during parsing: `on_begin_row`, `on_put_field`,
+`on_row_accepted`, `on_row_rejected`, and `on_chunk_finished`. All default to
+no-ops; implement only what you need. Two subtleties: values buffered by the
+predicate-first path fire `on_put_field` only when the row is drained
+(accepted), and on the late-predicate path values are pushed directly and
+popped on reject, so `on_put_field` can fire for a row that is later
+rejected (`on_row_rejected` still reports it). Hooks run on the parse hot
+path from whichever thread parses the chunk, so keep them cheap.
 
 ## Helper functions { #helper-functions }
 

@@ -104,10 +104,8 @@ The scan primitives are invisible by design. Whether your parser uses
 read; the primitives only show up as speed:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # No scan-related options exist; SIMD byte-search is purely internal.
-table = rypipe.read("sample.log", format="log")
+table = LogSource("sample.log").to_arrow()
 ```

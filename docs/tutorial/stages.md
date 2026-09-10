@@ -143,7 +143,9 @@ strings = src | FilterRows(field="Name", is_type="string")
 print(len(collect(strings)))  # 15
 ```
 
-`is_null=True` keeps rows where the field is null or missing. `is_type`
+`is_null=True` keeps rows where the field is null or missing; `is_null=False`
+does the opposite, keeping only rows where the field has a value, so it is
+the way to drop rows with nulls. `is_type`
 keeps rows where the field has the given type; valid types are `string`,
 `int64`, `float64`, `bool`, `dictionary`, `date32`, `timestamp`, and
 `decimal128`. Anything else raises a `ValueError`.
@@ -182,8 +184,8 @@ print(len(collect(not_active)))  # 3
 takes exactly one. They nest, so
 `FilterRowsAny(A, FilterRowsAll(B, FilterRowsNot(C)))` expresses
 `A or (B and not C)`. The inner filters must use a keyword form (constant,
-column comparison, `is_null`, or `is_type`); a plain callable cannot be
-combined this way and raises `ValueError`.
+column comparison, `is_null`, or `is_type`) or an expression predicate; a
+plain callable cannot be combined this way and raises `ValueError`.
 
 !!! tip
 
@@ -194,9 +196,53 @@ combined this way and raises `ValueError`.
 All three combinators are fusable: the whole tree is pushed into the Rust
 parse loop, exactly like a single keyword filter.
 
+### Regex filter { #filterrows-regex }
+
+Match a column against a regular expression with `op="regex"`. The pattern
+is searched (not anchored) against the string form of the value, and rows
+with a missing or null field are dropped:
+
+```python
+from crxml import CrystalXMLSource, FilterRows, collect
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+# Names that start with "A"
+a_names = src | FilterRows(field="Name", op="regex", value=r"^A")
+print(len(collect(a_names)))  # 1
+```
+
+An invalid pattern raises at construction time.
+
+### Expression predicates { #filterrows-expr }
+
+For anything beyond a single keyword comparison, build the predicate with
+`col()` from the expression API. Expressions compose with `&` (and), `|`
+(or), and `~` (not), and the whole tree fuses into the Rust parse loop:
+
+```python
+from crxml import CrystalXMLSource, FilterRows, col, collect
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+active_sales = src | FilterRows(
+    (col("Department") == "Sales") & (col("Status") == "Active")
+)
+print(len(collect(active_sales)))  # 3
+
+# Inclusive range and regex helpers
+mid = src | FilterRows(col("Amount").between(5000, 15000))
+errors = src | FilterRows(col("Name").matches(r"^A"))
+```
+
+Available methods: `startswith`, `endswith`, `contains`, `matches` (regex
+search), `between` (inclusive range), `isin`, `not_in`, `is_null`,
+`is_not_null`, `is_type`, plus the six comparison operators, which also work
+column-to-column (`col("a") > col("b")`).
+
 ### Callable predicate { #filterrows-callable }
 
-For anything more complex, pass a function that receives the row dict and
+For arbitrary logic, pass a function that receives the row dict and
 returns `True` to keep the row:
 
 ```python
@@ -209,17 +255,12 @@ print([r["Name"] for r in collect(a_names)])
 # ['Alice Johnson']
 ```
 
-Lambdas are not slow by default. When you pass a lambda, rypipe analyzes its
-bytecode at construction time and, for common patterns, compiles it into a
-Rust filter operation that runs fused inside the parse loop, just like the
-keyword form. Compilable patterns include field comparisons
-(`r["Amount"] == "100"`), string methods (`startswith`, `endswith`,
-`contains`, `strip`, `lower`, `upper`, `replace`), `len()` comparisons,
-`in` / `not in` membership, and `and` / `or` / `not` combinations of those.
-
-Only lambdas [the compiler](../architecture/lambda-compiler.md) does not
-recognize (calling your own functions, date parsing, and so on) run in Python
-per row.
+Plain lambdas and functions always run in Python, row by row, after the
+table is parsed; they are never fused into the Rust parse loop. Prefer the
+keyword forms or `col()` expressions when throughput matters. (The old
+in-tree lambda bytecode compiler was removed; see the standalone
+[lambda-compiler](https://github.com/emiliano-go/lambda-compiler) package if
+you need that.)
 
 For the full filter-spec format (including column-to-column comparison),
 see the [Python API reference](../reference/python-api.md#filterrows).
@@ -257,11 +298,12 @@ print(df.head(3))
 
 * `RenameFields` renames columns; `DropFields` removes them.
 * `CastTypes` converts strings to `int`, `float`, or `bool`.
-* `FilterRows` keeps matching rows: constant (`field`/`op`/`value`), column
-  comparison (`field_a`/`op`/`field_b`), null check (`is_null=True`), type
-  check (`is_type="..."`), or a lambda. Keyword forms and recognized lambdas
-  compile into Rust filter operations; only unrecognized lambdas run in
-  Python.
+* `FilterRows` keeps matching rows: constant (`field`/`op`/`value`,
+  including `op="regex"`), column comparison (`field_a`/`op`/`field_b`),
+  null check (`is_null=True`), type check (`is_type="..."`), an expression
+  predicate (`col("x") > 1`, `col("n").between(a, b)`), or a lambda. Keyword
+  forms and expressions compile into Rust filter operations; plain lambdas
+  run in Python.
 * `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` combine keyword-form
   filters into OR / AND / NOT trees, and nest.
 * Full parameter reference: [Python API](../reference/python-api.md#stages).

@@ -244,17 +244,13 @@ a single call: filters are pushed into the parser, drops never get scanned,
 and fused stages stay in Rust instead of falling back to Python:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource, DropFields, FilterRows, RenameFields
 
 # Fast because the adapter honors wants(), plan_overrides, and field_types.
-table = rypipe.read(
-    "sample.log",
-    format="log",
-    drop_fields=["id"],
-    field_mapping={"name": "user"},
-    filter={"field": "status", "op": "eq", "value": "active"},
-    field_types={"amount": "float64"},
-)
+table = (
+    LogSource("sample.log", field_types={"amount": "float64"})
+    | DropFields(["id"])
+    | RenameFields({"name": "user"})
+    | FilterRows(field="status", op="eq", value="active")
+).to_arrow()
 ```

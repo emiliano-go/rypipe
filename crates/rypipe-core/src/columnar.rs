@@ -450,8 +450,9 @@ pub(crate) enum ColumnBuilder {
     Boolean(PrimColumn<bool>),
     /// Days since the Unix epoch.
     Date32(PrimColumn<i32>),
-    /// Raw integers in `unit` since the Unix epoch.
-    Timestamp(TimeUnit, PrimColumn<i64>),
+    /// Raw integers in `unit` since the Unix epoch. The optional chrono
+    /// format string is tried before the built-in ISO layouts when parsing.
+    Timestamp(TimeUnit, Option<Box<str>>, PrimColumn<i64>),
     /// Fixed-precision decimal: value * 10^scale stored as i128.
     Decimal128(u8, PrimColumn<i128>),
     Dictionary {
@@ -482,6 +483,21 @@ fn dict_code(
     offsets.push(data.len() as i32);
     index.insert(key, code);
     code
+}
+
+/// Whether `s` parses into the declared type `ft`, mirroring the lenient
+/// conversions in [`ColumnBuilder::push_str`]. String and dictionary columns
+/// accept any string. Used by strict-types mode to detect malformed values.
+pub(crate) fn parses_as(s: &str, ft: &FieldType) -> bool {
+    match ft {
+        FieldType::String | FieldType::Dictionary => true,
+        FieldType::Int64 => lexical::parse::<i64, _>(s.as_bytes()).is_ok(),
+        FieldType::Float64 => lexical::parse::<f64, _>(s.as_bytes()).is_ok(),
+        FieldType::Boolean => s.parse::<bool>().is_ok(),
+        FieldType::Date32 => parse_date32(s).is_some(),
+        FieldType::Timestamp(unit, fmt) => parse_timestamp(s, *unit, fmt.as_deref()).is_some(),
+        FieldType::Decimal128(scale) => parse_decimal128(s, *scale).is_some(),
+    }
 }
 
 /// Parse an ISO-8601 date (`YYYY-MM-DD`) into days since the Unix epoch.
@@ -518,8 +534,7 @@ pub fn parse_decimal128(s: &str, scale: u8) -> Option<i128> {
                 return None;
             }
             let frac: i128 = digits.parse().ok()?;
-            let frac_scaled =
-                frac.checked_mul(10i128.checked_pow(scale - digits.len() as u32)?)?;
+            let frac_scaled = frac.checked_mul(10i128.checked_pow(scale - digits.len() as u32)?)?;
             val = val.checked_add(frac_scaled)?;
         }
     }
@@ -529,15 +544,27 @@ pub fn parse_decimal128(s: &str, scale: u8) -> Option<i128> {
 /// Parse an ISO-8601 datetime (or bare date = midnight) into an integer in
 /// `unit`. Naive parsing only; adapters handling timezones should emit
 /// `Value::Timestamp` directly.
-pub fn parse_timestamp(s: &str, unit: TimeUnit) -> Option<i64> {
+pub fn parse_timestamp(s: &str, unit: TimeUnit, format: Option<&str>) -> Option<i64> {
     let t = s.trim();
-    let dt = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S%.f"))
-        .or_else(|_| {
-            chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d")
-                .map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+    let dt = format
+        .and_then(|fmt| {
+            chrono::NaiveDateTime::parse_from_str(t, fmt)
+                .ok()
+                .or_else(|| {
+                    chrono::NaiveDate::parse_from_str(t, fmt)
+                        .ok()
+                        .map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+                })
         })
-        .ok()?;
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S%.f"))
+                .or_else(|_| {
+                    chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d")
+                        .map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+                })
+                .ok()
+        })?;
     let utc = dt.and_utc();
     Some(match unit {
         TimeUnit::Second => utc.timestamp(),
@@ -590,8 +617,8 @@ impl ColumnBuilder {
             FieldType::Float64 => ColumnBuilder::Float64(PrimColumn::with_capacity(cap)),
             FieldType::Boolean => ColumnBuilder::Boolean(PrimColumn::with_capacity(cap)),
             FieldType::Date32 => ColumnBuilder::Date32(PrimColumn::with_capacity(cap)),
-            FieldType::Timestamp(unit) => {
-                ColumnBuilder::Timestamp(*unit, PrimColumn::with_capacity(cap))
+            FieldType::Timestamp(unit, fmt) => {
+                ColumnBuilder::Timestamp(*unit, fmt.clone(), PrimColumn::with_capacity(cap))
             }
             FieldType::Decimal128(scale) => {
                 ColumnBuilder::Decimal128(*scale, PrimColumn::with_capacity(cap))
@@ -679,7 +706,7 @@ impl ColumnBuilder {
                 // Raw integer is interpreted in the column's unit.
                 let unit = self.unit();
                 match self {
-                    ColumnBuilder::Timestamp(_, v) => v.push(Some(ts)),
+                    ColumnBuilder::Timestamp(_, _, v) => v.push(Some(ts)),
                     ColumnBuilder::Int64(v) => v.push(Some(ts)),
                     ColumnBuilder::Float64(v) => v.push(Some(ts as f64)),
                     ColumnBuilder::String(col) => match unit {
@@ -708,7 +735,7 @@ impl ColumnBuilder {
     /// The `TimeUnit` carried by this builder, if any.
     fn unit(&self) -> Option<TimeUnit> {
         match self {
-            ColumnBuilder::Timestamp(unit, _) => Some(*unit),
+            ColumnBuilder::Timestamp(unit, _, _) => Some(*unit),
             _ => None,
         }
     }
@@ -722,7 +749,7 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(_) => "boolean",
             ColumnBuilder::Date32(_) => "date32",
             // Distinguish timestamp units: merging across units is an error.
-            ColumnBuilder::Timestamp(unit, _) => match unit {
+            ColumnBuilder::Timestamp(unit, _, _) => match unit {
                 TimeUnit::Second => "timestamp[s]",
                 TimeUnit::Millisecond => "timestamp[ms]",
                 TimeUnit::Microsecond => "timestamp[us]",
@@ -827,8 +854,8 @@ impl ColumnBuilder {
             ColumnBuilder::Date32(v) => {
                 v.push(value.and_then(|s| parse_date32(&s)));
             }
-            ColumnBuilder::Timestamp(unit, v) => {
-                v.push(value.and_then(|s| parse_timestamp(&s, *unit)));
+            ColumnBuilder::Timestamp(unit, fmt, v) => {
+                v.push(value.and_then(|s| parse_timestamp(&s, *unit, fmt.as_deref())));
             }
             ColumnBuilder::Decimal128(scale, v) => {
                 v.push(value.and_then(|s| parse_decimal128(&s, *scale)));
@@ -865,8 +892,8 @@ impl ColumnBuilder {
             ColumnBuilder::Date32(v) => {
                 v.push(value.and_then(parse_date32));
             }
-            ColumnBuilder::Timestamp(unit, v) => {
-                v.push(value.and_then(|s| parse_timestamp(s, *unit)));
+            ColumnBuilder::Timestamp(unit, fmt, v) => {
+                v.push(value.and_then(|s| parse_timestamp(s, *unit, fmt.as_deref())));
             }
             ColumnBuilder::Decimal128(scale, v) => {
                 v.push(value.and_then(|s| parse_decimal128(&s, *scale)));
@@ -893,7 +920,7 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => v.pop(),
             ColumnBuilder::Boolean(v) => v.pop(),
             ColumnBuilder::Date32(v) => v.pop(),
-            ColumnBuilder::Timestamp(_, v) => v.pop(),
+            ColumnBuilder::Timestamp(_, _, v) => v.pop(),
             ColumnBuilder::Decimal128(_, v) => v.pop(),
             ColumnBuilder::Dictionary { codes, .. } => drop(codes.pop()),
         }
@@ -906,7 +933,7 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => v.len(),
             ColumnBuilder::Boolean(v) => v.len(),
             ColumnBuilder::Date32(v) => v.len(),
-            ColumnBuilder::Timestamp(_, v) => v.len(),
+            ColumnBuilder::Timestamp(_, _, v) => v.len(),
             ColumnBuilder::Decimal128(_, v) => v.len(),
             ColumnBuilder::Dictionary { codes, .. } => codes.len(),
         }
@@ -919,7 +946,7 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => v.bytes_used(),
             ColumnBuilder::Boolean(v) => v.bytes_used(),
             ColumnBuilder::Date32(v) => v.bytes_used(),
-            ColumnBuilder::Timestamp(_, v) => v.bytes_used(),
+            ColumnBuilder::Timestamp(_, _, v) => v.bytes_used(),
             ColumnBuilder::Decimal128(_, v) => v.bytes_used(),
             ColumnBuilder::Dictionary {
                 codes,
@@ -938,7 +965,7 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => v.capacity_bytes(),
             ColumnBuilder::Boolean(v) => v.capacity_bytes(),
             ColumnBuilder::Date32(v) => v.capacity_bytes(),
-            ColumnBuilder::Timestamp(_, v) => v.capacity_bytes(),
+            ColumnBuilder::Timestamp(_, _, v) => v.capacity_bytes(),
             ColumnBuilder::Decimal128(_, v) => v.capacity_bytes(),
             ColumnBuilder::Dictionary {
                 codes,
@@ -957,7 +984,9 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => ColumnBuilder::Float64(v.split_off(n)),
             ColumnBuilder::Boolean(v) => ColumnBuilder::Boolean(v.split_off(n)),
             ColumnBuilder::Date32(v) => ColumnBuilder::Date32(v.split_off(n)),
-            ColumnBuilder::Timestamp(unit, v) => ColumnBuilder::Timestamp(*unit, v.split_off(n)),
+            ColumnBuilder::Timestamp(unit, fmt, v) => {
+                ColumnBuilder::Timestamp(*unit, fmt.clone(), v.split_off(n))
+            }
             ColumnBuilder::Decimal128(scale, v) => {
                 ColumnBuilder::Decimal128(*scale, v.split_off(n))
             }
@@ -1007,7 +1036,7 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => v.get(index).map(|n| n.to_string()),
             ColumnBuilder::Boolean(v) => v.get(index).map(|n| n.to_string()),
             ColumnBuilder::Date32(v) => v.get(index).map(format_date32),
-            ColumnBuilder::Timestamp(unit, v) => {
+            ColumnBuilder::Timestamp(unit, _, v) => {
                 let unit = *unit;
                 v.get(index).map(|ts| format_timestamp(ts, unit))
             }
@@ -1034,7 +1063,7 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => v.get(index).map(TypedValue::Float64),
             ColumnBuilder::Boolean(v) => v.get(index).map(TypedValue::Bool),
             ColumnBuilder::Date32(v) => v.get(index).map(TypedValue::Date32),
-            ColumnBuilder::Timestamp(_, v) => v.get(index).map(TypedValue::Timestamp),
+            ColumnBuilder::Timestamp(_, _, v) => v.get(index).map(TypedValue::Timestamp),
             ColumnBuilder::Decimal128(_, v) => v.get(index).map(|n| TypedValue::Int64(n as i64)),
             ColumnBuilder::Dictionary {
                 codes,
@@ -1061,7 +1090,7 @@ impl ColumnBuilder {
             (ColumnBuilder::Float64(v), FT::Float64) => v.get(index).is_some(),
             (ColumnBuilder::Boolean(v), FT::Boolean) => v.get(index).is_some(),
             (ColumnBuilder::Date32(v), FT::Date32) => v.get(index).is_some(),
-            (ColumnBuilder::Timestamp(u1, _), FT::Timestamp(u2)) => {
+            (ColumnBuilder::Timestamp(u1, _, _), FT::Timestamp(u2, _)) => {
                 // Check if the timestamp unit matches and value exists
                 u1 == u2 && self.get_typed_value(index).is_some()
             }
@@ -1079,25 +1108,24 @@ impl ColumnBuilder {
             (ColumnBuilder::String(v), FT::Float64) => {
                 v.get(index).is_some_and(|s| s.parse::<f64>().is_ok())
             }
-            (ColumnBuilder::String(v), FT::Boolean) => {
-                v.get(index).is_some_and(|s| {
-                    matches!(s.to_lowercase().as_str(), "true" | "false" | "1" | "0" | "yes" | "no")
-                })
-            }
-            (ColumnBuilder::String(v), FT::Date32) => {
-                v.get(index).is_some_and(|s| crate::columnar::parse_date32(s).is_some())
-            }
-            (ColumnBuilder::String(v), FT::Timestamp(_)) => {
+            (ColumnBuilder::String(v), FT::Boolean) => v.get(index).is_some_and(|s| {
+                matches!(
+                    s.to_lowercase().as_str(),
+                    "true" | "false" | "1" | "0" | "yes" | "no"
+                )
+            }),
+            (ColumnBuilder::String(v), FT::Date32) => v
+                .get(index)
+                .is_some_and(|s| crate::columnar::parse_date32(s).is_some()),
+            (ColumnBuilder::String(v), FT::Timestamp(..)) => {
                 v.get(index).is_some_and(|s| {
                     // Try to parse as timestamp (various formats)
                     s.parse::<i64>().is_ok() || crate::columnar::parse_date32(s).is_some()
                 })
             }
-            (ColumnBuilder::String(v), FT::Decimal128(_)) => {
-                v.get(index).is_some_and(|s| {
-                    s.trim().parse::<i128>().is_ok() || s.parse::<f64>().is_ok()
-                })
-            }
+            (ColumnBuilder::String(v), FT::Decimal128(_)) => v
+                .get(index)
+                .is_some_and(|s| s.trim().parse::<i128>().is_ok() || s.parse::<f64>().is_ok()),
             (ColumnBuilder::String(v), FT::Dictionary) => v.get(index).is_some(),
             // Int64 columns: check if value can be parsed as other types
             (ColumnBuilder::Int64(v), FT::String) => v.get(index).is_some(),
@@ -1106,9 +1134,9 @@ impl ColumnBuilder {
             }
             // Float64 columns: check if value can be parsed as other types
             (ColumnBuilder::Float64(v), FT::String) => v.get(index).is_some(),
-            (ColumnBuilder::Float64(v), FT::Int64) => {
-                v.get(index).is_some_and(|f| f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64)
-            }
+            (ColumnBuilder::Float64(v), FT::Int64) => v
+                .get(index)
+                .is_some_and(|f| f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64),
             (ColumnBuilder::Float64(v), FT::Boolean) => {
                 v.get(index).is_some_and(|f| matches!(f, 0.0 | 1.0))
             }
@@ -1120,8 +1148,8 @@ impl ColumnBuilder {
             (ColumnBuilder::Date32(v), FT::String) => v.get(index).is_some(),
             (ColumnBuilder::Date32(v), FT::Int64) => v.get(index).is_some(),
             // Timestamp columns
-            (ColumnBuilder::Timestamp(_, v), FT::String) => v.get(index).is_some(),
-            (ColumnBuilder::Timestamp(_, v), FT::Int64) => v.get(index).is_some(),
+            (ColumnBuilder::Timestamp(_, _, v), FT::String) => v.get(index).is_some(),
+            (ColumnBuilder::Timestamp(_, _, v), FT::Int64) => v.get(index).is_some(),
             // Decimal128 columns
             (ColumnBuilder::Decimal128(_, v), FT::String) => v.get(index).is_some(),
             (ColumnBuilder::Decimal128(_, v), FT::Int64) => v.get(index).is_some(),
@@ -1149,7 +1177,7 @@ impl ColumnBuilder {
             (ColumnBuilder::Date32(a), ColumnBuilder::Date32(b)) => {
                 a.append(&b);
             }
-            (ColumnBuilder::Timestamp(ua, a), ColumnBuilder::Timestamp(ub, b)) => {
+            (ColumnBuilder::Timestamp(ua, _, a), ColumnBuilder::Timestamp(ub, _, b)) => {
                 let unit_a: TimeUnit = *ua;
                 if unit_a != ub {
                     return Err(crate::Error::Merge(format!(
@@ -1289,7 +1317,7 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(_) => DataType::Float64,
             ColumnBuilder::Boolean(_) => DataType::Boolean,
             ColumnBuilder::Date32(_) => DataType::Date32,
-            ColumnBuilder::Timestamp(unit, _) => DataType::Timestamp(*unit, None),
+            ColumnBuilder::Timestamp(unit, _, _) => DataType::Timestamp(*unit, None),
             ColumnBuilder::Decimal128(scale, _) => DataType::Decimal128(38, *scale as i8),
             ColumnBuilder::Dictionary { .. } => {
                 DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
@@ -1313,7 +1341,7 @@ impl ColumnBuilder {
                 ColumnBuilder::Float64(_) => Arc::new(Float64Array::from(vec![None::<f64>; 0])),
                 ColumnBuilder::Boolean(_) => Arc::new(BooleanArray::from(vec![None::<bool>; 0])),
                 ColumnBuilder::Date32(_) => Arc::new(Date32Array::from(vec![None::<i32>; 0])),
-                ColumnBuilder::Timestamp(unit, _) => match unit {
+                ColumnBuilder::Timestamp(unit, _, _) => match unit {
                     TimeUnit::Second => {
                         Arc::new(PrimitiveArray::<TimestampSecondType>::from(vec![
                             None::<i64>;
@@ -1363,7 +1391,7 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => v.to_arrow::<arrow::datatypes::Float64Type>()?,
             ColumnBuilder::Boolean(v) => v.to_arrow_bool()?,
             ColumnBuilder::Date32(v) => v.to_arrow::<arrow::datatypes::Date32Type>()?,
-            ColumnBuilder::Timestamp(unit, v) => match unit {
+            ColumnBuilder::Timestamp(unit, _, v) => match unit {
                 TimeUnit::Second => v.to_arrow::<TimestampSecondType>()?,
                 TimeUnit::Millisecond => v.to_arrow::<TimestampMillisecondType>()?,
                 TimeUnit::Microsecond => v.to_arrow::<TimestampMicrosecondType>()?,
@@ -1440,6 +1468,41 @@ mod tests {
     use super::*;
     use crate::plan::FieldType;
     use crate::value::Value;
+
+    #[test]
+    fn test_parse_timestamp_with_format() {
+        use arrow::datatypes::TimeUnit;
+        let iso = parse_timestamp("2024-01-15T10:30:00", TimeUnit::Microsecond, None);
+        let custom = parse_timestamp(
+            "20240115 10:30",
+            TimeUnit::Microsecond,
+            Some("%Y%m%d %H:%M"),
+        );
+        assert_eq!(custom, iso);
+        // The custom format is tried first, ISO layouts still work.
+        assert_eq!(
+            parse_timestamp("2024-01-15T10:30:00", TimeUnit::Microsecond, Some("%Y%m%d")),
+            iso
+        );
+        // Units still apply to the formatted parse.
+        assert_eq!(
+            parse_timestamp("20240115", TimeUnit::Second, Some("%Y%m%d")),
+            parse_timestamp("2024-01-15", TimeUnit::Second, None)
+        );
+        // Garbage stays null.
+        assert_eq!(
+            parse_timestamp("not a date", TimeUnit::Microsecond, Some("%Y%m%d")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parses_as_timestamp_format() {
+        let ft = FieldType::from_str("timestamp[us,format=%Y%m%d]").unwrap();
+        assert!(parses_as("20240115", &ft));
+        assert!(parses_as("2024-01-15", &ft)); // ISO fallback
+        assert!(!parses_as("abc", &ft));
+    }
 
     #[test]
     fn test_parse_decimal128() {

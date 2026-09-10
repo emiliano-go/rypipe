@@ -11,12 +11,38 @@ def _arrow_iter(table) -> Iterator[dict]:
         yield {col: table.column(col)[i].as_py() for col in table.column_names}
 
 
+def _chain_hooks(fns):
+    """Compose several callables for the same observer hook into one."""
+
+    def chained(*args):
+        for fn in fns:
+            fn(*args)
+
+    return chained
+
+
+def _merge_observer_hooks(plan_overrides: dict, hooks: dict) -> None:
+    """Merge a stage's ``observer`` hook dict, chaining per-hook callables
+    when several stages (or the source) provide the same hook."""
+    existing = plan_overrides.get("observer")
+    if not existing:
+        plan_overrides["observer"] = dict(hooks)
+        return
+    for hook, fn in hooks.items():
+        if hook in existing:
+            existing[hook] = _chain_hooks([existing[hook], fn])
+        else:
+            existing[hook] = fn
+
+
 def plan_split(stages):
     """Split stages into (pushdown plan kwargs, remaining stages).
 
     Multiple fusable ``FilterRows`` stages that each push a ``filter`` spec are
     combined with an implicit ``and`` (``{"and": [...]}``) so chaining
     ``FilterRows`` stages no longer silently drops all but the last filter.
+    ``observer`` hook dicts merge per-hook, chaining callables when several
+    stages provide the same hook.
     Other plan keys (``field_mapping``, ``drop_fields``, etc.) still merge
     with last-write-wins via ``dict.update``.
     """
@@ -27,12 +53,14 @@ def plan_split(stages):
         if hasattr(stage, "_plan_kwargs"):
             kwargs = stage._plan_kwargs()
             if kwargs is not None:
+                kwargs = dict(kwargs)
+                if "observer" in kwargs:
+                    obs = kwargs.pop("observer")
+                    if obs:
+                        _merge_observer_hooks(plan_overrides, obs)
                 if "filter" in kwargs:
-                    filter_specs.append(kwargs["filter"])
-                    rest = {k: v for k, v in kwargs.items() if k != "filter"}
-                    if rest:
-                        plan_overrides.update(rest)
-                else:
+                    filter_specs.append(kwargs.pop("filter"))
+                if kwargs:
                     plan_overrides.update(kwargs)
                 continue
         remaining.append(stage)

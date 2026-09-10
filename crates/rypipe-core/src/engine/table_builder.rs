@@ -77,6 +77,15 @@ pub struct TableBuilder {
     /// Current ordinal within the row (incremented per put_field call).
     /// Used to populate `ordinal_expect` on the first row.
     pub(crate) current_ordinal: u32,
+    /// First strict-types violation (column, value, row). Recorded during
+    /// puts (the `ColumnarSink` trait is infallible) and surfaced by
+    /// `finish()` as an error.
+    pub(crate) strict_error: Option<crate::Error>,
+    /// Rows committed since the last `finish()`/`reset()` (for observer
+    /// `on_chunk_finished`). Tracked unconditionally: two usize increments.
+    pub(crate) rows_accepted: usize,
+    /// Rows rejected by the filter since the last `finish()`/`reset()`.
+    pub(crate) rows_rejected: usize,
 }
 
 impl TableBuilder {
@@ -95,6 +104,9 @@ impl TableBuilder {
             cached_wanted_mask: 0,
             ordinal_expect: Vec::new(),
             current_ordinal: 0,
+            strict_error: None,
+            rows_accepted: 0,
+            rows_rejected: 0,
         }
     }
 
@@ -113,6 +125,9 @@ impl TableBuilder {
             cached_wanted_mask: 0,
             ordinal_expect: Vec::new(),
             current_ordinal: 0,
+            strict_error: None,
+            rows_accepted: 0,
+            rows_rejected: 0,
         }
     }
 
@@ -143,6 +158,9 @@ impl TableBuilder {
             cached_wanted_mask: 0,
             ordinal_expect: Vec::new(),
             current_ordinal: 0,
+            strict_error: None,
+            rows_accepted: 0,
+            rows_rejected: 0,
         };
         b.predeclare_schema_columns();
         b.cached_wanted_mask = b.compute_wanted_mask();
@@ -181,7 +199,8 @@ impl TableBuilder {
             let ty = self.plan.column_type(&name);
             let col = ColumnBuilder::with_capacity(self.estimated_rows.max(64), &ty);
             self.columns.push(col);
-            self.field_index.insert(name.clone(), self.columns.len() - 1);
+            self.field_index
+                .insert(name.clone(), self.columns.len() - 1);
             self.column_order.push(name);
         }
         let words = self.columns.len().div_ceil(64);
@@ -297,6 +316,11 @@ impl TableBuilder {
             },
             ordinal_expect: Vec::new(),
             current_ordinal: 0,
+            strict_error: None,
+            // The split-off batch reports the rows accumulated since the
+            // previous split; the remainder starts a fresh delta.
+            rows_accepted: std::mem::take(&mut self.rows_accepted),
+            rows_rejected: std::mem::take(&mut self.rows_rejected),
         };
         for (idx, col) in self.columns.iter_mut().enumerate() {
             let drain = col.split_off(n);
@@ -399,6 +423,9 @@ impl TableBuilder {
         }
         // Keep frozen/row_buf (per builder, not per row)
         self.unknown_error = None;
+        self.strict_error = None;
+        self.rows_accepted = 0;
+        self.rows_rejected = 0;
     }
 
     /// Truncate every column back to `row_count`, dropping any partial-row
@@ -516,6 +543,46 @@ impl TableBuilder {
         idx
     }
 
+    /// Strict-types check for the value about to land in column `idx`: when
+    /// `plan.strict_types` is set, a non-null string that does not parse into
+    /// the declared `field_types` type is recorded as the first strict
+    /// violation (surfaced by `finish()`). Nulls and non-string values never
+    /// trigger it.
+    fn record_strict_violation_at(&mut self, idx: usize, value: &Value<'_>) {
+        if !self.plan.strict_types || self.strict_error.is_some() {
+            return;
+        }
+        let Value::Str(s) = value else {
+            return;
+        };
+        let Some(name) = self.column_order.get(idx) else {
+            return;
+        };
+        let Some(ft) = self.plan.field_types.get(name) else {
+            return;
+        };
+        if crate::columnar::parses_as(s, ft) {
+            return;
+        }
+        let truncated: String = s.chars().take(64).collect();
+        self.strict_error = Some(crate::Error::Plan(format!(
+            "strict_types: value {truncated:?} in column {name:?} at row {} \
+             does not parse as declared type {ft:?}",
+            self.row_count
+        )));
+    }
+
+    /// Notify the plan's observer (if any) that `value` landed in column
+    /// `idx`. Not called for buffered values; those fire on drain instead.
+    #[inline]
+    fn notify_put_field(&self, idx: usize, value: &Value<'_>) {
+        if let Some(ref obs) = self.plan.observer {
+            if let Some(name) = self.column_order.get(idx) {
+                obs.on_put_field(self.row_count, name, idx, value);
+            }
+        }
+    }
+
     /// Push a field value without resolving renames/drops.
     /// Caller must have already resolved `resolved_name` (or know it is kept).
     #[inline]
@@ -544,6 +611,8 @@ impl TableBuilder {
             }
         }
         let idx = self.ensure_column_idx(resolved_name);
+        self.record_strict_violation_at(idx, &value);
+        self.notify_put_field(idx, &value);
         // Track ordinal→slot mapping on first row for expect_slot fast path.
         if self.row_count == 0 {
             let ord = self.current_ordinal as usize;
@@ -580,6 +649,8 @@ impl TableBuilder {
         // Resolve name via plan's field_map (borrows &self.plan).
         // Try the zero-allocation fast path: column already exists.
         if let Some(idx) = Self::resolve_and_slot(&self.plan, &self.field_index, name) {
+            self.record_strict_violation_at(idx, &value);
+            self.notify_put_field(idx, &value);
             // Track ordinal→slot mapping on first row for expect_slot fast path.
             if self.row_count == 0 {
                 let ord = self.current_ordinal as usize;
@@ -664,11 +735,19 @@ impl TableBuilder {
                 for b in &mut self.columns {
                     b.pop();
                 }
+                self.rows_rejected += 1;
+                if let Some(ref obs) = self.plan.observer {
+                    obs.on_row_rejected(self.row_count);
+                }
                 return;
             }
         }
 
         self.row_count += 1;
+        self.rows_accepted += 1;
+        if let Some(ref obs) = self.plan.observer {
+            obs.on_row_accepted(self.row_count - 1);
+        }
     }
 
     // Predicate-first helpers
@@ -777,7 +856,8 @@ impl TableBuilder {
             | FilterPredicate::Length { field, .. }
             | FilterPredicate::Contains { field, .. }
             | FilterPredicate::IsNull { field, .. }
-            | FilterPredicate::IsType { field, .. } => {
+            | FilterPredicate::IsType { field, .. }
+            | FilterPredicate::Regex { field, .. } => {
                 let resolved = plan.resolve_field(field).unwrap_or(field);
                 names.push(resolved.to_string());
             }
@@ -902,10 +982,9 @@ impl TableBuilder {
                             Some(s) => crate::columnar::parse_date32(s).map(Value::Date32),
                             _ => Some(value.clone()),
                         },
-                        FieldType::Timestamp(unit) => match value.as_str() {
-                            Some(s) => {
-                                crate::columnar::parse_timestamp(s, unit).map(Value::Timestamp)
-                            }
+                        FieldType::Timestamp(unit, fmt) => match value.as_str() {
+                            Some(s) => crate::columnar::parse_timestamp(s, unit, fmt.as_deref())
+                                .map(Value::Timestamp),
                             _ => Some(value.clone()),
                         },
                         FieldType::String | FieldType::Dictionary => Some(value.clone()),
@@ -998,12 +1077,19 @@ impl TableBuilder {
                                     (None, None) => Some(a.cmp(b)),
                                     // Both Timestamp: parse and compare as i64.
                                     (
-                                        Some(crate::plan::FieldType::Timestamp(ua)),
-                                        Some(crate::plan::FieldType::Timestamp(ub)),
+                                        Some(crate::plan::FieldType::Timestamp(ua, fa)),
+                                        Some(crate::plan::FieldType::Timestamp(ub, fb)),
                                     ) => {
-                                        let ta = crate::columnar::parse_timestamp(a.as_ref(), *ua);
-                                        let tb_val =
-                                            crate::columnar::parse_timestamp(b.as_ref(), *ub);
+                                        let ta = crate::columnar::parse_timestamp(
+                                            a.as_ref(),
+                                            *ua,
+                                            fa.as_deref(),
+                                        );
+                                        let tb_val = crate::columnar::parse_timestamp(
+                                            b.as_ref(),
+                                            *ub,
+                                            fb.as_deref(),
+                                        );
                                         match (ta, tb_val) {
                                             (Some(ai), Some(bi)) => Some(ai.cmp(&bi)),
                                             _ => None,
@@ -1237,7 +1323,11 @@ impl TableBuilder {
                                 crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
                                 crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
                             };
-                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                            if pass {
+                                PredicateState::Pass
+                            } else {
+                                PredicateState::Fail
+                            }
                         }
                         None => PredicateState::Fail,
                     }
@@ -1257,7 +1347,11 @@ impl TableBuilder {
                                 crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
                                 crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
                             };
-                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                            if pass {
+                                PredicateState::Pass
+                            } else {
+                                PredicateState::Fail
+                            }
                         }
                         None => PredicateState::Fail,
                     }
@@ -1277,14 +1371,24 @@ impl TableBuilder {
                                 crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
                                 crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
                             };
-                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                            if pass {
+                                PredicateState::Pass
+                            } else {
+                                PredicateState::Fail
+                            }
                         }
                         None => PredicateState::Fail,
                     }
                 }
                 None => PredicateState::Undecided,
             },
-            FilterPredicate::Replace { field, old, new, op, value } => match tb.get_buffered_str(field) {
+            FilterPredicate::Replace {
+                field,
+                old,
+                new,
+                op,
+                value,
+            } => match tb.get_buffered_str(field) {
                 Some(actual) => {
                     let transformed = actual.replace(old.as_str(), new.as_str());
                     match transformed.as_str().partial_cmp(value.as_str()) {
@@ -1297,7 +1401,11 @@ impl TableBuilder {
                                 crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
                                 crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
                             };
-                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                            if pass {
+                                PredicateState::Pass
+                            } else {
+                                PredicateState::Fail
+                            }
                         }
                         None => PredicateState::Fail,
                     }
@@ -1318,7 +1426,11 @@ impl TableBuilder {
                                 crate::plan::CompareOp::Eq => ord == std::cmp::Ordering::Equal,
                                 crate::plan::CompareOp::Ne => ord != std::cmp::Ordering::Equal,
                             };
-                            if pass { PredicateState::Pass } else { PredicateState::Fail }
+                            if pass {
+                                PredicateState::Pass
+                            } else {
+                                PredicateState::Fail
+                            }
                         }
                         None => PredicateState::Fail,
                     }
@@ -1328,6 +1440,16 @@ impl TableBuilder {
             FilterPredicate::Contains { field, value } => match tb.get_buffered_str(field) {
                 Some(actual) => {
                     if actual.contains(value.as_str()) {
+                        PredicateState::Pass
+                    } else {
+                        PredicateState::Fail
+                    }
+                }
+                None => PredicateState::Undecided,
+            },
+            FilterPredicate::Regex { field, re } => match tb.get_buffered_str(field) {
+                Some(actual) => {
+                    if re.compiled.is_match(actual.as_ref()) {
                         PredicateState::Pass
                     } else {
                         PredicateState::Fail
@@ -1368,7 +1490,10 @@ impl TableBuilder {
                         }
                         crate::plan::FieldType::Boolean => {
                             if let Some(s) = val.as_str() {
-                                if matches!(s.to_lowercase().as_str(), "true" | "false" | "1" | "0" | "yes" | "no") {
+                                if matches!(
+                                    s.to_lowercase().as_str(),
+                                    "true" | "false" | "1" | "0" | "yes" | "no"
+                                ) {
                                     return PredicateState::Pass;
                                 }
                             }
@@ -1408,6 +1533,7 @@ impl TableBuilder {
     }
 
     fn drain_buffered(&mut self, pass: bool) {
+        let observer = self.plan.observer.clone();
         let buf = match self.row_buf {
             Some(ref mut b) => b,
             None => return,
@@ -1449,6 +1575,13 @@ impl TableBuilder {
                     b.pop();
                 }
                 b.push_value(val.clone());
+                // Buffered values are observable only once the row is
+                // accepted (drained), never while merely buffered.
+                if let Some(ref obs) = observer {
+                    if let Some(name) = self.column_order.get(slot as usize) {
+                        obs.on_put_field(self.row_count, name, slot as usize, val);
+                    }
+                }
             }
             // Null-fill missing columns and handle filter/dirty, then increment row_count.
             // Skip null-fill when called mid-row (buf.direct = true): the remaining
@@ -1480,10 +1613,18 @@ impl TableBuilder {
                 // can take the is_full fast path when all columns were pushed.
             }
             self.row_count += 1;
+            self.rows_accepted += 1;
+            if let Some(ref obs) = observer {
+                obs.on_row_accepted(self.row_count - 1);
+            }
         } else {
             // Fail: discard buffered fields, no row increment, clear dirty
             buf.fields.clear();
             self.row_dirty.fill(0);
+            self.rows_rejected += 1;
+            if let Some(ref obs) = observer {
+                obs.on_row_rejected(self.row_count);
+            }
         }
         // Ensure fields are cleared for next row
         if !buf.fields.is_empty() {
@@ -1540,7 +1681,8 @@ impl TableBuilder {
             | FilterPredicate::Length { .. }
             | FilterPredicate::Contains { .. }
             | FilterPredicate::IsNull { .. }
-            | FilterPredicate::IsType { .. } => match Self::eval_predicate(pred, tb) {
+            | FilterPredicate::IsType { .. }
+            | FilterPredicate::Regex { .. } => match Self::eval_predicate(pred, tb) {
                 PredicateState::Undecided => PredicateState::Fail,
                 other => other,
             },
@@ -1613,6 +1755,9 @@ impl Default for TableBuilder {
 impl ColumnarSink for TableBuilder {
     #[inline]
     fn begin_row(&mut self) {
+        if let Some(ref obs) = self.plan.observer {
+            obs.on_begin_row(self.row_count);
+        }
         self.current_ordinal = 0;
         if let Some(ref mut buf) = self.row_buf {
             // Adaptive strategy: after at least one committed row, decide
@@ -1681,6 +1826,7 @@ impl ColumnarSink for TableBuilder {
             }
         }
         let slot = self.ensure_column_idx(&resolved) as u32;
+        self.record_strict_violation_at(slot as usize, &value);
         self.mark_predicate_slot(slot);
         let val_static: Value<'static> = value.into_static();
         let is_pred = self.is_predicate_slot(slot);
@@ -1791,6 +1937,7 @@ impl ColumnarSink for TableBuilder {
             }
         }
         let slot = self.ensure_column_idx(resolved_name) as u32;
+        self.record_strict_violation_at(slot as usize, &value);
         self.mark_predicate_slot(slot);
         let val_static: Value<'static> = value.into_static();
         let is_pred = self.is_predicate_slot(slot);
@@ -1832,6 +1979,8 @@ impl ColumnarSink for TableBuilder {
             // This shouldn't happen after row 1 with a stable layout.
             return;
         }
+        self.record_strict_violation_at(idx, &value);
+        self.notify_put_field(idx, &value);
         let word = idx / 64;
         let bit = idx % 64;
         self.row_dirty[word] |= 1u64 << bit;
@@ -1930,6 +2079,7 @@ impl ColumnarSink for TableBuilder {
                 }
             }
             let slot = self.ensure_column_idx(resolved) as u32;
+            self.record_strict_violation_at(slot as usize, &value);
             self.mark_predicate_slot(slot);
             let val_static: Value<'static> = value.into_static();
             let is_pred = self.is_predicate_slot(slot);
@@ -1986,6 +2136,7 @@ impl ColumnarSink for TableBuilder {
                     }
                 }
                 let slot = self.ensure_column_idx(&owned) as u32;
+                self.record_strict_violation_at(slot as usize, &value);
                 self.mark_predicate_slot(slot);
                 let val_static: Value<'static> = value.into_static();
                 let is_pred = self.is_predicate_slot(slot);
@@ -2056,6 +2207,16 @@ impl ColumnarSink for TableBuilder {
     fn finish(&mut self) -> Result<RecordBatch> {
         if let Some(err) = self.unknown_error.take() {
             return Err(crate::Error::Merge(err));
+        }
+        if let Some(err) = self.strict_error.take() {
+            return Err(err);
+        }
+        if let Some(ref obs) = self.plan.observer {
+            obs.on_chunk_finished(
+                self.rows_accepted + self.rows_rejected,
+                self.rows_accepted,
+                self.rows_rejected,
+            );
         }
         self.normalize();
 
@@ -2165,6 +2326,7 @@ mod tests {
 
     /// Simple newline-delimited parser for test data.
     /// Each line is a row; fields are `key=value` separated by spaces.
+    #[derive(Clone)]
     struct LineParser;
 
     impl RecordParser for LineParser {
@@ -2191,6 +2353,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
     struct LineSplitter;
 
     impl Splitter for LineSplitter {
@@ -2231,6 +2394,260 @@ mod tests {
             let newline_count = sample.iter().filter(|&&b| b == b'\n').count().max(1);
             (sample.len() / newline_count).max(1)
         }
+    }
+
+    /// Records every hook call into a shared log, in call order.
+    #[derive(Default)]
+    struct RecObserver {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecObserver {
+        fn log(&self, e: String) {
+            self.events.lock().unwrap().push(e);
+        }
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::RowObserver for RecObserver {
+        fn on_begin_row(&self, row_index: usize) {
+            self.log(format!("begin:{row_index}"));
+        }
+        fn on_put_field(&self, row_index: usize, name: &str, _slot: usize, _value: &Value<'_>) {
+            self.log(format!("put:{row_index}:{name}"));
+        }
+        fn on_row_accepted(&self, row_index: usize) {
+            self.log(format!("accept:{row_index}"));
+        }
+        fn on_row_rejected(&self, row_index: usize) {
+            self.log(format!("reject:{row_index}"));
+        }
+        fn on_chunk_finished(&self, total: usize, accepted: usize, rejected: usize) {
+            self.log(format!("fin:{total}:{accepted}:{rejected}"));
+        }
+    }
+
+    #[test]
+    fn test_observer_lifecycle() {
+        let obs = Arc::new(RecObserver::default());
+        let mut plan = ExecutionPlan::new();
+        plan.observer = Some(obs.clone());
+        let mut engine = parse_bytes(b"X=1 Y=2\nX=3 Y=4\n", plan);
+        engine.finish().unwrap();
+        assert_eq!(
+            obs.events(),
+            vec![
+                "begin:0",
+                "put:0:X",
+                "put:0:Y",
+                "accept:0",
+                "begin:1",
+                "put:1:X",
+                "put:1:Y",
+                "accept:1",
+                "fin:2:2:0",
+                // finish() a second time re-fires with the same counters.
+            ]
+        );
+    }
+
+    #[test]
+    fn test_observer_with_filter() {
+        let obs = Arc::new(RecObserver::default());
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "X".to_string(),
+            value: "keep".to_string(),
+        });
+        plan.observer = Some(obs.clone());
+        let mut engine = parse_bytes(b"X=keep A=1\nX=drop A=2\n", plan);
+        engine.finish().unwrap();
+        let ev = obs.events();
+        // Rejected row: begin + reject, but its buffered fields never fire put.
+        assert!(ev.contains(&"reject:1".to_string()), "events: {ev:?}");
+        assert_eq!(
+            ev.iter().filter(|e| e.starts_with("put:")).count(),
+            2,
+            "only the accepted row's fields may be observed: {ev:?}"
+        );
+        assert!(ev.contains(&"fin:2:1:1".to_string()), "events: {ev:?}");
+    }
+
+    #[test]
+    fn test_observer_parallel_counts_all_rows() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+        #[derive(Default)]
+        struct Counting {
+            accepted: AtomicUsize,
+            rejected: AtomicUsize,
+        }
+        impl crate::RowObserver for Counting {
+            fn on_row_accepted(&self, _i: usize) {
+                self.accepted.fetch_add(1, AOrd::Relaxed);
+            }
+            fn on_row_rejected(&self, _i: usize) {
+                self.rejected.fetch_add(1, AOrd::Relaxed);
+            }
+        }
+        let obs = Arc::new(Counting::default());
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::NotEqual {
+            field: "X".to_string(),
+            value: "drop".to_string(),
+        });
+        plan.observer = Some(obs.clone());
+        let mut data = Vec::new();
+        for i in 0..1000 {
+            let v = if i % 3 == 0 { "drop" } else { "keep" };
+            data.extend_from_slice(format!("X={v} N={i}\n").as_bytes());
+        }
+        let pipeline = crate::Pipeline::new(LineSplitter, LineParser).with_plan(plan);
+        let batches = pipeline.read_bytes_par(&data, 4).unwrap();
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        let accepted = obs.accepted.load(AOrd::Relaxed);
+        let rejected = obs.rejected.load(AOrd::Relaxed);
+        assert_eq!(accepted + rejected, 1000);
+        assert_eq!(accepted, total);
+        assert_eq!(rejected, 334);
+    }
+
+    #[test]
+    fn test_not_wraps_leaf_predicates_predicate_first() {
+        // Every leaf under Not must invert its result in the predicate-first
+        // (buffered) path used when plan.filter is set.
+        let cases: Vec<(FilterPredicate, &[u8], Vec<&str>)> = vec![
+            (
+                FilterPredicate::not(FilterPredicate::Equal {
+                    field: "X".into(),
+                    value: "keep".into(),
+                }),
+                b"X=keep\nX=drop\n",
+                vec!["drop"],
+            ),
+            (
+                FilterPredicate::not(FilterPredicate::IsNull { field: "X".into() }),
+                b"X=1\nY=2\n",
+                vec!["1"],
+            ),
+            (
+                FilterPredicate::not(FilterPredicate::StartsWith {
+                    field: "X".into(),
+                    value: "ab".into(),
+                }),
+                b"X=abc\nX=zzz\n",
+                vec!["zzz"],
+            ),
+            (
+                FilterPredicate::not(FilterPredicate::In {
+                    field: "X".into(),
+                    values: vec!["a".into(), "b".into()],
+                }),
+                b"X=a\nX=b\nX=c\n",
+                vec!["c"],
+            ),
+            (
+                FilterPredicate::not(FilterPredicate::Regex {
+                    field: "X".into(),
+                    re: crate::plan::RegexSpec::new("^ERR").unwrap(),
+                }),
+                b"X=ERR1\nX=ok\n",
+                vec!["ok"],
+            ),
+            (
+                FilterPredicate::not(FilterPredicate::Contains {
+                    field: "X".into(),
+                    value: "zz".into(),
+                }),
+                b"X=azza\nX=hello\n",
+                vec!["hello"],
+            ),
+        ];
+        for (pred, data, want) in cases {
+            let mut plan = ExecutionPlan::new();
+            plan.filter = Some(pred);
+            let engine = parse_bytes(data, plan);
+            let col = engine.get_column("X").unwrap();
+            assert_eq!(
+                col.as_str_vec().iter().flatten().collect::<Vec<_>>(),
+                want,
+                "data: {}",
+                String::from_utf8_lossy(data)
+            );
+        }
+    }
+
+    #[test]
+    fn test_not_wraps_leaf_predicates_batch_check() {
+        // The batch path (FilterPredicate::check over finished columns) must
+        // agree with the predicate-first path for Not-wrapped leaves.
+        let data = b"X=keep N=1\nX=drop N=2\nX=keep N=3\n";
+        let engine = parse_bytes(data, ExecutionPlan::new());
+        let pred = FilterPredicate::not(FilterPredicate::Equal {
+            field: "X".into(),
+            value: "keep".into(),
+        });
+        let kept: Vec<usize> = (0..engine.num_rows())
+            .filter(|&r| pred.check(&engine.columns, &engine.field_index, r, &engine.plan))
+            .collect();
+        assert_eq!(kept, vec![1]);
+
+        let pred = FilterPredicate::not(FilterPredicate::IsNull { field: "X".into() });
+        let kept: Vec<usize> = (0..engine.num_rows())
+            .filter(|&r| pred.check(&engine.columns, &engine.field_index, r, &engine.plan))
+            .collect();
+        assert_eq!(kept, vec![0, 1, 2]);
+
+        let pred = FilterPredicate::not(FilterPredicate::Regex {
+            field: "X".into(),
+            re: crate::plan::RegexSpec::new("ke*p").unwrap(),
+        });
+        let kept: Vec<usize> = (0..engine.num_rows())
+            .filter(|&r| pred.check(&engine.columns, &engine.field_index, r, &engine.plan))
+            .collect();
+        assert_eq!(kept, vec![1]);
+    }
+
+    #[test]
+    fn test_regex_predicate() {
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Regex {
+            field: "X".into(),
+            re: crate::plan::RegexSpec::new("^ERR\\d+$").unwrap(),
+        });
+        let engine = parse_bytes(b"X=ERR12\nX=ok\nX=ERRx\nX=ERR0\n", plan);
+        let col = engine.get_column("X").unwrap();
+        assert_eq!(
+            col.as_str_vec().iter().flatten().collect::<Vec<_>>(),
+            vec!["ERR12", "ERR0"]
+        );
+        // Missing field never matches.
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::Regex {
+            field: "X".into(),
+            re: crate::plan::RegexSpec::new(".*").unwrap(),
+        });
+        let engine = parse_bytes(b"X=a\nY=2\n", plan);
+        assert_eq!(engine.num_rows(), 1);
+        // Invalid pattern is rejected at construction.
+        assert!(crate::plan::RegexSpec::new("(").is_err());
+        // Equality follows the pattern string.
+        assert_eq!(
+            crate::plan::RegexSpec::new("^a").unwrap(),
+            crate::plan::RegexSpec::new("^a").unwrap()
+        );
+        assert_ne!(
+            crate::plan::RegexSpec::new("^a").unwrap(),
+            crate::plan::RegexSpec::new("^b").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_no_observer_smoke() {
+        // plan.observer = None: hooks compile to a skipped branch.
+        let engine = parse_bytes(b"X=1\nX=2\n", ExecutionPlan::new());
+        assert_eq!(engine.num_rows(), 2);
     }
 
     fn parse_bytes(bytes: &[u8], plan: ExecutionPlan) -> TableBuilder {
@@ -2375,6 +2792,95 @@ mod tests {
         assert_eq!(engine.num_rows(), 1);
         let col = engine.get_column("Y").unwrap();
         assert_eq!(col.as_str_vec(), vec![Some("world".into())]);
+    }
+
+    #[test]
+    fn test_not_is_null_filter_predicate_first() {
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::not(FilterPredicate::IsNull {
+            field: "X".to_string(),
+        }));
+        let engine = parse_bytes(b"X=a\nY=only\nX=b\n", plan);
+        assert_eq!(engine.num_rows(), 2);
+        let col = engine.get_column("X").unwrap();
+        assert_eq!(col.as_str_vec(), vec![Some("a".into()), Some("b".into())]);
+    }
+
+    #[test]
+    fn test_not_is_null_filter_batch_eval() {
+        // Force the late-predicate path (direct push + pop-on-reject at
+        // end_row, evaluated via FilterPredicate::check in plan.rs).
+        let mut plan = ExecutionPlan::new();
+        plan.filter = Some(FilterPredicate::not(FilterPredicate::IsNull {
+            field: "X".to_string(),
+        }));
+        let mut sink = TableBuilder::with_plan(4, Arc::new(plan));
+        sink.row_buf.as_mut().unwrap().buffer_worthwhile = false;
+        LineParser
+            .parse_chunk(b"X=a\nY=only\nX=b\n", &mut sink)
+            .unwrap();
+        assert_eq!(sink.num_rows(), 2);
+        let col = sink.get_column("X").unwrap();
+        assert_eq!(col.as_str_vec(), vec![Some("a".into()), Some("b".into())]);
+    }
+
+    #[test]
+    fn test_strict_types_errors_on_malformed_int64() {
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("X".to_string(), FieldType::Int64);
+        plan.strict_types = true;
+        let mut engine = parse_bytes(b"X=42\nX=abc\n", plan);
+        let err = engine.finish().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("\"abc\""), "message should name value: {msg}");
+        assert!(msg.contains("\"X\""), "message should name column: {msg}");
+        assert!(msg.contains("Int64"), "message should name type: {msg}");
+        assert!(msg.contains("row 1"), "message should name row: {msg}");
+    }
+
+    #[test]
+    fn test_strict_types_off_yields_null() {
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("X".to_string(), FieldType::Int64);
+        let engine = parse_bytes(b"X=42\nX=abc\n", plan);
+        assert!(engine.strict_error.is_none());
+        if let ColumnBuilder::Int64(v) = engine.get_column("X").unwrap() {
+            assert_eq!(v.get(0), Some(42));
+            assert_eq!(v.get(1), None);
+        } else {
+            panic!("expected Int64 builder");
+        }
+    }
+
+    #[test]
+    fn test_strict_types_missing_field_stays_null() {
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("X".to_string(), FieldType::Int64);
+        plan.strict_types = true;
+        let mut engine = parse_bytes(b"X=42\nY=1\n", plan);
+        let batch = engine.finish().unwrap();
+        let idx = batch.schema().index_of("X").unwrap();
+        let arr = batch
+            .column(idx)
+            .as_primitive::<arrow::datatypes::Int64Type>();
+        assert_eq!(arr.value(0), 42);
+        assert!(arr.is_null(1));
+    }
+
+    #[test]
+    fn test_strict_types_buffered_filter_path() {
+        // With a filter, values travel through the predicate row buffer; the
+        // strict check must fire there too.
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("X".to_string(), FieldType::Int64);
+        plan.strict_types = true;
+        plan.filter = Some(FilterPredicate::Equal {
+            field: "Y".to_string(),
+            value: "1".to_string(),
+        });
+        let mut engine = parse_bytes(b"Y=1 X=abc\n", plan);
+        let err = engine.finish().unwrap_err();
+        assert!(err.to_string().contains("strict_types"));
     }
 
     #[test]
@@ -2965,7 +3471,10 @@ mod tests {
         // in that order.  Regression: the old wanted_mask was derived from
         // field_index mid-row, so row_satisfied fired after "Name" on row 1
         // and "Department" was never materialized (output was ["Name"]).
-        let mut tb = parse_skipping(REPORT, ExecutionPlan::new().schema_order(["Name", "Department"]));
+        let mut tb = parse_skipping(
+            REPORT,
+            ExecutionPlan::new().schema_order(["Name", "Department"]),
+        );
         assert_eq!(batch_names(&mut tb), vec!["Name", "Department"]);
     }
 
@@ -3004,7 +3513,10 @@ mod tests {
     #[test]
     fn schema_projection_absent_column_null_filled() {
         // Schema is a superset of the data: the absent column is null-filled.
-        let mut tb = parse_skipping(REPORT, ExecutionPlan::new().schema_order(["Name", "Missing"]));
+        let mut tb = parse_skipping(
+            REPORT,
+            ExecutionPlan::new().schema_order(["Name", "Missing"]),
+        );
         let batch = tb.finish().unwrap();
         assert_eq!(batch.num_rows(), 2);
         let missing = batch.column_by_name("Missing").unwrap().as_string::<i32>();
@@ -3043,8 +3555,16 @@ mod tests {
         let mut tb = parse_skipping(REPORT, plan);
         let batch = tb.finish().unwrap();
         let amount = batch.column_by_name("Amount").unwrap();
-        assert!(matches!(amount.data_type(), arrow::datatypes::DataType::Int64));
-        assert_eq!(amount.as_primitive::<arrow::datatypes::Int64Type>().value(1), 2);
+        assert!(matches!(
+            amount.data_type(),
+            arrow::datatypes::DataType::Int64
+        ));
+        assert_eq!(
+            amount
+                .as_primitive::<arrow::datatypes::Int64Type>()
+                .value(1),
+            2
+        );
     }
 
     #[test]
@@ -3078,11 +3598,22 @@ mod tests {
     fn schema_projection_no_parser_cooperation() {
         // Even when the adapter pushes every field (no wants/resolve checks),
         // the projection still holds: unlisted fields are never materialized.
-        let mut tb = parse_bytes(REPORT, ExecutionPlan::new().schema_order(["Department", "Name"]));
+        let mut tb = parse_bytes(
+            REPORT,
+            ExecutionPlan::new().schema_order(["Department", "Name"]),
+        );
         let batch = tb.finish().unwrap();
-        let names: Vec<String> = batch.schema().fields().iter().map(|f| f.name().clone()).collect();
+        let names: Vec<String> = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
         assert_eq!(names, vec!["Department", "Name"]);
-        let dept = batch.column_by_name("Department").unwrap().as_string::<i32>();
+        let dept = batch
+            .column_by_name("Department")
+            .unwrap()
+            .as_string::<i32>();
         assert_eq!(dept.value(0), "d1");
     }
 }

@@ -22,8 +22,12 @@ pub struct TableBuilder {
     frozen: Option<Arc<FrozenSchema>>,
     unknown_error: Option<String>,
     row_buf: Option<Box<RowBuffer>>,
+    cached_wanted_mask: u64,
     ordinal_expect: Vec<Option<(u32, Vec<u8>)>>,
     current_ordinal: u32,
+    strict_error: Option<crate::Error>,
+    rows_accepted: usize,
+    rows_rejected: usize,
 }
 ```
 
@@ -60,6 +64,23 @@ pub struct TableBuilder {
   allocated when `plan.filter` is `Some`. Boxed to avoid 1 KB of inline
   SmallVec in every unfiltered `TableBuilder`.
 
+- **`cached_wanted_mask: u64`**: Projection short-circuit mask for
+  `wanted_mask()`/`row_satisfied()`. Bit `i` is set iff column `i` is wanted
+  by the schema projection (declared columns plus filter-referenced fields).
+  Computed once in `with_plan` after `predeclare_schema_columns`, so it is
+  complete from the first row. 0 when no projection is active.
+
+- **`strict_error: Option<crate::Error>`**: First `strict_types` violation,
+  recorded during puts (the `ColumnarSink` trait is infallible) and surfaced
+  as an error by `finish()`.
+
+- **`rows_accepted` / `rows_rejected: usize`**: Row counters since the last
+  `finish()`/`reset()`, feeding the observer's `on_chunk_finished`.
+
+The plan carries an optional `observer: Arc<dyn RowObserver>` with
+`on_begin_row`, `on_put_field`, `on_row_accepted`, `on_row_rejected`, and
+`on_chunk_finished` callbacks; the pseudocode below shows where each fires.
+
 - **`ordinal_expect: Vec<Option<(u32, Vec<u8>)>>`**: Per-ordinal layout
   cache for the expect_slot fast path. Populated on first row.
 
@@ -71,9 +92,13 @@ pub struct TableBuilder {
 - **`new()`**: Empty, default plan.
 - **`with_capacity(cap)`**: Pre-sizes column storage.
 - **`with_plan(cap, plan)`**: Pre-sizes with a specific plan. The filter
-  plan determines whether `row_buf` is allocated.
+  plan determines whether `row_buf` is allocated. Also calls
+  `predeclare_schema_columns()` and computes `cached_wanted_mask`.
 
-All constructors initialize the three vectors and the map as empty.
+`new()` and `with_capacity()` initialize the three vectors and the map as
+empty. `with_plan` additionally populates `columns`, `field_index`, and
+`column_order` with all declared schema columns plus filter-referenced
+fields when a schema projection is active.
 
 ## Core row protocol { #core-row-protocol }
 
@@ -84,20 +109,38 @@ The engine implements these as:
 
 ```rust
 fn begin_row(&mut self) {
+    if let Some(ref obs) = self.plan.observer {
+        obs.on_begin_row(self.row_count);
+    }
     self.current_ordinal = 0;
-    // Clear row_buf if present, reset predicate state
+    if let Some(ref mut buf) = self.row_buf {
+        // Adaptive decision: once row_count > 0, if the predicate column's
+        // ordinal is >= 4/5 of the column count, buffering is a net loss.
+        if buf.predicate_ordinal.is_some() && buf.buffer_worthwhile && self.row_count > 0 {
+            // ncols: frozen schema, else schema_order len, else columns.len()
+            if buf.predicate_ordinal.unwrap() >= ncols * 4 / 5 {
+                buf.buffer_worthwhile = false;
+            }
+        }
+        buf.fields.clear();
+        buf.state = PredicateState::Undecided;
+        buf.direct = false;
+    }
 }
 ```
 
-No-op for the common case (no filter). Row boundaries are tracked by
-`row_count` and `row_dirty`.
+No-op for the common case (no filter, no observer). Row boundaries are
+tracked by `row_count` and `row_dirty`.
 
 ### push_field (called by put_field) { #push_field }
 
 ```rust
 fn push_field(&mut self, name: &str, value: Value<'_>) {
-    // Fast path: no rename/drop configured
-    if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+    // Fast path: no rename/drop/projection configured
+    if self.plan.field_map.is_empty()
+        && self.plan.drop_fields.is_empty()
+        && self.plan.schema_order.is_empty()
+    {
         self.push_field_resolved(name, value);
         return;
     }
@@ -134,7 +177,22 @@ fn push_field(&mut self, name: &str, value: Value<'_>) {
 
 ```rust
 fn push_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
+    // Frozen exact schema: unknown field sets unknown_error and returns
+    if self.frozen.is_some() && !self.field_index.contains_key(resolved_name) {
+        if frozen.is_exact() {
+            self.unknown_error.get_or_insert(...);
+            return;
+        }
+    }
     let idx = self.ensure_column_idx(resolved_name);
+    self.record_strict_violation_at(idx, &value);  // strict_types check
+    self.notify_put_field(idx, &value);            // observer.on_put_field
+    // Track ordinal→slot mapping on first row for expect_slot fast path
+    if self.row_count == 0 {
+        self.ordinal_expect[self.current_ordinal as usize] =
+            Some((idx as u32, resolved_name.as_bytes().to_vec()));
+    }
+    self.current_ordinal += 1;
     // Set dirty bit
     let word = idx / 64;
     let bit = idx % 64;
@@ -155,11 +213,23 @@ fn ensure_column_idx(&mut self, name: &str) -> usize {
     if let Some(&idx) = self.field_index.get(name) {
         return idx;
     }
+    // Frozen exact schema: unknown field sets unknown_error, returns dummy 0
+    if self.frozen.is_some() && frozen.is_exact() {
+        self.unknown_error.get_or_insert(...);
+        return 0;
+    }
     // New column: create builder, backfill nulls, insert
     let est = self.estimated_rows.max(64);
     let col_type = self.plan.column_type(name);
     let mut b = ColumnBuilder::with_capacity(est, &col_type);
-    for _ in 0..self.row_count {
+    // Mid-row predicate drain already incremented row_count, so backfill
+    // one less null in that case.
+    let backfill = if row_buf.direct {
+        self.row_count.saturating_sub(1)
+    } else {
+        self.row_count
+    };
+    for _ in 0..backfill {
         b.push(None);
     }
     let idx = self.columns.len();
@@ -208,40 +278,65 @@ fn finish_row(&mut self) {
     if let Some(ref filter) = self.plan.filter {
         if !filter.check(&self.columns, &self.field_index, self.row_count, &self.plan) {
             for b in &mut self.columns { b.pop(); }
+            self.rows_rejected += 1;
+            if let Some(ref obs) = self.plan.observer {
+                obs.on_row_rejected(self.row_count);
+            }
             return;
         }
     }
     self.row_count += 1;
+    self.rows_accepted += 1;
+    if let Some(ref obs) = self.plan.observer {
+        obs.on_row_accepted(self.row_count - 1);
+    }
 }
 ```
 
-For 10 columns where 8 are present each row, this saves 80% of null-fill
-pushes. The fast path skips the loop entirely for dense rows.
+The bitmask avoids a `for col in 0..ncols` length check per column: only
+missing columns get a `None` push, and the fast path skips the loop entirely
+for dense rows.
 
 ### finish (Arrow export) { #finish }
 
 ```rust
 fn finish(&mut self) -> Result<RecordBatch> {
+    // Surface deferred errors from the infallible put path
+    if let Some(err) = self.unknown_error.take() {
+        return Err(crate::Error::Merge(err));
+    }
+    if let Some(err) = self.strict_error.take() {
+        return Err(err);
+    }
+    if let Some(ref obs) = self.plan.observer {
+        obs.on_chunk_finished(
+            self.rows_accepted + self.rows_rejected,
+            self.rows_accepted,
+            self.rows_rejected,
+        );
+    }
     self.normalize();
     if self.column_order.is_empty() {
         return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
     }
     self.auto_dict_upgrade();
+    // Schema projection: emit exactly the declared schema_order columns,
+    // in that order. Declared-but-unseen fields become all-null columns;
+    // filter-only columns are projected out. No sort_columns() here.
+    if !self.plan.schema_order.is_empty() {
+        for name in &self.plan.schema_order {
+            // skip if in drop_fields; create all-null column if never seen;
+            // push ArrowField + to_arrow_array()
+        }
+        return Ok(RecordBatch::try_new(schema, arrays)?);
+    }
     self.sort_columns();
-    let fields: Vec<ArrowField> = self.column_order.iter()
-        .filter_map(|name| {
-            let idx = self.field_index.get(name)?;
-            let b = &self.columns[*idx];
-            Some(ArrowField::new(name, b.arrow_datatype(), true))
-        })
-        .collect();
-    let arrays: Vec<ArrayRef> = self.column_order.iter()
-        .filter_map(|name| {
-            let idx = self.field_index.get(name)?;
-            let b = &mut self.columns[*idx];
-            Some(b.to_arrow_array()?)
-        })
-        .collect();
+    for name in &self.column_order {
+        if let Some(&idx) = self.field_index.get(name.as_str()) {
+            fields.push(ArrowField::new(name, columns[idx].arrow_datatype(), true));
+            arrays.push(columns[idx].to_arrow_array()?);
+        }
+    }
     Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)?)
 }
 ```
@@ -249,12 +344,14 @@ fn finish(&mut self) -> Result<RecordBatch> {
 ## Predicate-first evaluation { #predicate-first-evaluation }
 
 When a filter is active, `RowBuffer` holds `(slot, Value<'static>)` pairs
-instead of pushing to columns. After each field, the predicate is evaluated
+instead of pushing to columns. Each arriving field is buffered; only when the
+field is a predicate column (`is_predicate_slot`) is the predicate evaluated
 against the buffered values. If it passes, the engine switches to direct mode
 and drains the buffer.
 
-The adaptive strategy: if the predicate column appears late (> 4/5 of
-columns), buffering is a net loss. The engine switches to direct push +
+The adaptive strategy: if the predicate column appears late (ordinal >= 4/5
+of columns), buffering is a net loss. The check runs in `begin_row`, only
+after the first committed row, and the engine then switches to direct push +
 pop-on-reject.
 
 See [Optimizations](./optimizations.md) for the full predicate-first design.
@@ -270,7 +367,8 @@ See [Decoder API](./decoder.md) for the adapter-side interface.
 ## Invariants { #invariants }
 
 - `columns.len() == field_index.len()` always
-- `row_dirty.len() == (columns.len() + 63) / 64` always
+- `row_dirty.len() >= (columns.len() + 63) / 64` (equality holds except
+  transiently after `take_column`, which resizes before shrinking `columns`)
 - After `finish_row`: all dirty bits are clear
 - `take_column` keeps vectors in sync via swap_remove patching
 

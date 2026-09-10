@@ -19,7 +19,7 @@ For a 533 MB file on a Ryzen 5800X:
 Your parser's job is to make the parsing phase fast. The engine handles
 everything else.
 
-## Technique 1: Declare schema upfront { #technique-1-declare-schema-upfront }
+## Declare schema upfront { #declare-schema-upfront }
 
 This is the single largest performance lever. When the column set is known,
 declare it with `schema_order` and `field_types`:
@@ -54,7 +54,7 @@ let plan = ExecutionPlan::new()
 
 See [Schema](./schema.md) for the full guide.
 
-## Technique 2: Check `wants()` before scanning { #technique-2-check-wants-before-scanning }
+## Check `wants()` before scanning { #check-wants-before-scanning }
 
 Always check `sink.wants(name)` before doing expensive extraction:
 
@@ -78,7 +78,7 @@ parsing or regex.
 
 **Performance gain:** +66% on `drop_all` workloads.
 
-## Technique 3: Use `scan::find` instead of raw `memchr` { #technique-3-use-scan-find }
+## Use `scan::find` instead of raw `memchr` { #technique-3-use-scan-find }
 
 The `rypipe_core::scan` module provides byte-search primitives with an
 O(1) fast path:
@@ -102,7 +102,7 @@ delimiters in each row.
 
 See [Scan primitives](./scan.md) for details.
 
-## Technique 4: Borrow strings with `Cow::Borrowed` { #technique-4-cow-borrowed }
+## Borrow strings with `Cow::Borrowed` { #technique-4-cow-borrowed }
 
 Always borrow from the input when possible:
 
@@ -123,7 +123,7 @@ add up to measurable throughput loss.
 **When to use `Cow::Owned`:** Only when you must modify the value (e.g.,
 unescape HTML entities, normalize whitespace, decode escaped characters).
 
-## Technique 5: Emit typed values { #technique-5-emit-typed-values }
+## Emit typed values { #technique-5-emit-typed-values }
 
 When the format has numeric or boolean data, parse directly into the
 correct `Value` variant:
@@ -144,7 +144,7 @@ declaration.
 
 **Performance gain:** 10-20% for numeric-heavy workloads.
 
-## Technique 6: Use `resolve` + `put_field_resolved` { #technique-6-resolve }
+## Use `resolve` + `put_field_resolved` { #technique-6-resolve }
 
 For hot paths, use single-hash-probe resolution:
 
@@ -170,7 +170,7 @@ This eliminates one hash-table access per field in your parser's inner loop.
 **When `wants()` is fine:** For fields that appear rarely or are checked
 once per row (not per field).
 
-## Technique 7: Implement `parse_chunk_generic` { #technique-7-parse-chunk-generic }
+## Implement `parse_chunk_generic` { #technique-7-parse-chunk-generic }
 
 For maximum performance, implement the devirtualized `parse_chunk_generic`:
 
@@ -207,11 +207,11 @@ fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut impl ColumnarSink) -> Res
     mandatory anyway, the generic method is not object-safe (custom drivers
     using `dyn RecordParser` bypass it), and monomorphization costs compile
     time and binary size per sink type. If you are not CPU-bound in the
-    parse loop — small files, I/O-bound reads — the 5-10% is in the noise.
+    parse loop (small files, I/O-bound reads), the 5-10% is in the noise.
     The default impl delegates to `parse_chunk`, so migrating later is safe.
 
 
-## Technique 8: Implement `skip_regions` { #technique-8-skip-regions }
+## Implement `skip_regions` { #technique-8-skip-regions }
 
 If your format has comments, CDATA sections, or quoted strings that may
 contain false-positive delimiters, implement `skip_regions` by implementing
@@ -254,7 +254,7 @@ where delimiters can appear inside non-data regions.
 
 See [Skip regions](./skip-regions.md) for details.
 
-## Technique 9: Use SIMD for scanning { #technique-9-simd-scanning }
+## Use SIMD for scanning { #technique-9-simd-scanning }
 
 For formats with complex delimiters, use SIMD-accelerated scanning:
 
@@ -284,6 +284,36 @@ tags across large field values.
     Returning a fixed value regardless of data creates unbalanced chunks and
     hurts parallel efficiency. Always count delimiters in the sample.
 
+
+## Observer hooks for diagnostics { #observer-hooks }
+
+Attach a `RowObserver` to the plan to watch the parse without changing it:
+
+```rust
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use rypipe_core::{ExecutionPlan, RowObserver};
+
+#[derive(Default)]
+struct CountRejections {
+    rejected: AtomicUsize,
+}
+
+impl RowObserver for CountRejections {
+    fn on_row_rejected(&self, _row: usize) {
+        self.rejected.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+let counter = Arc::new(CountRejections::default());
+let plan = ExecutionPlan::new().with_observer(counter.clone());
+```
+
+Hooks fire from parse threads on every engine (serial, parallel, bounded,
+streaming), so keep them cheap and thread-safe. Buffered filter rows report
+`on_put_field` only when the row is accepted. From Python, pass
+`observer={"on_row_rejected": fn}` to the source instead; see the
+[stage protocol](../advanced/stage-protocol.md#observer-hooks).
 
 ## Benchmarking { #benchmarking }
 
@@ -370,20 +400,17 @@ dropped fields never reach `put_field` or a column builder.
 
 ## What the end user sees { #what-the-end-user-sees }
 
-The single most user-visible technique is schema declaration (Technique 1):
+The single most user-visible technique is schema declaration:
 the same `schema` and `field_types` kwargs you accept and forward are what
 the user passes to skip discovery and get typed columns:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # The +80% projection win, as two keyword arguments.
-table = rypipe.read(
+table = LogSource(
     "sample.log",
-    format="log",
     schema=["id", "amount"],
     field_types={"id": "int64", "amount": "float64"},
-)
+).to_arrow()
 ```

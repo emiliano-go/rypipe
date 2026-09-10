@@ -13,12 +13,14 @@ use pyo3::prelude::*;
 
 mod export;
 mod plan_kwargs;
+mod py_observer;
 
 pub use export::{
     record_batch_to_pyarrow, record_batches_to_pyarrow, record_batches_to_pyarrow_batches,
     record_batches_to_pyarrow_table,
 };
 pub use plan_kwargs::execution_plan_from_kwargs;
+pub use py_observer::PyObserver;
 
 // Typed exceptions so callers can distinguish failure classes:
 // `ParseError`: malformed/unparseable input (including invalid UTF-8).

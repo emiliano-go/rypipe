@@ -121,7 +121,8 @@ that the standard stages cannot express.
 
 ### Example: logging filter { #example-logging-filter }
 
-A filter that logs every rejected row for debugging:
+A filter that logs every rejected row for debugging. Attach the side effect
+as an observer hook so it keeps working when the stage fuses:
 
 ```python
 from rypipe.stages import FilterRows
@@ -130,17 +131,67 @@ import logging
 logger = logging.getLogger(__name__)
 
 class LoggingFilterRows(FilterRows):
-    """FilterRows that logs rejected rows."""
+    """FilterRows that logs rejected rows (fusion-safe)."""
 
-    def apply(self, record: dict) -> dict | None:
-        result = super().apply(record)
-        if result is None:
-            logger.debug("dropped row: %s", record)
-        return result
+    def _plan_kwargs(self) -> dict | None:
+        kwargs = super()._plan_kwargs() or {}
+        kwargs["observer"] = {"on_row_rejected": self._log_rejected}
+        return kwargs
+
+    def _log_rejected(self, row_index: int) -> None:
+        logger.debug("dropped row %d", row_index)
 ```
 
-This works because `apply()` is called per-row. The `_plan_kwargs()` method
-is inherited, so fusion still applies for the keyword form.
+The `_plan_kwargs()` method is inherited and extended, so the filter still
+fuses into the parse loop, and the `on_row_rejected` hook fires from inside
+the engine for every rejected row.
+
+The naive alternative (overriding `apply()` to log and delegating to
+`super().apply()`) breaks silently: when fusion succeeds the stage never
+runs in Python, so `apply()` is never called and nothing is logged. Rule of
+thumb: overriding `apply()` on a fusable stage drops your override whenever
+fusion succeeds; put side effects in observer hooks instead.
+
+## Observer hooks { #observer-hooks }
+
+A stage (or a source, via its `observer=` kwarg) can attach a dict of
+callables under the `observer` plan key. The engine fires them per row from
+parse threads, on every engine (serial, parallel, bounded, streaming):
+
+| Hook | Arguments | Fires when |
+|------|-----------|------------|
+| `on_begin_row` | `(row_index)` | A new row starts |
+| `on_put_field` | `(row_index, name, slot, value)` | A field lands in a column |
+| `on_row_accepted` | `(row_index)` | The row passes the filter and is committed |
+| `on_row_rejected` | `(row_index)` | The filter rejects the row |
+| `on_chunk_finished` | `(total, accepted, rejected)` | A batch finishes (per-batch counts in streaming) |
+
+Notes:
+
+- `row_index` counts accepted rows so far, so rejected rows reuse the next
+  free index.
+- When a filter buffers values before the predicate resolves, `on_put_field`
+  fires only for accepted rows (hooks fire on drain, not on buffer).
+- Hooks run on parse threads (several at once on parallel engines): they
+  must be thread-safe. Exceptions raised by a hook are printed and
+  swallowed; a hook can never abort a parse.
+- `on_put_field` takes the GIL per call from Python (roughly 50ns, about
+  0.5s for 1M rows with 10 fields). Prefer row-level hooks in Python; keep
+  field-level hooks in Rust.
+- When several stages provide the same hook, the pipeline chains the
+  callables in stage order instead of overwriting.
+
+### Side effects and fusion { #side-effects-and-fusion }
+
+| Approach | Fuses? | Side effect when fused |
+|----------|--------|------------------------|
+| Override `apply()` on a fusable stage | Yes | Silently lost (never called) |
+| Return `None` from `_plan_kwargs()` | No | Runs in Python over the materialized table |
+| Observer hooks via `observer=` / `_plan_kwargs()` | Yes | Fires from the parse loop |
+
+`ObservedStage` (in `rypipe.stages`) packages the third row: override
+`observer_hooks()` to return the hook dict, and override `apply()` as the
+fallback for pipelines that cannot fuse.
 
 ### Example: non-fusable stage { #example-non-fusable-stage }
 
@@ -174,10 +225,11 @@ run this stage in Python. This is correct but slower.
 | `RenameFields` | `field_mapping` | Yes | Rename columns |
 | `DropFields` | `drop_fields` | Yes | Remove columns |
 | `CastTypes` | `field_types` | Yes (for `int`, `float`, `bool`, `date`, `datetime`, `Decimal`) | Cast column types |
-| `FilterRows` | `filter` | Yes (keyword form, `is_null`/`is_type`, or compiled lambda) | Filter rows by predicate |
+| `FilterRows` | `filter` | Yes (keyword form, `is_null`/`is_type`, `regex`, or expression predicate) | Filter rows by predicate |
 | `FilterRowsAny` | (composed) | Yes | Logical OR of filters |
 | `FilterRowsAll` | (composed) | Yes | Logical AND of filters |
 | `FilterRowsNot` | (composed) | Yes | Negate a filter |
+| `ObservedStage` | `observer` | Yes | Base class for observer-hook side effects |
 
 ### _plan_kwargs keys { #plan-kwargs-keys }
 
@@ -188,6 +240,7 @@ These keys are merged into the `ExecutionPlan` passed to the Rust parser:
 | `field_mapping` | `dict[str, str]` | Rename mapping: raw name → output name |
 | `drop_fields` | `list[str]` | Fields to skip entirely |
 | `field_types` | `dict[str, str]` | Type overrides (e.g., `"int64"`, `"float64"`) |
-| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}`, `{"field_a", "op", "field_b"}`, `{"is_null": true}`, or `{"is_type": "int64"}` |
+| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}` (with `op="regex"` for regex search), `{"field_a", "op", "field_b"}`, `{"is_null": true}`, or `{"is_type": "int64"}` |
+| `observer` | `dict[str, callable]` | Row observer hooks (`on_row_rejected`, ...); merged per-hook, chained across stages |
 
 See [Execution Plan](../architecture/plan.md) for the full plan structure.

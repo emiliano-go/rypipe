@@ -13,7 +13,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use rypipe_core::{CompareOp, ExecutionPlan, FieldType, FilterPredicate};
+use rypipe_core::{CompareOp, ExecutionPlan, FieldType, FilterPredicate, RegexSpec};
 use std::collections::HashMap;
 
 use crate::PlanError;
@@ -31,6 +31,9 @@ pub fn execution_plan_from_kwargs(
     auto_dict: bool,
     auto_dict_threshold: Option<f64>,
     auto_dict_max_size: Option<usize>,
+    strict_types: bool,
+    max_split_chunks: Option<usize>,
+    observer: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ExecutionPlan> {
     let mut plan = ExecutionPlan::new();
 
@@ -49,6 +52,15 @@ pub fn execution_plan_from_kwargs(
     plan.auto_dict = auto_dict;
     plan.dict_threshold = auto_dict_threshold;
     plan.dict_max_size = auto_dict_max_size;
+    plan.strict_types = strict_types;
+    plan.max_split_chunks = max_split_chunks;
+
+    if let Some(obs) = observer {
+        let dict = obs.cast::<pyo3::types::PyDict>().map_err(|_| {
+            crate::PlanError::new_err("observer must be a dict like {\"on_row_rejected\": fn}")
+        })?;
+        plan.observer = Some(crate::PyObserver::from_dict(dict)?);
+    }
 
     if let Some(ft) = field_types {
         for (name, type_str) in ft {
@@ -174,9 +186,17 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         };
         let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
             let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
-            PlanError::new_err(format!("unsupported compare op {cmp_op_str:?}; valid: {valid}"))
+            PlanError::new_err(format!(
+                "unsupported compare op {cmp_op_str:?}; valid: {valid}"
+            ))
         })?;
-        return Ok(FilterPredicate::Replace { field, old, new, op: cop, value });
+        return Ok(FilterPredicate::Replace {
+            field,
+            old,
+            new,
+            op: cop,
+            value,
+        });
     }
 
     // Collection membership: field + op + values
@@ -203,6 +223,21 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             .ok_or_else(|| PlanError::new_err("is_null filter must include 'field' key"))?
             .extract::<String>()?;
         return Ok(FilterPredicate::IsNull { field });
+    }
+
+    // Regex match: field + op="regex" + value (pattern)
+    if op == "regex" {
+        let field = f
+            .get_item("field")?
+            .ok_or_else(|| PlanError::new_err("regex filter must include 'field' key"))?
+            .extract::<String>()?;
+        let pattern = f
+            .get_item("value")?
+            .ok_or_else(|| PlanError::new_err("regex filter must include 'value' key"))?
+            .extract::<String>()?;
+        let re = RegexSpec::new(pattern)
+            .map_err(|e| PlanError::new_err(format!("invalid regex in filter: {e}")))?;
+        return Ok(FilterPredicate::Regex { field, re });
     }
 
     // Type check: field + op="is_type" + value (type name)
@@ -248,12 +283,26 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             };
             let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
                 let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
-                PlanError::new_err(format!("unsupported compare op {cmp_op_str:?}; valid: {valid}"))
+                PlanError::new_err(format!(
+                    "unsupported compare op {cmp_op_str:?}; valid: {valid}"
+                ))
             })?;
             match op.as_str() {
-                "strip" | "lstrip" | "rstrip" => FilterPredicate::Strip { field, op: cop, value },
-                "lower" => FilterPredicate::Lower { field, op: cop, value },
-                "upper" => FilterPredicate::Upper { field, op: cop, value },
+                "strip" | "lstrip" | "rstrip" => FilterPredicate::Strip {
+                    field,
+                    op: cop,
+                    value,
+                },
+                "lower" => FilterPredicate::Lower {
+                    field,
+                    op: cop,
+                    value,
+                },
+                "upper" => FilterPredicate::Upper {
+                    field,
+                    op: cop,
+                    value,
+                },
                 _ => unreachable!(),
             }
         }
@@ -265,13 +314,19 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             };
             let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
                 let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
-                PlanError::new_err(format!("unsupported compare op {cmp_op_str:?}; valid: {valid}"))
+                PlanError::new_err(format!(
+                    "unsupported compare op {cmp_op_str:?}; valid: {valid}"
+                ))
             })?;
-            FilterPredicate::Length { field, op: cop, value }
+            FilterPredicate::Length {
+                field,
+                op: cop,
+                value,
+            }
         }
         other => {
             let cop = CompareOp::from_str(other).ok_or_else(|| {
-                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with, contains, strip, lower, upper, length, is_null, is_type";
+                let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with, contains, strip, lower, upper, length, is_null, is_type, regex";
                 PlanError::new_err(format!("unsupported filter op {other:?}; valid: {valid}"))
             })?;
             FilterPredicate::CompareLiteral {

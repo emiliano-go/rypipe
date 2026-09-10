@@ -184,10 +184,8 @@ correct `Splitter` is registered, the engine picks split points and parallel
 threads on its own:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # The splitter runs behind the scenes; parallelism is automatic.
-table = rypipe.read("sample.log", format="log")
+table = LogSource("sample.log").to_arrow()
 ```

@@ -23,6 +23,15 @@ impl TableBuilder {
     /// promotions (`int64`→`float64`, `string`→`dictionary`); irreconcilable
     /// conflicts return [`crate::Error::Merge`].
     pub fn extend(&mut self, mut other: TableBuilder) -> Result<()> {
+        // A strict-types violation recorded while building `other` must not be
+        // silently dropped by the merge.
+        if self.strict_error.is_none() {
+            self.strict_error = other.strict_error.take();
+        }
+        // Per-row hooks already fired in the chunk's thread; only the
+        // accepted/rejected totals carry over for `on_chunk_finished`.
+        self.rows_accepted += other.rows_accepted;
+        self.rows_rejected += other.rows_rejected;
         let self_rows = self.row_count;
         let other_rows = other.row_count;
 
@@ -99,6 +108,14 @@ pub fn engines_to_record_batches(
     plan: &ExecutionPlan,
 ) -> Result<Vec<RecordBatch>> {
     for e in engines.iter_mut() {
+        // `finish()` is bypassed here, so surface deferred per-chunk errors
+        // (strict-types violations, unknown-field errors) explicitly.
+        if let Some(err) = e.unknown_error.take() {
+            return Err(crate::Error::Merge(err));
+        }
+        if let Some(err) = e.strict_error.take() {
+            return Err(err);
+        }
         e.normalize();
     }
     engines.retain(|e| e.row_count > 0);
@@ -191,4 +208,46 @@ pub fn engines_to_record_batches(
     }
 
     Ok(batches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ColumnarSink, FieldType, Value};
+    use std::borrow::Cow;
+
+    /// Builder whose second row violates `strict_types` for `N: Int64`.
+    fn strict_builder_with_bad_value() -> TableBuilder {
+        let mut plan = ExecutionPlan::new();
+        plan.field_types.insert("N".to_string(), FieldType::Int64);
+        plan.strict_types = true;
+        let mut b = TableBuilder::with_plan(4, Arc::new(plan));
+        ColumnarSink::put_field(&mut b, "N", Value::Str(Cow::Borrowed("1")));
+        ColumnarSink::end_row(&mut b);
+        ColumnarSink::put_field(&mut b, "N", Value::Str(Cow::Borrowed("abc")));
+        ColumnarSink::end_row(&mut b);
+        b
+    }
+
+    #[test]
+    fn test_extend_propagates_strict_error() {
+        let mut merged = TableBuilder::with_plan(4, Arc::new(ExecutionPlan::new()));
+        merged.extend(strict_builder_with_bad_value()).unwrap();
+        let err = merged.finish().unwrap_err();
+        assert!(
+            err.to_string().contains("strict_types"),
+            "extend must preserve the chunk's strict violation: {err}"
+        );
+    }
+
+    #[test]
+    fn test_engines_to_record_batches_surfaces_strict_error() {
+        let err =
+            engines_to_record_batches(vec![strict_builder_with_bad_value()], &ExecutionPlan::new())
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("strict_types"),
+            "fast-path export must surface the strict violation: {err}"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .lambda_compiler import _analyze_lambda
+import re
 
 
 class _ConstantPredicate:
@@ -108,6 +108,22 @@ class _EndsWithPredicate:
         return str(actual).endswith(self._value)
 
 
+class _RegexPredicate:
+    """Fusable predicate: regex search against str(r["field"])"""
+    __slots__ = ("_field", "_value", "_compiled")
+
+    def __init__(self, field: str, value: str):
+        self._field = field
+        self._value = value
+        self._compiled = re.compile(value)
+
+    def __call__(self, record: dict) -> bool:
+        actual = record.get(self._field)
+        if actual is None:
+            return False
+        return bool(self._compiled.search(str(actual)))
+
+
 class _InPredicate:
     """Fusable predicate: r["field"] in values or r["field"] not in values"""
     __slots__ = ("_field", "_values", "_negate")
@@ -135,6 +151,8 @@ def _build_predicate_from_spec(spec: dict):
         if op == "is_type":
             return _IsTypePredicate(spec["field"], spec["value"])
         if "value" in spec:
+            if op == "regex":
+                return _RegexPredicate(spec["field"], spec["value"])
             if op == "starts_with":
                 return _StartsWithPredicate(spec["field"], spec["value"])
             if op == "ends_with":
@@ -229,6 +247,17 @@ class _IsNullPredicate:
         return record.get(self._field) is None
 
 
+class _NotNullPredicate:
+    """Fusable predicate: r["field"] is not None and present"""
+    __slots__ = ("_field",)
+
+    def __init__(self, field: str):
+        self._field = field
+
+    def __call__(self, record: dict) -> bool:
+        return record.get(self._field) is not None
+
+
 class _IsTypePredicate:
     """Fusable predicate: r["field"] is of the given type"""
     __slots__ = ("_field", "_field_type")
@@ -287,38 +316,51 @@ class FilterRows:
         value=None,
         field_a=None,
         field_b=None,
-        is_null=False,
+        is_null=None,
         is_type=None,
     ):
         if predicate is not None:
-            # Try to compile the lambda into a fusable filter spec
-            spec = _analyze_lambda(predicate)
-            if spec is not None:
-                # Lambda was compiled successfully; use the spec for fusion
+            to_spec = getattr(predicate, "_to_spec", None)
+            if callable(to_spec):
+                # Expression API predicate (rypipe.expr.Predicate); fusable
+                spec = to_spec()
                 self._filter_spec = spec
                 self._predicate = _build_predicate_from_spec(spec)
+                if self._predicate is None:
+                    raise ValueError(
+                        f"FilterRows: cannot build a predicate from spec {spec!r}"
+                    )
             else:
-                # Unknown pattern; fall back to Python execution
+                # Plain callable; Python fallback execution, not fusable
                 self._predicate = predicate
                 self._filter_spec = None
-        elif is_null and field is not None:
-            self._filter_spec = {"field": field, "op": "is_null"}
-            self._predicate = _IsNullPredicate(field)
+        elif is_null is not None and field is not None:
+            if is_null:
+                self._filter_spec = {"field": field, "op": "is_null"}
+                self._predicate = _IsNullPredicate(field)
+            else:
+                self._filter_spec = {"not": {"field": field, "op": "is_null"}}
+                self._predicate = _NotNullPredicate(field)
         elif is_type is not None and field is not None:
             self._filter_spec = {"field": field, "op": "is_type", "value": is_type}
             self._predicate = _IsTypePredicate(field, is_type)
         elif field is not None and op is not None and value is not None:
             self._filter_spec = {"field": field, "op": op, "value": value}
-            self._predicate = _ConstantPredicate(field, op, value)
+            if op == "regex":
+                self._predicate = _RegexPredicate(field, value)
+            else:
+                self._predicate = _ConstantPredicate(field, op, value)
         elif field_a is not None and op is not None and field_b is not None:
             self._filter_spec = {"field_a": field_a, "op": op, "field_b": field_b}
             self._predicate = _ComparePredicate(field_a, op, field_b)
         else:
             raise ValueError(
-                "FilterRows requires either a callable predicate or "
+                "FilterRows requires either a callable predicate, an "
+                "expression predicate (see rypipe.expr), or "
                 "keyword arguments (field+op+value for constant filter, "
                 "field_a+op+field_b for column comparison, "
-                "field+is_null for null check, or field+is_type for type check). "
+                "field+is_null=True for a null check or field+is_null=False "
+                "for a not-null check, or field+is_type for type check). "
                 f"Got predicate={predicate!r}, field={field!r}, op={op!r}, "
                 f"value={value!r}, field_a={field_a!r}, field_b={field_b!r}, "
                 f"is_null={is_null!r}, is_type={is_type!r}"
@@ -346,8 +388,8 @@ def _require_filter_spec(obj, label: str) -> dict:
         if obj._filter_spec is None:
             raise ValueError(
                 f"{label} only accepts fusable filters: FilterRows with field/op/value "
-                f"or field_a/op/field_b keyword form. Pass FilterRows(..., field=..., op=..., "
-                f"value=...) or field_a/field_b instead of a plain lambda/Callable."
+                f"or field_a/op/field_b keyword form, or an expression predicate "
+                f"(col(...)). Plain lambdas/Callables cannot be combined."
             )
         return obj._filter_spec
     if isinstance(obj, (FilterRowsAny, FilterRowsAll, FilterRowsNot)):

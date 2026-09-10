@@ -23,7 +23,17 @@ df = to_pandas(
     | FilterRows(field="status", op="==", value="active")
     | CastTypes({"amount": float})
 )
+
+# Expression predicates (rypipe.expr) are fusable too:
+from rypipe import col
+
+df = to_pandas(
+    source
+    | FilterRows((col("amount") > 100) & (col("status") == "active"))
+)
 ```
+
+Expression predicates (`col("x") > 100`, `col("s").startswith("A")`, `col("s").matches(r"^ERR")`, `col("n").between(1, 10)`, combined with `&`, `|`, `~`) build the same filter spec dicts the engine fuses, with no bytecode analysis. Plain lambdas and other callables still work but always run in Python; see [expression filters](../architecture/expressions.md).
 
 When the pipeline is materialized, the stage list is collapsed into one plan. The Rust parser:
 
@@ -46,24 +56,24 @@ source | RenameFields | DropFields      ExecutionPlan
                                         ├── field_types: {amount → Float64}
          │                              ├── filter:      Equal(status, "active")
          ▼                              └── schema_order: []
-   plan_split()                              │
-         │                                    ▼
+   plan_split()                             │
+         │                                  ▼
    plan_overrides = {                  TableBuilder::push_field()
      field_mapping,                         │
      drop_fields,                    ┌──────┴──────┐
-     field_types,                    │  resolve name │
-     filter                          │  via field_map│
-   }                                └──────┬──────┘
-         │                                    │
-         ▼                              ┌────┴────────────┐
-   source._read_arrow(plan)             │ drop? → skip    │
-         │                              │ cast  → typed   │
-         ▼                              │ filter → reject  │
-   Rust parse + export                  │ push  → column  │
-         │                              └────┬────────────┘
-         ▼                                   │
+     field_types,                    │resolve name │
+     filter                          │via field_map│
+   }                                 └──────┬──────┘
+         │                                  │
+         ▼                         ┌────────┴────────┐
+   source._read_arrow(plan)        │ drop? → skip    │
+         │                         │ cast  → typed   │
+         ▼                         │ filter → reject │
+   Rust parse + export             │ push  → column  │
+         │                         └───────┬─────────┘
+         ▼                                 │
    pyarrow.Table                       finish_row()
-         │                              └── null-fill, filter check
+         │                                 └── null-fill, filter check
          ▼
    to_arrow() result
 ```
@@ -108,12 +118,13 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 | `RenameFields` | `field_map` | Multiple renames merge into one map. |
 | `DropFields` | `drop_fields` | Merges as a set union. |
 | `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
-| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`), `is_null`, `is_type`, or compiled lambda (comparisons, `startswith`, `endswith`, `contains`, `in`, `strip`, `lower`, `upper`, `replace`, `len`, arithmetic, compound AND/OR); all are evaluated per-row during parse. |
+| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`, including `op="regex"`), `is_null`, `is_type`, or an expression predicate from `rypipe.expr` (comparisons, `startswith`, `endswith`, `contains`, `matches`, `between`, `isin`, `not_in`, compound `&`/`|`/`~`); all are evaluated per-row during parse. |
 | `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` | `filter` | `And`, `Or`, `Not` trees built from the same leaf shapes; evaluated per-row with short circuiting; fully fusable. |
+| `ObservedStage` (or any stage returning observer hooks) | `observer` | Hook dicts merge per-hook; callables for the same hook chain in stage order. |
 
 `FilterRows` is fusable when it uses a keyword-form predicate (`field`,
-`op`, `value` or `field_a`, `op`, `field_b`), or when a lambda is
-automatically compiled by the [lambda compiler](../architecture/lambda-compiler.md).
+`op`, `value` or `field_a`, `op`, `field_b`), or an expression predicate
+built with `rypipe.expr.col` (see [expression filters](../architecture/expressions.md)).
 `FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable;
 they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
 
@@ -121,9 +132,9 @@ they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-
 
 Non-fusable stages still work, but they run over the Arrow table after the engine finishes:
 
-- Python callables (`lambda` or any callable stage).
+- Raw Python callables used as standalone pipeline stages.
 - Stateful transforms such as window or aggregate stages.
-- `FilterRows` wrapping a callable predicate (runtime-computed values).
+- `FilterRows` wrapping a plain lambda or named function (Python fallback only).
 - Custom stages that do not implement `_plan_kwargs()`.
 
 When non-fusable stages are present, `plan_split` still extracts every fusable stage (regardless of position) into the plan; the remaining stages run over the parsed Arrow batches in Python, with any trailing generic stages applied last over the dict stream.
@@ -181,7 +192,7 @@ drop check (drop_fields)
 type selection (field_types / dictionary_columns)
     |
     v
-per-row filter (Equal / NotEqual / Compare / And / Or / Not)
+per-row filter (Equal / NotEqual / Compare / Regex / And / Or / Not)
     |
     v
 builder append (Vec plus map, single hash, dirty bitmask)

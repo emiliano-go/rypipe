@@ -111,10 +111,8 @@ Comments and quoted fields are parsed correctly regardless of thread count,
 with no user-facing knob:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # Correct splitting inside comments/quotes is automatic; nothing to pass.
-table = rypipe.read("sample.log", format="log")
+table = LogSource("sample.log").to_arrow()
 ```

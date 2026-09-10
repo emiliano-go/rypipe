@@ -21,7 +21,7 @@ result = (
 ).to_pandas()
 ```
 
-Each callable stage that the [lambda compiler](../architecture/lambda-compiler.md) does not recognize is opaque to fusion: it runs in Python per row (or forces the pipeline onto the dict-stream path) and cannot be pushed into the Rust parse loop. Prefer fused stages (`RenameFields`, `DropFields`, `CastTypes`, keyword-form or compilable-lambda `FilterRows`) or move the logic into Rust.
+Each callable stage is opaque to fusion: it runs in Python per row (or forces the pipeline onto the dict-stream path) and cannot be pushed into the Rust parse loop. Prefer fused stages (`RenameFields`, `DropFields`, `CastTypes`, keyword-form or `col()`-expression `FilterRows`) or move the logic into Rust.
 
 ## Repeated sinks on a pipeline { #repeated-to_pandas-to_arrow }
 

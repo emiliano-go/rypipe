@@ -459,6 +459,7 @@ impl ParallelStreamingExecutor {
         let mut next_seq = 0usize;
         let mut reorder_bytes: usize = 0;
         let mut fallback_unordered = false;
+        let mut first_chunk_error: Option<crate::Error> = None;
         let reorder_limit = max_reorder * self.budget.bytes();
         for (seq, res) in receiver {
             match res {
@@ -493,10 +494,17 @@ impl ParallelStreamingExecutor {
                         consumer.consume(batch)?;
                     }
                 }
-                Err(_) => {
-                    // Skip failed chunks (logged upstream).
+                Err(e) => {
+                    // Keep the first failure: skipping a failed chunk would
+                    // silently drop its rows (e.g. strict_types violations).
+                    if first_chunk_error.is_none() {
+                        first_chunk_error = Some(e);
+                    }
                 }
             }
+        }
+        if let Some(e) = first_chunk_error {
+            return Err(e);
         }
         // Drain remaining.
         if opts.ordered && !fallback_unordered {
@@ -506,14 +514,15 @@ impl ParallelStreamingExecutor {
             }
         }
         for h in handles {
-            h.join()
-                .map_err(|_| crate::Error::Parser(format!(
+            h.join().map_err(|_| {
+                crate::Error::Parser(format!(
                     "worker panicked during parallel parse. \
                      This usually indicates a bug in the parser (e.g., returning \
                      Cow::Borrowed that outlives the input chunk, or an unwrap() \
                      on None/Err during parsing). Check your RecordParser::parse_chunk \
                      implementation for incorrect lifetime handling or missing error checks."
-                )))??;
+                ))
+            })??;
         }
         Ok(())
     }
@@ -738,7 +747,10 @@ mod tests {
         let cols = names(&schema);
         assert!(cols.contains(&"a"), "column 'a' missing");
         assert!(cols.contains(&"b"), "column 'b' missing");
-        assert!(cols.contains(&"late"), "column 'late' missing from tail scan");
+        assert!(
+            cols.contains(&"late"),
+            "column 'late' missing from tail scan"
+        );
 
         // Verify all values are preserved by parsing the full data
         let mut builder = crate::engine::TableBuilder::with_plan(1024, Arc::new(plan.clone()));
@@ -819,7 +831,10 @@ mod tests {
 
         // Verify specific values
         let a_col = batch.column_by_name("a").unwrap();
-        let a_arr = a_col.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let a_arr = a_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert_eq!(a_arr.value(0), "1");
         assert_eq!(a_arr.value(2), "7");
         assert_eq!(a_arr.value(4), "11");
@@ -894,7 +909,11 @@ mod tests {
         for size in sizes {
             let data = make_data(size);
             let schema = discover_schema_for_bytes(&data, &splitter, &parser, &plan);
-            let cols: Vec<String> = schema.column_names().iter().map(|s| s.to_string()).collect();
+            let cols: Vec<String> = schema
+                .column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
             if let Some(ref order) = first_order {
                 assert_eq!(
@@ -922,7 +941,12 @@ mod tests {
 
         // All 100 columns should be discovered
         let cols = names(&schema);
-        assert_eq!(cols.len(), 100, "expected 100 columns, got {:?}", cols.len());
+        assert_eq!(
+            cols.len(),
+            100,
+            "expected 100 columns, got {:?}",
+            cols.len()
+        );
     }
 
     #[test]

@@ -131,19 +131,19 @@ dropped fields saves significant CPU.
     treatment and [Adapter design](../advanced/adapter-design.md#parse_chunk_generic)
     for how the engine drives it.
 
-    It is an optimization, not a requirement — the default implementation
+    It is an optimization, not a requirement: the default implementation
     delegates to `parse_chunk`, so behavior is identical either way. Reasons
     to skip it:
 
     * `parse_chunk` is still mandatory (the trait requires the object-safe
       method), so the usual shape is one generic helper plus a one-line
-      `parse_chunk` shim — extra boilerplate for a first adapter.
+      `parse_chunk` shim (extra boilerplate for a first adapter).
     * The generic method is not object-safe: anything driving your parser
       through `dyn RecordParser` (custom drivers, tests) still uses
       `parse_chunk`.
     * Monomorphization instantiates the parser body per concrete sink type,
-      which costs compile time and binary size — noticeable for large
-      parsers.
+      which costs compile time and binary size (noticeable for large
+      parsers).
     * The 5-10% only materializes when you are CPU-bound in the parse loop.
       For small files, I/O-bound reads, or formats dominated by UTF-8
       validation or allocation, it is in the noise. Migrate later if
@@ -258,7 +258,7 @@ impl RecordParser for LogParser {
                 // failing the whole chunk.
                 if let Some((key, value)) = part.split_once('=') {
                     // wants() is false for fields the plan drops or renames
-                    // away — skipping them saves real CPU.
+                    // away; skipping them saves real CPU.
                     if sink.wants(key) {
                         // Borrow from the input: zero-copy until the sink
                         // decides to materialize the value.
@@ -496,7 +496,7 @@ fn read_log(
     }
 
     // Run the whole parse in Rust: split, parse, fuse the plan, merge
-    // chunks — one RecordBatch comes out. Engine errors become ValueError.
+    // chunks; one RecordBatch comes out. Engine errors become ValueError.
     let batch = Pipeline::new(LogSplitter, LogParser)
         .with_plan(plan)
         .read_path(&path, use_mmap, prefault)

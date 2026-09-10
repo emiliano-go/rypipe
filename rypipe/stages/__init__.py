@@ -8,6 +8,7 @@ __all__ = [
     "FilterRowsAll",
     "FilterRowsNot",
     "DropFields",
+    "ObservedStage",
 ]
 
 _modules = {
@@ -18,6 +19,7 @@ _modules = {
     "FilterRowsAll": ".filter",
     "FilterRowsNot": ".filter",
     "DropFields": ".drop",
+    "ObservedStage": ".observe",
 }
 
 

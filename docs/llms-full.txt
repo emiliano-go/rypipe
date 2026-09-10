@@ -327,7 +327,7 @@ result = (
 ).to_pandas()
 ```
 
-Each callable stage that the [lambda compiler](../architecture/lambda-compiler.md) does not recognize is opaque to fusion: it runs in Python per row (or forces the pipeline onto the dict-stream path) and cannot be pushed into the Rust parse loop. Prefer fused stages (`RenameFields`, `DropFields`, `CastTypes`, keyword-form or compilable-lambda `FilterRows`) or move the logic into Rust.
+Each callable stage is opaque to fusion: it runs in Python per row (or forces the pipeline onto the dict-stream path) and cannot be pushed into the Rust parse loop. Prefer fused stages (`RenameFields`, `DropFields`, `CastTypes`, keyword-form or `col()`-expression `FilterRows`) or move the logic into Rust.
 
 ## Repeated sinks on a pipeline { #repeated-to_pandas-to_arrow }
 
@@ -398,7 +398,7 @@ PAGE: https://rypipe.emiliano-go.com/advanced/case-study-crxml/
 
 # Case study: crxml { #case-study-crxml }
 
-`crxml` is a high-throughput adapter for Crystal Reports XML exports. It is a concrete example of how the techniques from the other advanced pages combine to reach ~4.2 GB/s on a single workstation.
+`crxml` is a high-throughput adapter for Crystal Reports XML exports. It is a concrete example of how the techniques from the other advanced pages combine to reach ~7.6 GB/s on a single workstation.
 
 ## What it parses { #what-it-parses }
 
@@ -501,6 +501,25 @@ Arrow dictionaries store string values as integer indices into a separate value 
 - a `data: Vec<u8>` contiguous byte buffer for all dictionary values;
 - an `offsets: Vec<i32>` byte offsets into `data` for each entry;
 - an `index: FxHashMap<Box<str>, i32>` lookup from value to code.
+
+For a `status` column with rows `["active", "pending", "active", null, "active"]`:
+
+```
+row values    "active"   "pending"   "active"     null     "active"
+                 │           │           │          │          │
+                 ▼           ▼           ▼          ▼          ▼
+codes         [    0    ,     1     ,    0    ,   null  ,    0    ]   i32 per row
+
+index          "active"  ──► 0        FxHashMap<Box<str>, i32>
+               "pending" ──► 1        built on first sight of each value
+
+offsets        [0, 6, 13]             byte range of each entry in data
+data           "activepending"        every value stored once, contiguous
+```
+
+Reading row `i` means: take `codes[i]`, slice `data[offsets[code]..offsets[code+1]]`.
+Writing a value means: look it up in `index` (one hash probe), or append it
+to `data`/`offsets` and insert it into `index` on first sight.
 
 On Arrow export, these become a `DictionaryArray` with `Int32` indices and a `StringArray` dictionary. The layout is exactly what Arrow compute kernels expect, so downstream filters and group-by operations can use the encoded form directly.
 
@@ -683,20 +702,20 @@ The key to bounded memory is the **in-flight cap**: at most `threads × 2` chunk
 
 ```
 Main thread                Worker pool              Coordinator
-──────────                ───────────              ───────────
+──────────                 ───────────              ───────────
                            ┌─ thread 1 ──┐
-submit chunk 0 ──────────►│  parse chunk │──► channel ──┐
-submit chunk 1 ──────────►│  parse chunk │──► channel    │
-                           └──────────────┘              │
-                           ┌─ thread 2 ──┐              │
-submit chunk 2 ──────────►│  parse chunk │──► channel    ├──► BTreeMap
-submit chunk 3 ──────────►│  parse chunk │──► channel    │    pending
-                           └──────────────┘              │    (ordered
-                                                         │     by seq)
-                           ... (max 2 chunks/thread) ... │
-                                                         │
-                                          deliver in order ◄── file_order
-                                          to BatchConsumer
+submit chunk 0 ──────────► │ parse chunk │──► channel ─────┐
+submit chunk 1 ──────────► │ parse chunk │──► channel      │
+                           └─────────────┘                 │
+                           ┌─ thread 2 ──┐                 │
+submit chunk 2 ──────────► │ parse chunk │──► channel      ├──► BTreeMap
+submit chunk 3 ──────────► │ parse chunk │──► channel      │    pending
+                           └─────────────┘                 │    (ordered
+                                                           │     by seq)
+                           ... (max 2 chunks/thread) ...   │
+                                                           │
+                                                    deliver in order ◄── file_order
+                                                    to BatchConsumer
 ```
 
 - **Backpressure**: the `sync_channel(max_in_flight)` blocks the main thread when the channel is full, preventing more than `threads × 2` chunks from being in flight at once.
@@ -846,7 +865,17 @@ df = to_pandas(
     | FilterRows(field="status", op="==", value="active")
     | CastTypes({"amount": float})
 )
+
+# Expression predicates (rypipe.expr) are fusable too:
+from rypipe import col
+
+df = to_pandas(
+    source
+    | FilterRows((col("amount") > 100) & (col("status") == "active"))
+)
 ```
+
+Expression predicates (`col("x") > 100`, `col("s").startswith("A")`, `col("s").matches(r"^ERR")`, `col("n").between(1, 10)`, combined with `&`, `|`, `~`) build the same filter spec dicts the engine fuses, with no bytecode analysis. Plain lambdas and other callables still work but always run in Python; see [expression filters](../architecture/expressions.md).
 
 When the pipeline is materialized, the stage list is collapsed into one plan. The Rust parser:
 
@@ -869,24 +898,24 @@ source | RenameFields | DropFields      ExecutionPlan
                                         ├── field_types: {amount → Float64}
          │                              ├── filter:      Equal(status, "active")
          ▼                              └── schema_order: []
-   plan_split()                              │
-         │                                    ▼
+   plan_split()                             │
+         │                                  ▼
    plan_overrides = {                  TableBuilder::push_field()
      field_mapping,                         │
      drop_fields,                    ┌──────┴──────┐
-     field_types,                    │  resolve name │
-     filter                          │  via field_map│
-   }                                └──────┬──────┘
-         │                                    │
-         ▼                              ┌────┴────────────┐
-   source._read_arrow(plan)             │ drop? → skip    │
-         │                              │ cast  → typed   │
-         ▼                              │ filter → reject  │
-   Rust parse + export                  │ push  → column  │
-         │                              └────┬────────────┘
-         ▼                                   │
+     field_types,                    │resolve name │
+     filter                          │via field_map│
+   }                                 └──────┬──────┘
+         │                                  │
+         ▼                         ┌────────┴────────┐
+   source._read_arrow(plan)        │ drop? → skip    │
+         │                         │ cast  → typed   │
+         ▼                         │ filter → reject │
+   Rust parse + export             │ push  → column  │
+         │                         └───────┬─────────┘
+         ▼                                 │
    pyarrow.Table                       finish_row()
-         │                              └── null-fill, filter check
+         │                                 └── null-fill, filter check
          ▼
    to_arrow() result
 ```
@@ -931,12 +960,13 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 | `RenameFields` | `field_map` | Multiple renames merge into one map. |
 | `DropFields` | `drop_fields` | Merges as a set union. |
 | `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
-| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`), `is_null`, `is_type`, or compiled lambda (comparisons, `startswith`, `endswith`, `contains`, `in`, `strip`, `lower`, `upper`, `replace`, `len`, arithmetic, compound AND/OR); all are evaluated per-row during parse. |
+| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`, including `op="regex"`), `is_null`, `is_type`, or an expression predicate from `rypipe.expr` (comparisons, `startswith`, `endswith`, `contains`, `matches`, `between`, `isin`, `not_in`, compound `&`/`|`/`~`); all are evaluated per-row during parse. |
 | `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` | `filter` | `And`, `Or`, `Not` trees built from the same leaf shapes; evaluated per-row with short circuiting; fully fusable. |
+| `ObservedStage` (or any stage returning observer hooks) | `observer` | Hook dicts merge per-hook; callables for the same hook chain in stage order. |
 
 `FilterRows` is fusable when it uses a keyword-form predicate (`field`,
-`op`, `value` or `field_a`, `op`, `field_b`), or when a lambda is
-automatically compiled by the [lambda compiler](../architecture/lambda-compiler.md).
+`op`, `value` or `field_a`, `op`, `field_b`), or an expression predicate
+built with `rypipe.expr.col` (see [expression filters](../architecture/expressions.md)).
 `FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable;
 they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
 
@@ -944,9 +974,9 @@ they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-
 
 Non-fusable stages still work, but they run over the Arrow table after the engine finishes:
 
-- Python callables (`lambda` or any callable stage).
+- Raw Python callables used as standalone pipeline stages.
 - Stateful transforms such as window or aggregate stages.
-- `FilterRows` wrapping a callable predicate (runtime-computed values).
+- `FilterRows` wrapping a plain lambda or named function (Python fallback only).
 - Custom stages that do not implement `_plan_kwargs()`.
 
 When non-fusable stages are present, `plan_split` still extracts every fusable stage (regardless of position) into the plan; the remaining stages run over the parsed Arrow batches in Python, with any trailing generic stages applied last over the dict stream.
@@ -1004,7 +1034,7 @@ drop check (drop_fields)
 type selection (field_types / dictionary_columns)
     |
     v
-per-row filter (Equal / NotEqual / Compare / And / Or / Not)
+per-row filter (Equal / NotEqual / Compare / Regex / And / Or / Not)
     |
     v
 builder append (Vec plus map, single hash, dirty bitmask)
@@ -1044,7 +1074,7 @@ Each page takes one optimization topic and explains the mechanism, the tuning kn
 
 | Page | What you will learn |
 |------|---------------------|
-| [Fusion](./fusion.md) | How `RenameFields`, `DropFields`, `CastTypes`, and `FilterRows` (keyword form or compiled lambda) are rewritten into a single `ExecutionPlan`; what is fusable and what falls back to Python. |
+| [Fusion](./fusion.md) | How `RenameFields`, `DropFields`, `CastTypes`, and `FilterRows` (keyword form or `col()` expression) are rewritten into a single `ExecutionPlan`; what is fusable and what falls back to Python. |
 | [Stage protocol](./stage-protocol.md) | The three methods every stage implements; why re-exporting works; when to re-implement. |
 | [Execution modes](./execution-modes.md) | `columnar`, `parallel`, `stream`, and `parallel_streaming`; the `resolve_engine` heuristic; when each mode wins. |
 | [Streaming](./streaming.md) | Constant-memory batch streaming with `iter_record_batches`, `BatchConsumer`, and Arrow-ecosystem writers; when streaming falls back to materialization. |
@@ -1057,16 +1087,7 @@ Each page takes one optimization topic and explains the mechanism, the tuning kn
 | [Adapter design patterns](./source-pattern.md) | One API with progressive overrides: override `read()` for simple adapters, `_read_arrow()` for advanced. |
 | [Profiling](./profiling.md) | Profiling with `perf`, `cargo flamegraph`, and the `bench_throughput` example; measuring RSS; separating Python and Rust time. |
 | [Anti-patterns](./anti-patterns.md) | Common mistakes that silently remove fusion, increase memory, or waste CPU. |
-| [Case study: crxml](./case-study-crxml.md) | How crxml reaches ~4.2 GB/s by combining the techniques from the other pages. |
-
-## Quick checklist { #quick-checklist }
-
-- [ ] Provide `schema` and `field_types` when the schema is known.
-- [ ] Use `dictionary_columns` for known low-cardinality strings; use `auto_dict` when cardinality is unknown.
-- [ ] Implement `_read_arrow(plan_overrides=...)` so fused stages stay in Rust.
-- [ ] Pick `columnar` for tables that fit in RAM, `parallel` for large cached files, and `stream` for huge files or row-oriented consumers.
-- [ ] Tune `chunks = 4 * physical_cores` and measure with your data.
-- [ ] Export Arrow from Rust and sink directly to Parquet when possible.
+| [Case study: crxml](./case-study-crxml.md) | How crxml reaches ~7.6 GB/s by combining the techniques from the other pages. |
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/advanced/io-tuning/
@@ -1146,13 +1167,17 @@ PAGE: https://rypipe.emiliano-go.com/advanced/memory-and-chunking/
 
 # Memory and chunking { #memory-and-chunking }
 
-`rypipe` tries to parse as fast as the hardware allows while staying inside a memory budget. Two knobs control that trade-off:
+`rypipe` parses as fast as the hardware allows while staying inside a memory budget. Two knobs control that trade-off:
 
-- `memory`: maximum bytes the parser should hold in flight. A string like `"512MiB"` is parsed into bytes.
-
-Unit handling depends on the API layer. `rypipe` itself accepts `B`, `KB`, `MB`, `GB`, `TB` (decimal, 1000-based) and `KiB`, `MiB`, `GiB`, `TiB` (binary, 1024-based), or a plain integer number of bytes. Adapters may parse strings differently: `crxml` accepts `B`/`KB`/`MB`/`GB`/`TB` with 1024-based multipliers (case-insensitive, no space before the unit), so `"64MiB"` is rejected there. Check your adapter's documentation.
-
-- `chunks`: number of chunks for parallel mode. More chunks improve load balancing but increase scheduling overhead.
+- `memory`: the maximum bytes the parser holds in flight. Pass a plain
+  integer (bytes) or a string with a unit. `rypipe` understands `B`, `KB`,
+  `MB`, `GB`, `TB` (decimal, 1000-based) and `KiB`, `MiB`, `GiB`, `TiB`
+  (binary, 1024-based). Adapters may parse strings differently: `crxml`
+  accepts the same units with 1024-based multipliers throughout
+  (case-insensitive, no space before the unit), so `KB` means 1024 bytes
+  there, not 1000. Check your adapter's documentation.
+- `chunks`: number of chunks for parallel mode. More chunks improve load
+  balancing but increase scheduling overhead.
 
 This page explains how `BoundedExecutor` enforces the budget and how to size chunks for files larger or smaller than RAM.
 
@@ -1164,7 +1189,10 @@ This page explains how `BoundedExecutor` enforces the budget and how to size chu
 2. Estimates `bytes_per_row` from `Splitter::estimate_bytes_per_row`.
 3. Computes `rows_per_batch` from the budget.
 4. Splits the file into batches sized to fit the memory budget, capped at 100,000
-   split points as an internal safeguard against pathological chunk counts.
+   split points by default. The cap is a safeguard against pathological chunk
+   counts, and it is configurable via `max_split_chunks` on the plan. Raise it
+   for very large files with small budgets: once the required batch count
+   exceeds the cap, each batch grows past the budget and peak RSS follows.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates.
 
@@ -1236,7 +1264,7 @@ If the file is small but the parser is slow (for example, complex XML), parallel
 ## Summary { #summary }
 
 - Use `memory` to cap builder storage; leave headroom for export and downstream work.
-- `BoundedExecutor` derives `rows_per_batch` from the budget and the splitter's `estimate_bytes_per_row`, and caps the batch count at 100,000 split points.
+- `BoundedExecutor` derives `rows_per_batch` from the budget and the splitter's `estimate_bytes_per_row`, and caps the batch count at 100,000 split points (`max_split_chunks` overrides the cap).
 - Start with `chunks = 4 * physical_cores` and tune by measurement.
 - Reduce the budget when row size variance is high.
 - Use stream mode for files larger than RAM; use columnar mode for small files.
@@ -1492,7 +1520,7 @@ source = MyAdapter(
 )
 ```
 
-The Python `schema` kwarg maps to `ExecutionPlan::schema_order` on the Rust side. It is a **projection + order declaration**: the output contains exactly the listed columns, in the listed order. With a declared schema, the engine does not need to discover column names, and fields in the data that are not listed are skipped during parsing — `wants()`/`resolve()` reject them, so adapters never scan or decode them. Listed columns that are absent from the data come out null-filled; extra/unknown fields are ignored, not an error.
+The Python `schema` kwarg maps to `ExecutionPlan::schema_order` on the Rust side. It is a **projection + order declaration**: the output contains exactly the listed columns, in the listed order. With a declared schema, the engine does not need to discover column names, and fields in the data that are not listed are skipped during parsing: `wants()`/`resolve()` reject them, so adapters never scan or decode them. Listed columns that are absent from the data come out null-filled; extra/unknown fields are ignored, not an error.
 
 ## Stable column order across chunks { #stable-column-order-across-chunks }
 
@@ -1529,10 +1557,38 @@ Supported type strings (as accepted by `FieldType::from_str`):
 | `dictionary` | `FieldType::Dictionary` | Dictionary encoding; equivalent to listing the column in `dictionary_columns`. |
 | `date32` | `FieldType::Date32` | ISO dates (`YYYY-MM-DD`) stored as days since the Unix epoch. |
 | `timestamp`, `timestamp[s]`, `timestamp[ms]`, `timestamp[us]`, `timestamp[ns]` | `FieldType::Timestamp(unit)` | ISO-8601 timestamps stored as integers in the given unit (default µs). |
+| `timestamp[unit,format=…]` | `FieldType::Timestamp(unit, format)` | Custom chrono format tried before the ISO layouts, e.g. `timestamp[ms,format=%Y%m%d %H:%M]`. Unit may be omitted: `timestamp[format=%d/%m/%Y]`. |
 | `decimal128`, `decimal128(N)` | `FieldType::Decimal128(scale)` | Fixed-precision decimal; default scale 18, or `N` when given. |
 
 There are no `str`, `int`, or `float` aliases; an unknown type string raises
 `PlanError` at construction time.
+
+### Null and malformed values { #null-and-malformed-values }
+
+Parse-time casting is lenient by design:
+
+- A field that is missing from a row (or null in the data) comes out null,
+  regardless of the declared type. `field_types` never rejects nullability.
+- A value that does not parse as the declared type (say `"abc"` in an
+  `int64` column) also comes out null. The row is kept, no error is raised.
+
+This keeps dirty real-world files parseable, but it means a typo'd column
+or a format change can silently turn a whole column into nulls. Pass
+`strict_types=True` to make malformed values an error instead:
+
+```python
+source = MyAdapter(
+    "data.log",
+    field_types={"amount": "float64"},
+    strict_types=True,   # "abc" in amount raises instead of becoming null
+)
+```
+
+Under `strict_types`, the first value that fails to parse into its declared
+type aborts the read with an error naming the column, the value, the
+declared type, and the row index. Missing or null fields are still allowed;
+strict mode is about malformed data, not nullability. The default is
+`False`, and a fused `CastTypes` stays lenient either way.
 
 `field_types={"status": "dictionary"}` and `dictionary_columns=["status"]` are
 two spellings of the same storage decision; prefer `dictionary_columns` (or
@@ -1907,7 +1963,8 @@ that the standard stages cannot express.
 
 ### Example: logging filter { #example-logging-filter }
 
-A filter that logs every rejected row for debugging:
+A filter that logs every rejected row for debugging. Attach the side effect
+as an observer hook so it keeps working when the stage fuses:
 
 ```python
 from rypipe.stages import FilterRows
@@ -1916,17 +1973,67 @@ import logging
 logger = logging.getLogger(__name__)
 
 class LoggingFilterRows(FilterRows):
-    """FilterRows that logs rejected rows."""
+    """FilterRows that logs rejected rows (fusion-safe)."""
 
-    def apply(self, record: dict) -> dict | None:
-        result = super().apply(record)
-        if result is None:
-            logger.debug("dropped row: %s", record)
-        return result
+    def _plan_kwargs(self) -> dict | None:
+        kwargs = super()._plan_kwargs() or {}
+        kwargs["observer"] = {"on_row_rejected": self._log_rejected}
+        return kwargs
+
+    def _log_rejected(self, row_index: int) -> None:
+        logger.debug("dropped row %d", row_index)
 ```
 
-This works because `apply()` is called per-row. The `_plan_kwargs()` method
-is inherited, so fusion still applies for the keyword form.
+The `_plan_kwargs()` method is inherited and extended, so the filter still
+fuses into the parse loop, and the `on_row_rejected` hook fires from inside
+the engine for every rejected row.
+
+The naive alternative (overriding `apply()` to log and delegating to
+`super().apply()`) breaks silently: when fusion succeeds the stage never
+runs in Python, so `apply()` is never called and nothing is logged. Rule of
+thumb: overriding `apply()` on a fusable stage drops your override whenever
+fusion succeeds; put side effects in observer hooks instead.
+
+## Observer hooks { #observer-hooks }
+
+A stage (or a source, via its `observer=` kwarg) can attach a dict of
+callables under the `observer` plan key. The engine fires them per row from
+parse threads, on every engine (serial, parallel, bounded, streaming):
+
+| Hook | Arguments | Fires when |
+|------|-----------|------------|
+| `on_begin_row` | `(row_index)` | A new row starts |
+| `on_put_field` | `(row_index, name, slot, value)` | A field lands in a column |
+| `on_row_accepted` | `(row_index)` | The row passes the filter and is committed |
+| `on_row_rejected` | `(row_index)` | The filter rejects the row |
+| `on_chunk_finished` | `(total, accepted, rejected)` | A batch finishes (per-batch counts in streaming) |
+
+Notes:
+
+- `row_index` counts accepted rows so far, so rejected rows reuse the next
+  free index.
+- When a filter buffers values before the predicate resolves, `on_put_field`
+  fires only for accepted rows (hooks fire on drain, not on buffer).
+- Hooks run on parse threads (several at once on parallel engines): they
+  must be thread-safe. Exceptions raised by a hook are printed and
+  swallowed; a hook can never abort a parse.
+- `on_put_field` takes the GIL per call from Python (roughly 50ns, about
+  0.5s for 1M rows with 10 fields). Prefer row-level hooks in Python; keep
+  field-level hooks in Rust.
+- When several stages provide the same hook, the pipeline chains the
+  callables in stage order instead of overwriting.
+
+### Side effects and fusion { #side-effects-and-fusion }
+
+| Approach | Fuses? | Side effect when fused |
+|----------|--------|------------------------|
+| Override `apply()` on a fusable stage | Yes | Silently lost (never called) |
+| Return `None` from `_plan_kwargs()` | No | Runs in Python over the materialized table |
+| Observer hooks via `observer=` / `_plan_kwargs()` | Yes | Fires from the parse loop |
+
+`ObservedStage` (in `rypipe.stages`) packages the third row: override
+`observer_hooks()` to return the hook dict, and override `apply()` as the
+fallback for pipelines that cannot fuse.
 
 ### Example: non-fusable stage { #example-non-fusable-stage }
 
@@ -1960,10 +2067,11 @@ run this stage in Python. This is correct but slower.
 | `RenameFields` | `field_mapping` | Yes | Rename columns |
 | `DropFields` | `drop_fields` | Yes | Remove columns |
 | `CastTypes` | `field_types` | Yes (for `int`, `float`, `bool`, `date`, `datetime`, `Decimal`) | Cast column types |
-| `FilterRows` | `filter` | Yes (keyword form, `is_null`/`is_type`, or compiled lambda) | Filter rows by predicate |
+| `FilterRows` | `filter` | Yes (keyword form, `is_null`/`is_type`, `regex`, or expression predicate) | Filter rows by predicate |
 | `FilterRowsAny` | (composed) | Yes | Logical OR of filters |
 | `FilterRowsAll` | (composed) | Yes | Logical AND of filters |
 | `FilterRowsNot` | (composed) | Yes | Negate a filter |
+| `ObservedStage` | `observer` | Yes | Base class for observer-hook side effects |
 
 ### _plan_kwargs keys { #plan-kwargs-keys }
 
@@ -1974,7 +2082,8 @@ These keys are merged into the `ExecutionPlan` passed to the Rust parser:
 | `field_mapping` | `dict[str, str]` | Rename mapping: raw name → output name |
 | `drop_fields` | `list[str]` | Fields to skip entirely |
 | `field_types` | `dict[str, str]` | Type overrides (e.g., `"int64"`, `"float64"`) |
-| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}`, `{"field_a", "op", "field_b"}`, `{"is_null": true}`, or `{"is_type": "int64"}` |
+| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}` (with `op="regex"` for regex search), `{"field_a", "op", "field_b"}`, `{"is_null": true}`, or `{"is_type": "int64"}` |
+| `observer` | `dict[str, callable]` | Row observer hooks (`on_row_rejected`, ...); merged per-hook, chained across stages |
 
 See [Execution Plan](../architecture/plan.md) for the full plan structure.
 
@@ -2160,8 +2269,9 @@ without per-cell `String` allocation.
   returns `Option<&str>`.
 
 - **`append(&mut self, other)`**: Merges another column by base-shifting
-  offsets: `base = self.data.len() as i32`, then extends offsets. O(n) in
-  offsets, not in bytes.
+  offsets: `base = self.data.len() as i32`, then copies `other.data` into
+  `self.data` and extends offsets. O(n) in both bytes and offsets; the
+  base shift only avoids recomputing offsets.
 
 - **`to_arrow()`**: Builds Arrow `StringArray` by wrapping three buffers
   with `OffsetBuffer`, `ScalarBuffer`, `Buffer`, and `NullBuffer`. Block
@@ -2190,7 +2300,8 @@ pub(crate) enum ColumnBuilder {
     Float64(PrimColumn<f64>),
     Boolean(PrimColumn<bool>),
     Date32(PrimColumn<i32>),
-    Timestamp(TimeUnit, PrimColumn<i64>),
+    Timestamp(TimeUnit, Option<Box<str>>, PrimColumn<i64>),
+    Decimal128(u8, PrimColumn<i128>),
     Dictionary {
         codes: NullableColumn<i32>,
         data: Vec<u8>,
@@ -2200,8 +2311,12 @@ pub(crate) enum ColumnBuilder {
 }
 ```
 
-Each variant stores a `PrimColumn<T>` (or `StrColumn` for strings). Created
-by `ExecutionPlan::column_type` at first use.
+Each variant stores a `PrimColumn<T>` (or `StrColumn` for strings).
+`Timestamp` carries the unit and an optional chrono format string (tried
+before the built-in ISO layouts when parsing); `Decimal128` carries the
+scale, storing `value * 10^scale` as `i128`. Created by
+`ColumnBuilder::with_capacity(est, &ty)` in `TableBuilder::ensure_columns`,
+where `ty` comes from `ExecutionPlan::column_type`.
 
 ### PrimColumn<T> { #primcolumnt }
 
@@ -2212,16 +2327,25 @@ pub(crate) struct PrimColumn<T: Copy> {
 }
 ```
 
-Flat contiguous array. Zero-copy Arrow export via `to_arrow()` which moves
-`Vec<T>` into `ScalarBuffer`. Boolean specialization via `to_arrow_bool()`.
+Flat contiguous array. `to_arrow()` moves the buffers out via
+`std::mem::take` but converts per element
+(`data.into_iter().map(A::Native::from).collect()`), so it allocates a new
+`ScalarBuffer` rather than moving the `Vec` wholesale. Boolean specialization
+via `to_arrow_bool()`, which maps to bytes and repacks into a
+`BooleanBuffer`.
 
 ### Push paths { #push-paths }
 
 `push_value(Value<'_>)` is called for every field:
 
 - `Value::Str(s)` → `push_str(Some(s))` → parse according to column type
+  (Decimal128 parses to a scaled `i128` via `parse_decimal128`)
 - `Value::Int64(i)` into Int64 is native, into Float64 widens
-- Cross-type mismatches become `None`
+- `Value::Float64(f)` into Float64 is native, into Int64 narrows (`f as i64`)
+- Typed values (`Int64`/`Float64`/`Bool`/`Date32`/`Timestamp`) into String
+  columns are formatted as text (`"42"`, `"true"`, ISO dates and timestamps);
+  into Dictionary columns the same text is dict-encoded
+- Other cross-type mismatches become `None`
 
 `dict_code(dict, index, v)` does hash lookup + insert. Average O(1).
 
@@ -2251,7 +2375,8 @@ dictionaries. The incremental path:
 2. Find first divergent dictionary across chunks
 3. Build `SeedDict` from first chunk
 4. `unify_dictionaries`: global dict + per-chunk remap tables (O(dict_size))
-5. `remap_codes`: in-place code remap via `get_unchecked` (parallel)
+5. `remap_codes`: in-place code remap via `get_unchecked` (serial loop over
+   chunk engines; only step 1 runs under rayon)
 6. `replace_dict`: swap local dict for unified dict
 
 This avoids the serial merge path while keeping the fast export path.
@@ -2263,6 +2388,7 @@ This avoids the serial merge path while keeping the fast export path.
 - String via `StrColumn::append` (base shift)
 - Numeric via `Vec::append`
 - Timestamp checks `unit_a == unit_b` else `Error::Merge`
+- Decimal128 checks `scale_a == scale_b` else `Error::Merge`
 - Dictionary remaps via `dict_code` per value
 
 `unify_variants(a, b)` reconciles: same→same, int64+float64→float64,
@@ -2280,9 +2406,16 @@ pub(crate) enum TypedValue<'a> {
 ```
 
 Borrowed view for filter evaluation. `get_typed_value` borrows directly from
-storage without allocation. `get_filter_value` formats as `String` for
-`Equal`/`NotEqual` predicates (dates via `format_date32`, timestamps via
-`format_timestamp`).
+storage without allocation. The string-filter path tries `get_filter_view`
+first, which borrows `&str` with no allocation for String and Dictionary
+columns; typed columns return `None` there and fall back to
+`get_filter_value`, which formats as `String` (dates via `format_date32`,
+timestamps via `format_timestamp`).
+
+Related helpers: `is_type_at` backs the `IsType` predicate, `parses_as`
+checks whether a string parses into a declared `FieldType` for strict-types
+mode, and `variant_key` returns the storage-variant tag (including timestamp
+unit and decimal scale) used to keep schemas consistent across chunks.
 
 ## Performance characteristics { #performance-characteristics }
 
@@ -2320,14 +2453,20 @@ Cost: ~5 ns per value (amortized O(1) lookup).
 
 ### Arrow export { #arrow-export }
 
-`to_arrow_array` uses `std::mem::take` to move internal buffers into Arrow
-arrays. This is zero-copy, no data copying, just pointer moves.
+`to_arrow_array` uses `std::mem::take` to move internal buffers out, but
+zero-copy holds only for `StrColumn` (and the dictionary data/offsets
+buffers): `PrimColumn<T>` converts per element
+(`data.into_iter().map(A::Native::from).collect()`) into a new allocation,
+and booleans are additionally repacked into a bit-packed `BooleanBuffer`.
 
 For `StrColumn`: moves `data`, `offsets`, and `validity` into `StringArray`.
-For `PrimColumn<T>`: moves `data` and `validity` into `PrimitiveArray`.
+For `PrimColumn<T>`: per-element conversion of `data` into the Arrow native
+type; `validity` moves into the null buffer. Decimal128 exports as Arrow
+`Decimal128(38, scale)`.
 For Dictionary: moves `codes`, `dict` into `DictionaryArray`.
 
-Cost: ~100 ns per column (buffer moves + schema construction).
+Cost: ~100 ns per column for `StrColumn`/Dictionary (buffer moves + schema
+construction); typed columns pay one linear conversion pass.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/architecture/data-flow/
@@ -2345,18 +2484,19 @@ See [Execution](./execution.md) for implementation details of each mode.
 
 ```
 Pipeline::read_bytes(bytes)
-  → InputBuffer::open → as_slice
   → TableBuilder::with_plan(cap, plan)
   → parser.validate(bytes)
-  → parser.parse_chunk(bytes, &mut sink)
+  → parser.parse_chunk_generic(bytes, &mut sink)
     loop: begin_row → put_field × N → end_row
   → TableBuilder::finish()
     normalize → auto_dict_upgrade → sort_columns → to_arrow_array
   → RecordBatch
 ```
 
-One `RecordBatch` returned. `InputBuffer::Owned` holds bytes for the
-duration. `ExecutionPlan` applied per row in `finish_row` (`filter.check`).
+One `RecordBatch` returned. `read_bytes` works directly on the caller's
+slice; `InputBuffer::Owned` holds the bytes for the duration only when the
+input came from `read_path`. `ExecutionPlan` applied per row in `finish_row`
+(`filter.check`).
 
 ## Parallel { #parallel }
 
@@ -2368,49 +2508,80 @@ Pipeline::read_bytes_par(bytes, num_chunks)
     each range:
       TableBuilder::with_plan(est, plan.clone())
       parser.validate(&bytes[range])
-      parser.parse_chunk(&bytes[range], &mut sink)
+      parser.parse_chunk_generic(&bytes[range], &mut sink)
       Ok(sink)
   → collect::<Result<Vec<TableBuilder>>>()
   → if !auto_dict && schemas_consistent:
       engines_to_record_batches (fast path)
-    else:
+    else if auto_dict:
+      per-chunk auto_dict_upgrade in parallel,
+      unify + remap dictionaries,
+      engines_to_record_batches (still fast path)
+    else (schemas inconsistent):
       merged.extend(each engine) → merged.finish() (merge path)
+      apply_compare_filter if plan.filter set
   → Vec<RecordBatch>
 ```
 
-Fast path: one batch per chunk, unified schema, parallel array build.
-Merge path: single merged batch, sequential extend with promotion.
+Fast path: one batch per chunk, unified schema, parallel array build. With
+`auto_dict`, chunks are upgraded in parallel and dictionaries unified, so
+execution stays on the fast path.
+Merge path: single merged batch, sequential extend with promotion, followed
+by a final filter pass.
 
 ## Bounded memory { #bounded-memory }
 
 ```
 Pipeline::read_bytes_stream(bytes, budget)
   → BoundedExecutor::plan_chunks(bytes, splitter)
-    bytes_per_row = estimate_bytes_per_row(bytes)
-    rows_per_batch = budget.bytes() / bytes_per_row
-    num_batches = total_rows / rows_per_batch
+    bytes_per_row = estimate_bytes_per_row(bytes).max(1)
+    total_rows_est = bytes.len() / bytes_per_row
+    rows_per_batch = (budget.bytes() / bytes_per_row)
+      .max(1).min(total_rows_est.max(1))
+    num_batches = (total_rows_est / rows_per_batch).max(1)
+      capped at split_cap (default MAX_SPLIT_CHUNKS = 100_000,
+      overridable via plan.max_split_chunks)
     chunks = splitter.find_split_points(bytes, num_batches)
   → batch_engine = TableBuilder::with_plan(...)
   → for chunk in chunks:
       chunk_engine = TableBuilder::with_plan(...)
       parser.validate(chunk_bytes)
-      parser.parse_chunk(chunk_bytes, &mut chunk_engine)
+      parser.parse_chunk_generic(chunk_bytes, &mut chunk_engine)
       batch_engine.extend(chunk_engine)
-      if rows_in_batch >= rows_per_batch:
-        batches.push(batch_engine.finish())
-        batch_engine.reset()
-  → flush remainder
-  → apply_plan_filter (Compare/And reapplication only)
+      while rows_in_batch >= rows_per_batch
+         or batch_engine.bytes_used() >= budget.bytes():
+        n = rows_per_batch.min(num_rows)
+          (shrunk by a bytes-based estimate when bytes_used is the trigger)
+        to_consume = batch_engine.split_off(n)
+        batch = to_consume.finish()
+        apply_compare_filter(batch, filter) if plan.filter set
+        batches.push(batch)
+  → flush remainder (same finish + apply_compare_filter)
   → Vec<RecordBatch>
 ```
 
 Constant RSS regardless of file size. Mmap path: drop mapping after
 plan_chunks, reopen for seek+read per chunk.
 
+## Parallel streaming { #parallel-streaming }
+
+`Pipeline::read_path_stream_par` combines parallel parsing with bounded
+memory: it returns a `ParallelStreamingBatchIterator` that yields
+`RecordBatch`es as worker threads produce them, instead of collecting a
+`Vec`. This mode uses channels for inter-thread communication.
+
+Bounded mode also has consumer variants (`read_bytes_stream_consumer`,
+`read_path_stream_consumer`) that deliver each flushed batch to a
+`BatchConsumer` callback rather than collecting a `Vec<RecordBatch>`.
+
 ## Column lifecycle inside a row { #column-lifecycle-inside-a-row }
 
 ```
-begin_row (no op, row tracked by row_count + row_dirty)
+begin_row
+  no filter: no op (row tracked by row_count + row_dirty)
+  with plan.filter: reset current_ordinal, clear the RowBuffer, and run the
+    adaptive late-predicate check (if predicate_ordinal >= ncols * 4 / 5,
+    buffering is deemed not worthwhile and rows fall back to direct push)
   put_field(k, v):
     resolve(k) → ExecutionPlan::resolve_field (one hash)
     ensure_column_idx (single hash for field_index + Vec push if new)
@@ -2425,13 +2596,25 @@ begin_row (no op, row tracked by row_count + row_dirty)
   put_field_at(slot, v):
     set dirty → push_value
     (skips resolve hash + ensure_column_idx)
-end_row → finish_row:
-  for each column:
-    if bit not set → push(None)  // null fill only missing
-    else → clear bit
-  filter.check → if false, pop all, return
-  row_count += 1
+end_row:
+  no filter (or late-predicate fallback) → finish_row:
+    for each column:
+      if bit not set → push(None)  // null fill only missing
+      else → clear bit
+    filter.check → if false, pop all, return
+    row_count += 1
+  with plan.filter (buffered path):
+    evaluate_against_null if predicate still undecided
+    drain_buffered(pass): flush buffered values on pass, drop them on reject
 ```
+
+### Observer hooks { #observer-hooks }
+
+When `plan.observer` is set, the sink fires hooks as rows move through:
+`on_begin_row` in `begin_row`, `on_put_field` in `put_field`,
+`on_row_accepted` / `on_row_rejected` in `finish_row`, and
+`on_chunk_finished` in `finish`. With a filtered plan, `on_put_field` may
+fire for a row that is later rejected; `on_row_rejected` still reports it.
 
 ## Memory management across modes { #memory-management-across-modes }
 
@@ -2455,8 +2638,9 @@ end_row → finish_row:
 - InputBuffer holds the entire file (or mmap)
 - One TableBuilder accumulates, flushed periodically
 - After each flush: batch is exported and dropped.
-- Peak memory: O(budget + per_chunk_overhead).
-- RSS stays constant regardless of file size.
+- Peak memory: O(budget + batch); the budget is a soft target enforced by a
+  `bytes_used` trigger, not a hard bound.
+- RSS stays roughly constant regardless of file size.
 
 ### Key difference: parallel vs bounded { #key-difference-parallel-vs-bounded }
 
@@ -2500,14 +2684,16 @@ internals, `InputBuffer`, or `ExecutionPlan`.
 
 - Parse time: O(bytes / (row_size × threads)) × cost_per_field
 - Memory: O(bytes / chunks × cols) per thread + O(rows × cols) for merge
-- Threading overhead: rayon work-stealing + channel communication
+- Threading overhead: rayon work-stealing + per-chunk panic capture
 - Best for: large files (>= 100 MB), full-RAM mode
 - Scaling: typically 3-5× on 8 cores (limited by parse cost, not I/O)
 
 ### Bounded memory { #bounded-memory }
 
 - Parse time: O(bytes / row_size) × cost_per_field (same as single)
-- Memory: bounded by `budget.bytes()` regardless of file size
+- Memory: O(budget + batch); the budget is a soft target enforced by the
+  `bytes_used` flush trigger, not a hard bound (batches may exceed it when
+  the required batch count hits the split cap)
 - RSS: O(budget + per-chunk overhead)
 - Best for: files larger than available RAM, streaming pipelines
 - Trade-off: sequential processing, no parallelism within a batch
@@ -2621,11 +2807,12 @@ See [Skip regions](../building-adapters/skip-regions.md) for the full interface.
 
 The default implementation handles everything:
 
-1. `plan_chunk_count` determines chunk count (2 MiB floor, thread caps)
-2. Nominal offsets at `bytes.len() * i / n`
-3. `par_iter` over nominals calling `next_record_start`
-4. Skip-region rejection via `in_skip_region`
-5. Dedup, sort, prepend 0, append `bytes.len()`
+1. Early return `vec![0, bytes.len()]` when `max_chunks <= 1` or input is empty
+2. `plan_chunk_count` determines chunk count (2 MiB floor, thread caps)
+3. Nominal offsets at `bytes.len() * i / n`
+4. `par_iter` over nominals calling `next_record_start`
+5. Skip-region rejection via `in_skip_region`
+6. Dedup, sort, prepend 0, append `bytes.len()`
 
 Override only with a measured reason. The default applies the 2 MiB floor
 that prevents sub-MB chunk collapse.
@@ -2708,6 +2895,8 @@ pub trait ColumnarSink {
 
 - **`needs_value()`**: `false` = locate-only (skip text extraction).
 - **`needs_resolve()`**: `false` = traverse-only (skip resolve).
+  `#[doc(hidden)]` and experimental: intended for benchmarking/profiling
+  harnesses, so do not rely on it in production adapters.
 - **`row_rejected()`**: `true` = filter rejected; scanner byte-jumps.
 
 ### Projection { #projection }
@@ -2794,12 +2983,32 @@ begin_row → [put_field × N] → end_row
         └── Undecided → continue buffering
 ```
 
-Adaptive: if predicate column is late (> 4/5 of columns), disable buffering.
+Adaptive: if the predicate column is late (`ordinal >= ncols * 4 / 5`), disable
+buffering. The check runs after the first committed row (earlier rows may not
+have created all columns yet) and prefers the frozen schema or `schema_order`
+column count over `columns.len()`, which is unreliable for sparse files.
 
 ### Thread safety { #thread-safety }
 
-`ColumnarSink` is `Send` but not `Sync`. Each chunk gets its own instance.
-The engine creates one `TableBuilder` per chunk and merges after completion.
+`ColumnarSink` declares no `Send`/`Sync` supertraits; the concrete
+`TableBuilder` is both `Send` and `Sync`. Each chunk gets its own instance.
+In the parallel executor's fast path (no `auto_dict`, schema-consistent
+chunks) each chunk's builder is exported as its own batch with no merge; the
+merge path only runs for `auto_dict` upgrades or schema-inconsistent chunks.
+Bounded and streaming executors emit batches incrementally via `split_off`
+and never run a final merge.
+
+### Observer hooks { #observer-hooks }
+
+An optional `plan.observer` (`RowObserver: Send + Sync`) receives hooks from
+`TableBuilder` during parsing: `on_begin_row`, `on_put_field`,
+`on_row_accepted`, `on_row_rejected`, and `on_chunk_finished`. All default to
+no-ops; implement only what you need. Two subtleties: values buffered by the
+predicate-first path fire `on_put_field` only when the row is drained
+(accepted), and on the late-predicate path values are pushed directly and
+popped on reject, so `on_put_field` can fire for a row that is later
+rejected (`on_row_rejected` still reports it). Hooks run on the parse hot
+path from whichever thread parses the chunk, so keep them cheap.
 
 ## Helper functions { #helper-functions }
 
@@ -2858,8 +3067,12 @@ pub struct TableBuilder {
     frozen: Option<Arc<FrozenSchema>>,
     unknown_error: Option<String>,
     row_buf: Option<Box<RowBuffer>>,
+    cached_wanted_mask: u64,
     ordinal_expect: Vec<Option<(u32, Vec<u8>)>>,
     current_ordinal: u32,
+    strict_error: Option<crate::Error>,
+    rows_accepted: usize,
+    rows_rejected: usize,
 }
 ```
 
@@ -2896,6 +3109,23 @@ pub struct TableBuilder {
   allocated when `plan.filter` is `Some`. Boxed to avoid 1 KB of inline
   SmallVec in every unfiltered `TableBuilder`.
 
+- **`cached_wanted_mask: u64`**: Projection short-circuit mask for
+  `wanted_mask()`/`row_satisfied()`. Bit `i` is set iff column `i` is wanted
+  by the schema projection (declared columns plus filter-referenced fields).
+  Computed once in `with_plan` after `predeclare_schema_columns`, so it is
+  complete from the first row. 0 when no projection is active.
+
+- **`strict_error: Option<crate::Error>`**: First `strict_types` violation,
+  recorded during puts (the `ColumnarSink` trait is infallible) and surfaced
+  as an error by `finish()`.
+
+- **`rows_accepted` / `rows_rejected: usize`**: Row counters since the last
+  `finish()`/`reset()`, feeding the observer's `on_chunk_finished`.
+
+The plan carries an optional `observer: Arc<dyn RowObserver>` with
+`on_begin_row`, `on_put_field`, `on_row_accepted`, `on_row_rejected`, and
+`on_chunk_finished` callbacks; the pseudocode below shows where each fires.
+
 - **`ordinal_expect: Vec<Option<(u32, Vec<u8>)>>`**: Per-ordinal layout
   cache for the expect_slot fast path. Populated on first row.
 
@@ -2907,9 +3137,13 @@ pub struct TableBuilder {
 - **`new()`**: Empty, default plan.
 - **`with_capacity(cap)`**: Pre-sizes column storage.
 - **`with_plan(cap, plan)`**: Pre-sizes with a specific plan. The filter
-  plan determines whether `row_buf` is allocated.
+  plan determines whether `row_buf` is allocated. Also calls
+  `predeclare_schema_columns()` and computes `cached_wanted_mask`.
 
-All constructors initialize the three vectors and the map as empty.
+`new()` and `with_capacity()` initialize the three vectors and the map as
+empty. `with_plan` additionally populates `columns`, `field_index`, and
+`column_order` with all declared schema columns plus filter-referenced
+fields when a schema projection is active.
 
 ## Core row protocol { #core-row-protocol }
 
@@ -2920,20 +3154,38 @@ The engine implements these as:
 
 ```rust
 fn begin_row(&mut self) {
+    if let Some(ref obs) = self.plan.observer {
+        obs.on_begin_row(self.row_count);
+    }
     self.current_ordinal = 0;
-    // Clear row_buf if present, reset predicate state
+    if let Some(ref mut buf) = self.row_buf {
+        // Adaptive decision: once row_count > 0, if the predicate column's
+        // ordinal is >= 4/5 of the column count, buffering is a net loss.
+        if buf.predicate_ordinal.is_some() && buf.buffer_worthwhile && self.row_count > 0 {
+            // ncols: frozen schema, else schema_order len, else columns.len()
+            if buf.predicate_ordinal.unwrap() >= ncols * 4 / 5 {
+                buf.buffer_worthwhile = false;
+            }
+        }
+        buf.fields.clear();
+        buf.state = PredicateState::Undecided;
+        buf.direct = false;
+    }
 }
 ```
 
-No-op for the common case (no filter). Row boundaries are tracked by
-`row_count` and `row_dirty`.
+No-op for the common case (no filter, no observer). Row boundaries are
+tracked by `row_count` and `row_dirty`.
 
 ### push_field (called by put_field) { #push_field }
 
 ```rust
 fn push_field(&mut self, name: &str, value: Value<'_>) {
-    // Fast path: no rename/drop configured
-    if self.plan.field_map.is_empty() && self.plan.drop_fields.is_empty() {
+    // Fast path: no rename/drop/projection configured
+    if self.plan.field_map.is_empty()
+        && self.plan.drop_fields.is_empty()
+        && self.plan.schema_order.is_empty()
+    {
         self.push_field_resolved(name, value);
         return;
     }
@@ -2970,7 +3222,22 @@ fn push_field(&mut self, name: &str, value: Value<'_>) {
 
 ```rust
 fn push_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) {
+    // Frozen exact schema: unknown field sets unknown_error and returns
+    if self.frozen.is_some() && !self.field_index.contains_key(resolved_name) {
+        if frozen.is_exact() {
+            self.unknown_error.get_or_insert(...);
+            return;
+        }
+    }
     let idx = self.ensure_column_idx(resolved_name);
+    self.record_strict_violation_at(idx, &value);  // strict_types check
+    self.notify_put_field(idx, &value);            // observer.on_put_field
+    // Track ordinal→slot mapping on first row for expect_slot fast path
+    if self.row_count == 0 {
+        self.ordinal_expect[self.current_ordinal as usize] =
+            Some((idx as u32, resolved_name.as_bytes().to_vec()));
+    }
+    self.current_ordinal += 1;
     // Set dirty bit
     let word = idx / 64;
     let bit = idx % 64;
@@ -2991,11 +3258,23 @@ fn ensure_column_idx(&mut self, name: &str) -> usize {
     if let Some(&idx) = self.field_index.get(name) {
         return idx;
     }
+    // Frozen exact schema: unknown field sets unknown_error, returns dummy 0
+    if self.frozen.is_some() && frozen.is_exact() {
+        self.unknown_error.get_or_insert(...);
+        return 0;
+    }
     // New column: create builder, backfill nulls, insert
     let est = self.estimated_rows.max(64);
     let col_type = self.plan.column_type(name);
     let mut b = ColumnBuilder::with_capacity(est, &col_type);
-    for _ in 0..self.row_count {
+    // Mid-row predicate drain already incremented row_count, so backfill
+    // one less null in that case.
+    let backfill = if row_buf.direct {
+        self.row_count.saturating_sub(1)
+    } else {
+        self.row_count
+    };
+    for _ in 0..backfill {
         b.push(None);
     }
     let idx = self.columns.len();
@@ -3044,40 +3323,65 @@ fn finish_row(&mut self) {
     if let Some(ref filter) = self.plan.filter {
         if !filter.check(&self.columns, &self.field_index, self.row_count, &self.plan) {
             for b in &mut self.columns { b.pop(); }
+            self.rows_rejected += 1;
+            if let Some(ref obs) = self.plan.observer {
+                obs.on_row_rejected(self.row_count);
+            }
             return;
         }
     }
     self.row_count += 1;
+    self.rows_accepted += 1;
+    if let Some(ref obs) = self.plan.observer {
+        obs.on_row_accepted(self.row_count - 1);
+    }
 }
 ```
 
-For 10 columns where 8 are present each row, this saves 80% of null-fill
-pushes. The fast path skips the loop entirely for dense rows.
+The bitmask avoids a `for col in 0..ncols` length check per column: only
+missing columns get a `None` push, and the fast path skips the loop entirely
+for dense rows.
 
 ### finish (Arrow export) { #finish }
 
 ```rust
 fn finish(&mut self) -> Result<RecordBatch> {
+    // Surface deferred errors from the infallible put path
+    if let Some(err) = self.unknown_error.take() {
+        return Err(crate::Error::Merge(err));
+    }
+    if let Some(err) = self.strict_error.take() {
+        return Err(err);
+    }
+    if let Some(ref obs) = self.plan.observer {
+        obs.on_chunk_finished(
+            self.rows_accepted + self.rows_rejected,
+            self.rows_accepted,
+            self.rows_rejected,
+        );
+    }
     self.normalize();
     if self.column_order.is_empty() {
         return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
     }
     self.auto_dict_upgrade();
+    // Schema projection: emit exactly the declared schema_order columns,
+    // in that order. Declared-but-unseen fields become all-null columns;
+    // filter-only columns are projected out. No sort_columns() here.
+    if !self.plan.schema_order.is_empty() {
+        for name in &self.plan.schema_order {
+            // skip if in drop_fields; create all-null column if never seen;
+            // push ArrowField + to_arrow_array()
+        }
+        return Ok(RecordBatch::try_new(schema, arrays)?);
+    }
     self.sort_columns();
-    let fields: Vec<ArrowField> = self.column_order.iter()
-        .filter_map(|name| {
-            let idx = self.field_index.get(name)?;
-            let b = &self.columns[*idx];
-            Some(ArrowField::new(name, b.arrow_datatype(), true))
-        })
-        .collect();
-    let arrays: Vec<ArrayRef> = self.column_order.iter()
-        .filter_map(|name| {
-            let idx = self.field_index.get(name)?;
-            let b = &mut self.columns[*idx];
-            Some(b.to_arrow_array()?)
-        })
-        .collect();
+    for name in &self.column_order {
+        if let Some(&idx) = self.field_index.get(name.as_str()) {
+            fields.push(ArrowField::new(name, columns[idx].arrow_datatype(), true));
+            arrays.push(columns[idx].to_arrow_array()?);
+        }
+    }
     Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)?)
 }
 ```
@@ -3085,12 +3389,14 @@ fn finish(&mut self) -> Result<RecordBatch> {
 ## Predicate-first evaluation { #predicate-first-evaluation }
 
 When a filter is active, `RowBuffer` holds `(slot, Value<'static>)` pairs
-instead of pushing to columns. After each field, the predicate is evaluated
+instead of pushing to columns. Each arriving field is buffered; only when the
+field is a predicate column (`is_predicate_slot`) is the predicate evaluated
 against the buffered values. If it passes, the engine switches to direct mode
 and drains the buffer.
 
-The adaptive strategy: if the predicate column appears late (> 4/5 of
-columns), buffering is a net loss. The engine switches to direct push +
+The adaptive strategy: if the predicate column appears late (ordinal >= 4/5
+of columns), buffering is a net loss. The check runs in `begin_row`, only
+after the first committed row, and the engine then switches to direct push +
 pop-on-reject.
 
 See [Optimizations](./optimizations.md) for the full predicate-first design.
@@ -3106,7 +3412,8 @@ See [Decoder API](./decoder.md) for the adapter-side interface.
 ## Invariants { #invariants }
 
 - `columns.len() == field_index.len()` always
-- `row_dirty.len() == (columns.len() + 63) / 64` always
+- `row_dirty.len() >= (columns.len() + 63) / 64` (equality holds except
+  transiently after `take_column`, which resizes before shrinking `columns`)
 - After `finish_row`: all dirty bits are clear
 - `take_column` keeps vectors in sync via swap_remove patching
 
@@ -3146,14 +3453,18 @@ reused across files and modes.
 
 - `new(splitter, parser)`: Creates with default plan.
 - `with_plan(plan)`: Replaces the plan (builder pattern).
-- `read_bytes(bytes)`: Single-threaded: one `TableBuilder`, one `parse_chunk`.
+- `read_bytes(bytes)`: Single-threaded: one `TableBuilder`, one `parse_chunk_generic`.
 - `read_bytes_par(bytes, num_chunks)`: Parallel via `ParallelExecutor`.
 - `read_bytes_stream(bytes, budget)`: Bounded-memory via `BoundedExecutor`.
+- `read_bytes_stream_consumer(bytes, budget, consumer)`: Bounded, calls `consumer` per batch.
 - `read_path(path, use_mmap, prefault)`: Opens file, calls `read_bytes`.
 - `read_path_par(path, num_chunks, use_mmap, prefault)`: Opens file, calls parallel.
 - `read_path_stream(path, budget, prefault)`: Opens file, calls bounded.
+- `read_path_stream_consumer(path, budget, prefault, consumer)`: Opens file, calls bounded streaming.
+- `read_path_stream_par(path, budget, prefault, opts)`: Parallel streaming; returns a
+  `ParallelStreamingBatchIterator` yielding batches as they are produced.
 
-All six methods share the same splitter, parser, and plan. The adapter
+All methods share the same splitter, parser, and plan. The adapter
 implements `Splitter` and `RecordParser` once; the engine handles the rest.
 
 ## ParallelExecutor { #parallelexecutor }
@@ -3173,11 +3484,15 @@ where P: RecordParser + Clone + Send + Sync
 
 1. **Split**: `splitter.find_split_points(bytes, num_chunks)` → `split_points_to_ranges`
 2. **Parse in parallel**: `rayon::into_par_iter` over ranges, each creating a
-   `TableBuilder`, calling `validate` + `parse_chunk`, returning the builder.
-   Panics are caught via `catch_unwind`.
-3. **Fast path** (no auto_dict, schemas consistent):
-   `engines_to_record_batches` exports per-chunk batches with unified schema.
-4. **Merge path** (auto_dict or inconsistent schemas):
+   `TableBuilder`, calling `validate` + `parse_chunk_generic`, returning the
+   builder. Panics are caught via `catch_unwind`.
+3. **Fast path** (schemas consistent): `engines_to_record_batches` exports
+   per-chunk batches with unified schema.
+4. **auto_dict upgrade** (if `auto_dict` set): per-chunk `auto_dict_upgrade()`
+   in parallel, then dictionaries are unified across chunks
+   (`dict::unify_dictionaries` + `remap_codes`/`replace_dict`) and the fast
+   path is kept when schemas are consistent afterward.
+5. **Merge path** (schemas still inconsistent):
    Sequential `extend` loop → single merged batch.
 
 ### Fast path vs merge path { #fast-path-vs-merge-path }
@@ -3187,9 +3502,10 @@ unifies schema via `unify_variants` and `promote_to_variant` so all batches
 share one `Schema`. Missing columns become `null_array`. `rayon::par_iter`
 builds arrays in parallel.
 
-The merge path (`extend` loop) returns a single merged batch and handles
-`auto_dict` visibility (full cardinality) and irreconcilable type errors
-with `Error::Merge` naming the column.
+The merge path (`extend` loop) returns a single merged batch and surfaces
+irreconcilable type errors with `Error::Merge` naming the column. It is
+reached only when schemas remain inconsistent (after any `auto_dict`
+upgrade, which otherwise stays on the fast path).
 
 ### schemas_consistent { #schemas_consistent }
 
@@ -3201,8 +3517,13 @@ or `string`/`dictionary` falls to merge path for promotion.
 ```rust
 pub struct BoundedExecutor {
     budget: MemoryBudget,
+    split_cap: usize,
 }
 ```
+
+`BoundedExecutor::new(budget)` defaults `split_cap` to `MAX_SPLIT_CHUNKS`;
+`with_split_cap(cap)` overrides it. `Pipeline` sets the cap from
+`plan.max_split_chunks` when that plan field is set.
 
 ### MemoryBudget { #memorybudget }
 
@@ -3222,20 +3543,28 @@ Estimates chunk sizes from budget:
 2. `total_rows_est = bytes.len() / bytes_per_row`
 3. `rows_per_batch = (budget.bytes() / bytes_per_row).max(1).min(total_rows_est)`
 4. `num_batches = (total_rows_est / rows_per_batch).max(1)`
-5. `split_points = splitter.find_split_points(bytes, num_batches.min(MAX_SPLIT_CHUNKS))`
+5. `split_points = splitter.find_split_points(bytes, num_batches.min(self.split_cap))`
 6. Convert to ranges
 
-`MAX_SPLIT_CHUNKS = 100_000` caps split points to prevent pathological overhead.
+`split_cap` (default `MAX_SPLIT_CHUNKS = 100_000`, overridable via
+`plan.max_split_chunks`) caps split points to prevent pathological overhead.
 
 ### run_bytes { #run_bytes }
 
-For each chunk:
+`run_bytes` is a thin wrapper over `run_bytes_stream` with a
+`CollectingConsumer`. The streaming loop, for each chunk:
 
 1. Slice `&bytes[chunk.start..chunk.end]`
 2. Create per-chunk `TableBuilder`
-3. `validate` + `parse_chunk`
+3. `validate` + `parse_chunk_generic`
 4. `extend` into batch engine
-5. Flush when `rows_in_batch >= rows_per_batch`
+5. Flush when `rows_in_batch >= rows_per_batch` or
+   `batch_engine.bytes_used() >= budget.bytes()`; the batch is cut via
+   `split_off(n)`, with `n` shrunk by a byte-based estimate when the byte
+   budget is the trigger
+6. Apply `apply_compare_filter` to each flushed batch if `plan.filter` is set
+7. After the loop, surface deferred strict-types and unknown-field errors
+   (unknown-field as `Error::Merge`) accumulated across chunks
 
 ### run (file-based) { #run }
 
@@ -3249,7 +3578,9 @@ Opens `InputBuffer`. If `Mmap`:
 This keeps RSS low: mapping released before parse loop, only one chunk
 buffer live at a time.
 
-If `Owned` (compressed or small file): delegates to `run_bytes`.
+If `Owned` (compressed input, or the `mmap` feature disabled): delegates to
+`run_bytes_stream`. There is no size-based choice; `use_mmap` is set from the
+`mmap` feature flag alone.
 
 ## InputBuffer { #inputbuffer }
 
@@ -3300,19 +3631,34 @@ open(path, use_mmap, prefault):
 
 Merges another `TableBuilder` into self:
 
-1. Create missing columns with null backfill
-2. For each column in order: check variant equality, promote if needed
+1. Propagate a deferred `strict_error` from the other builder, and carry over
+   the observer counters `rows_accepted`/`rows_rejected` (per-row observer
+   hooks already fired in the chunk's thread)
+2. Create missing columns with null backfill
+3. For each column in order: check variant equality, promote if needed
    (`int64` → `float64`, `string` → `dictionary`), then `extend_owned`
-3. Update `row_count`
+4. Update `row_count`
+
+### Row observers { #row-observers }
+
+`ExecutionPlan` carries an optional `observer: Arc<dyn RowObserver>` (set via
+`with_observer`). The hooks `on_begin_row`, `on_put_field`, `on_row_accepted`,
+`on_row_rejected`, and `on_chunk_finished` fire during parse in every driver
+above. In parallel mode the per-row hooks fire on the chunk's worker thread;
+`extend` then merges the accepted/rejected totals so the final
+`on_chunk_finished` sees the full counts.
 
 ### engines_to_record_batches { #engines_to_record_batches }
 
 Exports per-chunk builders without serial merge:
 
-1. Normalize and retain non-empty builders
-2. Unify schema via `unify_variants` + `promote_to_variant`
-3. `par_iter` over engines to build arrays per unified order
-4. Apply `apply_compare_filter` per batch if filter is present
+1. Surface deferred per-chunk errors first: `unknown_error` as `Error::Merge`,
+   then `strict_error`; with `strict_types` this is the fast path's only error
+   surface
+2. Normalize and retain non-empty builders
+3. Unify schema via `unify_variants` + `promote_to_variant`
+4. `par_iter` over engines to build arrays per unified order
+5. Apply `apply_compare_filter` per batch if filter is present
 
 ## Arrow export { #arrow-export }
 
@@ -3324,12 +3670,118 @@ The filter works by:
 
 1. Checking `is_pure_compare_tree` (no Or/Not/Equal/NotEqual)
 2. Building a boolean mask via `compare_columns` (cast to Float64 or Utf8,
-   then gt/lt/eq/neq/and)
+   then gt/lt/gt_eq/lt_eq/eq/neq); `And` trees are combined in `compare_mask`
 3. Applying `filter_record_batch` to produce the filtered batch
 
 See [Storage and export](./storage.md) for Arrow type mapping and null
 handling details. See [Engine](./engine.md) for `TableBuilder::finish`
 and the zero-copy Arrow export path.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/architecture/expressions/
+========================================================================
+
+# Expression filters { #expression-filters }
+
+`FilterRows` accepts an expression predicate built with `rypipe.expr.col`.
+Expressions construct the same filter spec dicts the Rust engine fuses,
+declaratively and without any bytecode analysis:
+
+```python
+from rypipe import col, FilterRows
+
+source | FilterRows(col("amount") > 100)
+source | FilterRows((col("age") >= 18) & col("name").startswith("A"))
+```
+
+Anything the spec language cannot express raises at construction time, so
+there is no silent fallback to per-row Python.
+
+## How it works { #how-it-works }
+
+```
+col("amount") > 100
+  │
+  ▼
+Predicate({"field": "amount", "op": ">", "value": "100"})
+  │
+  ▼
+FilterRows(predicate) → _plan_kwargs() → {"filter": spec}
+  │
+  ▼
+ExecutionPlan.filter = CompareLiteral { field: "amount", op: CompareOp::Gt, value: "100" }
+```
+
+An expression compares to a literal or another column; the result is a
+`Predicate` whose `_to_spec()` produces the plan spec. `Predicate` objects
+compose with `&` (and), `|` (or), and `~` (not), producing nested
+`{"and": [...]}`, `{"or": [...]}`, `{"not": ...}` specs.
+
+## Supported operations { #supported-operations }
+
+| Expression | Spec |
+|------------|------|
+| `col("x") == 1`, `!=`, `>`, `<`, `>=`, `<=` | `{"field": "x", "op": "==", "value": "1"}` |
+| `col("a") > col("b")` | `{"field_a": "a", "op": ">", "field_b": "b"}` |
+| `col("s").startswith("A")` | `{"op": "starts_with", ...}` |
+| `col("s").endswith("z")` | `{"op": "ends_with", ...}` |
+| `col("s").contains("x")` | `{"op": "contains", ...}` |
+| `col("s").matches(r"^ERR\d+$")` | `{"op": "regex", ...}` |
+| `col("n").between(2, 6)` | `{"and": [{">="}, {"<="}]}` (inclusive) |
+| `col("s").isin(["a", "b"])` | `{"op": "in", "values": [...]}` |
+| `col("s").not_in(["a"])` | `{"op": "not_in", "values": [...]}` |
+| `col("x").is_null()` | `{"op": "is_null"}` |
+| `col("x").is_not_null()` | `{"not": {"op": "is_null"}}` |
+| `col("x").is_type("int64")` | `{"op": "is_type", "value": "int64"}` |
+| `p & q`, `p \| q`, `~p` | `{"and": ...}`, `{"or": ...}`, `{"not": ...}` |
+
+Literals may be `int`, `float`, `str`, or `bool`; they are coerced to the
+string form specs carry, and the engine compares with native-typed numeric
+promotion. `matches()` validates the pattern with `re.compile` at
+construction time and the engine applies it as a regex search against the
+string form of the value.
+
+## Plain callables fall back to Python { #python-fallback }
+
+A plain lambda or function still works as a `FilterRows` predicate, but it
+is opaque to fusion: it runs in Python per row after the table is parsed.
+Earlier versions shipped an in-tree bytecode analyzer that tried to compile
+lambdas into specs; that was removed in favor of this explicit expression
+API. If you want lambda compilation, use the standalone
+[lambda-compiler](https://github.com/emiliano-go/lambda-compiler) package.
+
+```python
+# Runs in Python; not fusable
+f = FilterRows(lambda r: r["name"].strip().lower() == "alice")
+
+# f._filter_spec is None (not fusable)
+# f._predicate is the original lambda (runs in Python)
+```
+
+The filter still works correctly, just slower. For large files, rewrite the
+predicate with `col(...)` or the keyword form.
+
+## Diagnostics { #diagnostics }
+
+Inspect the spec to confirm a predicate is fusable:
+
+```python
+f = FilterRows(col("amount") > 100)
+print(f._filter_spec)
+# {'field': 'amount', 'op': '>', 'value': '100'}
+
+f2 = FilterRows(lambda r: r["name"].strip().lower() == "alice")
+print(f2._filter_spec)
+# None  (Python fallback)
+```
+
+## Recap { #recap }
+
+* `col(name)` starts an expression; comparisons and methods produce
+  `Predicate` objects that carry a fusable spec.
+* `Predicate` composes with `&`, `|`, `~` into arbitrarily nested trees.
+* Regex (`matches`) and inclusive ranges (`between`) are first-class.
+* Plain lambdas are never analyzed; they run in Python as a fallback.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/architecture/
@@ -3348,16 +3800,18 @@ dive into the subpages for the component you care about.
 
 ## Pages { #pages }
 
-| Page | Lines | Focus |
-|------|-------|-------|
+| Page | Focus |
+|------|-------|
 | [Engine](./engine.md) | TableBuilder: row handling, dirty tracking, column dispatch |
 | [Columnar storage](./columnar.md) | StrColumn, ColumnBuilder variants, dictionary, promotions |
 | [Execution plan](./plan.md) | ExecutionPlan, FieldType, FilterPredicate trees |
+| [Expressions](./expressions.md) | col/Predicate expression API for filter pushdown |
 | [Execution](./execution.md) | Pipeline, Parallel, Bounded, InputBuffer |
 | [Decoder API](./decoder.md) | Splitter, RecordParser, ColumnarSink |
 | [Data flow](./data-flow.md) | Diagrams for single, parallel, bounded modes |
 | [Optimizations](./optimizations.md) | Every optimization and why it matters |
 | [Storage and export](./storage.md) | Arrow export, null handling, compare filter |
+| [Schema](./schema.md) | FrozenSchema, discovery, layout signature caching |
 
 ## Design philosophy { #design-philosophy }
 
@@ -3386,7 +3840,7 @@ input bytes
     |
     v
 +---------------------+  (ADAPTER) format specific
-|   Splitter          |  find_split_points, estimate_bytes_per_row
+|   Splitter          |  next_record_start, estimate_bytes_per_row
 +----------+----------+
            | Vec<Range<usize>>  (CORE) split_points_to_ranges
            v
@@ -3427,7 +3881,7 @@ typing, and Arrow logic in one place.
 |--------|---------------|
 | `value` | `Value<'a>` enum: Str(Cow), Int64, Float64, Bool, Date32, Timestamp, Null |
 | `plan` | ExecutionPlan, FieldType, FilterPredicate trees, CompareOp |
-| `columnar` | StrColumn, ColumnBuilder (7 variants), dictionary, promotions |
+| `columnar` | StrColumn, ColumnBuilder (8 variants), dictionary, promotions |
 | `engine` | TableBuilder with ColumnarSink impl, dirty bitmask, predicate-first |
 | `decoder` | Splitter, RecordParser, ColumnarSink traits, plan_chunk_count |
 | `pipeline` | Pipeline<S,P> wiring splitter + parser to TableBuilder |
@@ -3446,7 +3900,10 @@ See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `parallel_stream` | ParallelStreamingExecutor, discovery, ordered/unordered delivery |
 | `streaming` | StreamingBatchIterator: channel-based pull iterator |
 | `consumer` | BatchConsumer, CollectingConsumer, DiscardingConsumer |
-| `error` | Error enum (Utf8, Io, Plan, Merge, Arrow), Result type alias |
+| `error` | Error enum (Utf8, Io, Plan, Merge, Arrow, Parser, Lifetime), Result type alias |
+| `observer` | RowObserver trait for per-row callbacks |
+| `auto` | resolve_engine, AutoConfig, EngineMode: picks an execution mode |
+| `alloc_stats` | Allocation statistics (behind alloc-stats feature) |
 
 ### rypipe-python (PyO3 bindings) { #rypipe-python }
 
@@ -3455,6 +3912,7 @@ See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `lib.rs` | Extension module, exception types |
 | `plan_kwargs.rs` | Python kwargs to ExecutionPlan conversion |
 | `export.rs` | Arrow to PyArrow via C Data Interface |
+| `py_observer.rs` | PyObserver: Python-side RowObserver bridge |
 
 ## State and ownership { #state-and-ownership }
 
@@ -3477,7 +3935,7 @@ Every optimization has a test that verifies correctness:
 - Splitter tests: monotonic points, coverage, comment/CDATA rejection.
 - Engine tests: extend, last-write-wins, rename, drop, filter, typed columns.
 - Columnar tests: push/pop, split_off, arrow export, dictionary upgrade.
-- Integration tests: whole-file parse == N-chunk parse for N in {1, 2, 7, 64}.
+- Integration tests: single, parallel, and streaming parses of the same input produce identical batches.
 
 ## Next steps { #next-steps }
 
@@ -3489,6 +3947,8 @@ Every optimization has a test that verifies correctness:
 - [Optimizations](./optimizations.md) for every change from the original design
 - [Storage and export](./storage.md) for Arrow type mapping and null handling
 - [Execution plan](./plan.md) for pushdown plans and filter predicates
+- [Expressions](./expressions.md) for the col/Predicate filter expression API
+- [Schema](./schema.md) for frozen schemas, discovery, and layout caching
 
 ## Key invariants { #key-invariants }
 
@@ -3549,206 +4009,6 @@ first K newlines (negative scaling), crxml scanned entire file for `<!`
 (25% overhead). The default eliminates this bug class.
 
 ========================================================================
-PAGE: https://rypipe.emiliano-go.com/architecture/lambda-compiler/
-========================================================================
-
-# Lambda Compiler { #lambda-compiler }
-
-When you pass a lambda to `FilterRows`, **rypipe** analyzes its bytecode at
-construction time and tries to compile it into a fusable filter spec. Detected
-patterns are pushed into the Rust parse loop; unknown patterns fall back to
-Python execution.
-
-## How it works { #how-it-works }
-
-```
-FilterRows(lambda r: r["amount"] > 100)
-  │
-  ▼
-_analyze_lambda(fn) → dict | None
-  │  Inspects bytecode via dis.get_instructions()
-  │
-  ├─ pattern detected → convert to filter spec dict
-  │  {"field": "amount", "op": ">", "value": "100"}
-  │  → fusable via existing Rust CompareLiteral path
-  │
-  └─ pattern unknown → fall back to Python (current behavior)
-```
-
-The compiler runs once, at `FilterRows` construction time. If the lambda
-matches a known pattern, the original lambda is replaced with a fusable
-predicate. If not, the lambda runs in Python as before.
-
-## Supported patterns { #supported-patterns }
-
-| Pattern | Example | Compiled to |
-|---------|---------|-------------|
-| field op literal | `r["amount"] > 100` | `CompareLiteral` |
-| field_a op field_b | `r["price"] > r["cost"]` | `Compare` |
-| field.startswith("x") | `r["name"].startswith("A")` | `StartsWith` |
-| field.endswith("x") | `r["name"].endswith("z")` | `EndsWith` |
-| field.contains("x") | `r["name"].contains("ali")` | `Contains` |
-| field.strip() op "x" | `r["name"].strip() == "Alice"` | `Strip` |
-| field.lower() op "x" | `r["name"].lower() == "alice"` | `Lower` |
-| field.upper() op "x" | `r["name"].upper() == "ALICE"` | `Upper` |
-| field.replace(a,b) op "x" | `r["name"].replace("o","x") == "Bxb"` | `Replace` |
-| len(field) op N | `len(r["name"]) > 3` | `Length` |
-| field in tuple/list | `r["s"] in ("a","b")` | `In` |
-| field in frozenset | `r["s"] in frozenset({"a","b"})` | `In` |
-| not field | `not r["active"]` | `NotField` |
-| not field.startswith("x") | `not r["name"].startswith("A")` | `Not(StartsWith)` |
-| not field.endswith("x") | `not r["name"].endswith("z")` | `Not(EndsWith)` |
-| True/False | `lambda r: True` | `Always` |
-| and | `r["a"] > 1 and r["b"] < 2` | `And(...)` |
-| or | `r["a"] > 1 or r["b"] < 2` | `Or(...)` |
-| nested compound | `(r["a"] > 1 or r["b"] < 2) and r["c"] == "x"` | `And(Or(...), ...)` |
-| closure constant | `threshold=100; r["x"] > threshold` | `CompareLiteral` (captured at construction) |
-| cast + compare | `int(r["age"]) > 30` | `CompareLiteral` (typed) |
-| arithmetic | `r["x"] * 2 > 100` | `ArithmeticCompare` |
-
-### How pattern detection works { #pattern-detection }
-
-The compiler uses `dis.get_instructions()` to inspect the lambda's bytecode.
-Each pattern has a specific instruction sequence:
-
-**field op literal:**
-```
-LOAD_FAST(r)  →  LOAD_CONST(field)  →  BINARY_OP([])
-LOAD_CONST(value)  →  COMPARE_OP(op)  →  RETURN_VALUE
-```
-
-**field.startswith("x"):**
-```
-LOAD_FAST(r)  →  LOAD_CONST(field)  →  BINARY_OP([])
-LOAD_ATTR(startswith)  →  LOAD_CONST(arg)  →  CALL  →  RETURN_VALUE
-```
-
-**compound AND:**
-```
-... first comparison ...
-COPY  →  TO_BOOL  →  POP_JUMP_IF_FALSE(target)
-... second comparison ...
-target: RETURN_VALUE
-```
-
-The compiler filters out `RESUME`, `CACHE`, `COPY`, `TO_BOOL`, and jump
-instructions before pattern matching. This makes it resilient to Python
-version differences in bytecode encoding.
-
-## Limitations { #limitations }
-
-The compiler detects common patterns but cannot handle everything:
-
-### Closures with non-constant values { #closures }
-
-```python
-import datetime
-now = datetime.now()
-FilterRows(lambda r: r["timestamp"] > now)  # falls back to Python
-```
-
-The compiler resolves closures at construction time, but only for constant
-types (int, float, str, bool). Complex objects like datetime are not resolved.
-
-### Method chains { #method-chains }
-
-```python
-FilterRows(lambda r: r["name"].strip().lower() == "alice")  # falls back
-```
-
-Single method calls are supported (`strip()`, `lower()`, `upper()`), but
-chains with multiple calls are not. Use keyword form for multi-step transforms.
-
-### Deeply nested compound logic { #nested-compound }
-
-Single-level nesting is supported:
-
-```python
-# Supported:
-FilterRows(lambda r: (r["a"] > 1 or r["b"] < 2) and r["c"] == "x")
-
-# Falls back (3+ levels):
-FilterRows(lambda r: (r["a"] > 1 and r["b"] < 2) or (r["c"] == "x" and r["d"] > 0))
-```
-
-Use keyword combinators for deeply nested logic:
-
-```python
-from my_adapter import FilterRowsAny, FilterRowsAll, FilterRowsNot
-
-FilterRowsAny(
-    FilterRowsAll(
-        FilterRows(field="a", op=">", value="1"),
-        FilterRows(field="b", op="<", value="2"),
-    ),
-    FilterRowsAll(
-        FilterRows(field="c", op="==", value="x"),
-        FilterRows(field="d", op=">", value="0"),
-    ),
-)
-```
-
-## What happens when compilation fails { #compilation-fallback}
-
-When the compiler cannot match a pattern, it returns `None` and the original
-lambda runs in Python:
-
-```python
-# This lambda falls back to Python execution
-f = FilterRows(lambda r: r["name"].strip().lower() == "alice")
-
-# f._filter_spec is None (not fusable)
-# f._predicate is the original lambda (runs in Python)
-```
-
-The filter still works correctly, but it runs in Python over the full table
-instead of in the Rust parse loop. For small files this is fine. For large
-files, consider rewriting the lambda as a keyword form.
-
-## Performance impact { #performance}
-
-For the common case (`r["field"] > value`), the compiler eliminates:
-
-* Python function call overhead per row (~50ns)
-* Python comparison overhead per row (~20ns)
-* The need for a `CastTypes` stage when comparing numbers
-
-On a 10M row file, this saves ~700ms of Python overhead.
-
-## Diagnostics { #diagnostics}
-
-To check whether a lambda was compiled, inspect the filter spec:
-
-```python
-f = FilterRows(lambda r: r["amount"] > 100)
-print(f._filter_spec)
-# {'field': 'amount', 'op': '>', 'value': '100'}  ← compiled
-
-f2 = FilterRows(lambda r: r["name"].strip().lower() == "alice")
-print(f2._filter_spec)
-# None  ← fell back to Python (method chain)
-```
-
-## Recap { #recap }
-
-* The lambda compiler analyzes bytecode at `FilterRows` construction time.
-* Common patterns are compiled to fusable filter specs:
-  - Field comparisons: `r["field"] > 100`, `r["a"] > r["b"]`
-  - String methods: `r["name"].startswith("A")`, `r["name"].endswith("z")`, `r["name"].contains("x")`
-  - String transforms: `r["name"].strip()`, `.lower()`, `.upper()`, `.replace()`
-  - Length: `len(r["name"]) > 3`
-  - Membership: `r["status"] in ("active", "pending")`, `r["s"] in frozenset({...})`
-  - Truthiness: `not r["active"]`, `not r["name"].startswith("A")`
-  - Compound logic: `a and b`, `a or b`, nested `(a or b) and c`
-  - Cast + compare: `int(r["age"]) > 30`
-  - Arithmetic: `r["amount"] * 2 > 100`
-  - Closures: `threshold=100; r["x"] > threshold` (captured at construction)
-  - Constants: `lambda r: True`, `lambda r: False`
-* Unknown patterns (method chains, non-constant closures) fall back to Python.
-* The compiler is a best-effort optimization: if it cannot detect a pattern,
-  the lambda still works correctly, just slower.
-
-========================================================================
 PAGE: https://rypipe.emiliano-go.com/architecture/optimizations/
 ========================================================================
 
@@ -3766,7 +4026,9 @@ value). For 10 fields per row, this was 20 HashMap operations per row.
 **After:** `Vec<ColumnBuilder>` + `field_index: HashMap<String, usize>`.
 One hash probe (name → index via `field_index.get`), then `columns[idx]`
 is a bounds-checked array access. The `push_field_resolved` hot path does
-one hash, one bit set, one conditional pop, and one push_value.
+one hash, a frozen-schema check, a strict-types check, an observer
+notification, first-row ordinal tracking, one bit set, one conditional
+pop, and one push_value.
 
 **Impact:** Eliminates the second hash probe for every field. For 10 fields
 per row at ~10 ns per hash, this saves ~100 ns per row. On a 533 MB file
@@ -3783,16 +4045,22 @@ for b in &mut columns {
 This pushed `None` for every missing column, even when most columns were
 present. For 10 columns where 8 are present, 2 null pushes per row.
 
-**After:** `row_dirty: Vec<u64>` bitmask. In `finish_row`:
+**After:** `row_dirty: Vec<u64>` bitmask. In `finish_row`, a dense-row
+`is_full` check (every dirty bit set) skips the per-column loop entirely;
+otherwise only missing columns get null-filled:
 ```rust
-for (i, b) in columns.iter_mut().enumerate() {
-    let word = i / 64;
-    let bit = i % 64;
-    if (row_dirty[word] >> bit) & 1 == 0 {
-        b.push(None);  // Only missing columns get null-filled
+if is_full {
+    self.row_dirty.fill(0);  // Dense row: no loop at all
+} else {
+    for (i, b) in columns.iter_mut().enumerate() {
+        let word = i / 64;
+        let bit = i % 64;
+        if (row_dirty[word] >> bit) & 1 == 0 {
+            b.push(None);  // Only missing columns get null-filled
+        }
     }
+    self.row_dirty.fill(0);  // Clear all bits for next row
 }
-self.row_dirty.fill(0);  // Clear all bits for next row
 ```
 
 **Impact:** For 10 columns where 8 are present, saves 80% of null-fill pushes.
@@ -3810,7 +4078,8 @@ predicate as soon as the predicate column arrives. On Fail, discard buffer
 
 **Impact:** For selective filters (e.g., 10% selectivity), eliminates 90%
 of column push/pop cycles. The adaptive strategy disables buffering when
-the predicate column is late (> 4/5 of columns), falling back to direct
+the predicate column's slot is at or beyond 4/5 of the column count
+(`ordinal >= ncols * 4 / 5`), falling back to direct
 push + pop-on-reject.
 
 ## 4. resolve + put_field_resolved (single hash) { #4-resolve-put_field_resolved }
@@ -3843,7 +4112,8 @@ per field. ~17% on the hot path. Works for formats with stable field order
 **Before:** Scan all fields even when only 3 of 11 are wanted.
 
 **After:** `row_satisfied()` returns true when all wanted columns have
-values. Scanner byte-jumps to row close via `find_row_close`.
+values. Scanner byte-jumps to row close via `find_close_after` with the
+precomputed close finder (see section 9).
 
 **Impact:** For projections, skips scanning 60-80% of fields. Measured:
 +123% on drop_half parallel (533 MB: 3,394 → 7,571 MB/s).
@@ -3917,14 +4187,14 @@ All chunks must be merged before dict upgrade.
 
 | # | Optimization | Measured gain | Where |
 |---|-------------|---------------|-------|
-| 1 | Dense column storage | Eliminates 1 hash probe/field | engine.rs |
-| 2 | Dirty bitmask null-fill | 80% fewer null pushes | engine.rs |
-| 3 | Predicate-first | 90% fewer push/pop cycles | engine.rs |
-| 4 | Single hash resolve | 100 ns/row saved | engine.rs |
-| 5 | expect_slot layout | 17% on hot path | scanner.rs |
-| 6 | row_satisfied | +123% on drop_half | scanner.rs |
-| 7 | wanted_mask | Eliminates vtable dispatch | scanner.rs |
-| 8 | Ordinal threading | Enables 5 and 6 | scanner.rs |
+| 1 | Dense column storage | Eliminates 1 hash probe/field | engine/table_builder.rs |
+| 2 | Dirty bitmask null-fill | 80% fewer null pushes | engine/table_builder.rs |
+| 3 | Predicate-first | 90% fewer push/pop cycles | engine/table_builder.rs |
+| 4 | Single hash resolve | 100 ns/row saved | engine/table_builder.rs |
+| 5 | expect_slot layout | 17% on hot path | decoder.rs, scanner.rs |
+| 6 | row_satisfied | +123% on drop_half | decoder.rs, scanner.rs |
+| 7 | wanted_mask | Eliminates vtable dispatch | decoder.rs |
+| 8 | Ordinal threading | Enables 5 and 6 | decoder.rs, scanner.rs |
 | 9 | Precomputed close finder | Eliminates per-row alloc | scanner.rs |
 | 10 | Scan primitives | 15% on next_lt | scan/mod.rs |
 | 11 | Splitter default | Eliminates bug class | decoder.rs |
@@ -3953,6 +4223,9 @@ pub struct ExecutionPlan {
     pub auto_dict: bool,
     pub dict_threshold: Option<f64>,
     pub dict_max_size: Option<usize>,
+    pub strict_types: bool,
+    pub max_split_chunks: Option<usize>,
+    pub observer: Option<Arc<dyn RowObserver>>,
 }
 ```
 
@@ -3960,13 +4233,20 @@ pub struct ExecutionPlan {
 
 - **`field_map`**: Rename mapping: raw name → output name.
 - **`drop_fields`**: Fields to drop entirely (not stored).
-- **`field_types`**: Type overrides (Int64, Float64, Bool, Dictionary, etc.).
+- **`field_types`**: Type overrides (Int64, Float64, Boolean, Dictionary, etc.).
 - **`dictionary_columns`**: Explicit dictionary columns.
 - **`filter`**: Composable predicate tree.
-- **`schema_order`**: Desired output column order.
+- **`schema_order`**: Desired output column order; when non-empty, also acts
+  as a projection (see `resolve_field`).
 - **`auto_dict`**: Enable automatic dictionary upgrade.
 - **`dict_threshold`**: Max distinct ratio (default 0.05).
 - **`dict_max_size`**: Max dictionary entries (default 256).
+- **`strict_types`**: Abort on non-null values that fail to parse into their
+  declared type instead of silently storing null (builder: `with_strict_types`).
+- **`max_split_chunks`**: Cap on bounded-streaming chunks (default 100,000;
+  builder: `with_max_split_chunks`).
+- **`observer`**: Optional `RowObserver` whose hooks fire from parse threads
+  (builder: `with_observer`).
 
 ## Builder API { #builder-api }
 
@@ -3992,13 +4272,24 @@ pub fn resolve_field<'a>(&'a self, raw: &'a str) -> Option<&'a str> {
     if self.drop_fields.contains(resolved) {
         return None;
     }
-    // 3. Return resolved (or original if no rename)
+    // 3. Schema projection: when schema_order is non-empty, drop resolved
+    //    names not listed there unless the filter references them
+    if !self.schema_order.is_empty()
+        && !self.schema_order.contains(resolved)
+        && !self.filter_references(resolved)
+    {
+        return None;
+    }
+    // 4. Return resolved (or original if no rename)
     Some(resolved)
 }
 ```
 
-Application order: rename first, then drop, matching left-to-right pipeline
-semantics. Returns `None` for dropped fields. The adapter checks this before
+Application order: rename first, then drop, then schema projection, matching
+left-to-right pipeline semantics. Returns `None` for dropped fields. When
+`schema_order` is non-empty it acts as a projection: unlisted fields resolve
+to `None` (unless referenced by the filter, so predicates still evaluate;
+they are projected out of the final batch). The adapter checks this before
 extraction.
 
 ## column_type { #column_type }
@@ -4027,9 +4318,14 @@ pub enum FieldType {
     Boolean,
     Dictionary,
     Date32,
-    Timestamp(TimeUnit),
+    Timestamp(TimeUnit, Option<Box<str>>),
+    Decimal128(u8),
 }
 ```
+
+`Timestamp` carries an optional chrono format string, parsed from specs like
+`timestamp[ms,format=%Y%m%d]` (unit defaults to `us`). `Decimal128(u8)` takes
+a scale (default 18 via the `decimal128` spec).
 
 ## FilterPredicate { #filterpredicate }
 
@@ -4049,7 +4345,8 @@ pub enum FilterPredicate {
     Lower { field: String, op: CompareOp, value: String },
     Upper { field: String, op: CompareOp, value: String },
     Replace { field: String, old: String, new: String, op: CompareOp, value: String },
-    Length { field: String, op: CompareOp, value: i64 },
+    Length { field: String, op: CompareOp, value: String },
+    Regex { field: String, re: RegexSpec },
 
     // Membership
     In { field: String, values: Vec<String> },
@@ -4065,7 +4362,7 @@ pub enum FilterPredicate {
         arith_op: ArithOp,
         arith_value: f64,
         cmp_op: CompareOp,
-        cmp_value: f64,
+        cmp_value: String,
     },
 
     // Boolean
@@ -4079,12 +4376,15 @@ pub enum FilterPredicate {
 }
 ```
 
+`RegexSpec` pairs the pattern string with its compiled `regex::Regex`; the
+Python filter spec op `"regex"` builds one.
+
 ### Check method { #check-method }
 
-`check(&columns, &field_index, row_index, &plan)` evaluates the predicate
-against column values for a given row. Short-circuits on `And` (first false)
-and `Or` (first true). For `Compare`, it uses native-typed comparison with
-numeric promotion via `TypedValue`.
+`check(&columns, &field_index, row_index, &plan)` (crate-internal) evaluates
+the predicate against column values for a given row. Short-circuits on `And`
+(first false) and `Or` (first true). For `Compare`, it uses native-typed
+comparison with numeric promotion via `TypedValue`.
 
 ### CompareOp { #compareop }
 
@@ -4112,10 +4412,15 @@ Compare uses native-typed comparison with numeric promotion (Int64↔Float64).
 - `schema` → `schema_order`
 - `dictionary_columns` → `dictionary_columns`
 - `auto_dict` → `auto_dict`
+- `auto_dict_threshold` → `dict_threshold`
+- `auto_dict_max_size` → `dict_max_size`
+- `strict_types` → `strict_types`
+- `max_split_chunks` → `max_split_chunks`
+- `observer` → `observer` (dict of hook callables, e.g. `{"on_row_rejected": fn}`)
 
 The conversion is done by `execution_plan_from_kwargs` in `plan_kwargs.rs`.
-It handles nested filter specs (`and`, `or`, `not`) and validates that
-compare filters have both fields typed or both untyped.
+It handles nested filter specs (`and`, `or`, `not`) and leaf ops such as
+`is_null`, `is_type`, and `regex`.
 
 ## How plans flow through the system { #how-plans-flow-through-the-system }
 
@@ -4129,36 +4434,39 @@ compare filters have both fields typed or both untyped.
 
 ## Filter predicate evaluation { #filter-predicate-evaluation }
 
-`FilterPredicate::check` evaluates the tree against column values. The
-engine uses two evaluation paths:
+`FilterPredicate::check` evaluates the tree against committed column values.
+The engine uses two evaluation paths:
 
-1. **Post-commit** (`check`): reads from finished column arrays. Used for
+1. **Post-commit** (`check`): reads from finished column arrays via
+   `get_value`; `IsType` uses `ColumnBuilder::is_type_at`. Used for
    predicates that only need committed data.
-2. **Pre-commit** (`eval_predicate`): reads from the row buffer via
-   `get_buffered_value()`. Used for `IsNull` and `IsType` which must
-   inspect the current row before it is committed.
+2. **Pre-commit** (`eval_predicate` in `table_builder.rs`): a three-state
+   evaluator (`PredicateState::Pass` / `Fail` / `Undecided`) that reads the
+   row buffer via `get_buffered_value()`. It handles all predicate variants
+   during predicate-first deferred materialization; `Undecided` means the
+   field has not been seen yet in the current row.
 
 ```rust
-pub fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usize>,
-             row_index: usize, plan: &ExecutionPlan) -> bool {
+pub(crate) fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usize>,
+                    row_index: usize, plan: &ExecutionPlan) -> bool {
     match self {
         Equal { field, value } => {
-            let resolved = plan.resolve_field(field)?;
-            let idx = field_index.get(resolved)?;
-            columns[*idx].get_filter_value(row_index) == *value
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            actual.as_deref() == Some(value.as_str())
         }
         Compare { field_a, op, field_b } => {
             let va = get_typed_value(columns, field_index, plan, field_a, row_index);
             let vb = get_typed_value(columns, field_index, plan, field_b, row_index);
             compare_typed(va, *op, vb)
         }
-        StartsWith { field, value } => columns[idx].get_filter_value(row_index).starts_with(value),
-        EndsWith { field, value } => columns[idx].get_filter_value(row_index).ends_with(value),
-        Contains { field, value } => columns[idx].get_filter_value(row_index).contains(value),
-        In { field, values } => values.contains(columns[idx].get_filter_value(row_index)),
-        IsNull { field } => row_buf.fields.get(field).is_none(),
-        IsType { field, field_type } => is_type_at(field_type, &row_buf.fields),
-        NotField { field } => row_buf.fields.get(field).is_none_or(|v| v.is_empty()),
+        StartsWith { field, value } => actual.starts_with(value),
+        EndsWith { field, value } => actual.ends_with(value),
+        Contains { field, value } => actual.contains(value),
+        In { field, values } => values.contains(actual),
+        IsNull { field } => get_value(columns, field_index, field, plan, row_index).is_none(),
+        IsType { field, field_type } => column.is_type_at(row_index, field_type),
+        Regex { field, re } => re.compiled.is_match(actual),
+        NotField { field } => actual.is_none_or(|v| v.is_empty()),
         Always(b) => *b,
         And(a, b) => a.check(...) && b.check(...),
         Or(a, b) => a.check(...) || b.check(...),
@@ -4169,19 +4477,19 @@ pub fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<String, usi
 ```
 
 Short-circuiting: `And` stops on first `false`, `Or` stops on first `true`.
-`IsNull` and `IsType` read from the row buffer (pre-commit) because the
-current row has not been pushed to column builders yet.
+Every variant reads committed columns through `get_value` / `is_type_at`;
+the row buffer is only consulted on the pre-commit `eval_predicate` path.
 
 ## C2 reorder optimization { #c2-reorder-optimization }
 
-For `Compare` predicates, operands are reordered by document position so
-the predicate column is checked first. This enables earlier short-circuit
-in the `And` tree.
+For `And` and `Or` predicates, operands are reordered by document position
+(via `pred_ordinal`) so the predicate on the earlier column is checked
+first. This enables earlier short-circuit in both combinators.
 
 ## Plan construction from Python { #plan-construction-from-python }
 
 ```python
-from crxml import RenameFields, DropFields, FilterRows, CastTypes
+from rypipe import RenameFields, DropFields, FilterRows, CastTypes
 
 src | RenameFields({"old": "new"}) | DropFields(["id"]) | \
     FilterRows(field="status", op="==", value="active") | \
@@ -4189,8 +4497,15 @@ src | RenameFields({"old": "new"}) | DropFields(["id"]) | \
 ```
 
 Each stage has `_plan_kwargs()` that returns a dict. `plan_split` merges
-all kwargs into a single `ExecutionPlan`. Non-fusable stages (custom
-callables) run over the returned table.
+all kwargs into a single `ExecutionPlan`; multiple `FilterRows` specs are
+combined with an implicit `and`, and `observer` hook dicts merge per-hook
+(chaining callables when several stages provide the same hook). Non-fusable
+stages (custom callables) run over the returned table.
+
+Filters can also be built with the expression API (`rypipe.expr.col(...)`);
+such predicates expose `_to_spec()` and are fusable like plain spec dicts.
+`FilterRows(field=..., is_null=False)` becomes
+`{"not": {"field": ..., "op": "is_null"}}`.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/architecture/schema/
@@ -4359,6 +4674,13 @@ Properties:
 - **`exact = false`**: sampled discovery may miss rare columns.
 - **Order**: follows discovery order (file order, then document order).
 
+### Construction: partial explicit schema { #construction-partial-schema }
+
+`FrozenSchema::from_partial_plan` is a third mode: like `from_plan`, but
+with `exact = false`. Declared columns keep their specified order; fields
+in the file that are not listed are appended in discovery order instead of
+causing an error.
+
 ### Resolution: the hot path { #resolution-the-hot-path }
 
 `FrozenSchema::resolve` maps a raw field name to its output slot:
@@ -4370,8 +4692,12 @@ pub fn resolve(&self, raw_name: &str) -> Option<u32> {
 }
 ```
 
-This is called in the hot path for every field in every row. With
-`FxHashMap`, it costs ~15 cycles per probe (one hash, one comparison).
+`resolve` is used at schema boundaries (and in tests). The per-field hot
+path inside `TableBuilder` resolves names via `plan.resolve_field` plus a
+`field_index` hash probe (`resolve_and_slot`), and after the first row of a
+stable layout mostly bypasses hashing entirely via the `expect_slot`
+ordinal/memcmp fast path (`put_field_at`). An `FxHashMap` probe costs
+~15 cycles (one hash, one comparison).
 
 The `Option<u32>` return value:
 
@@ -4425,12 +4751,15 @@ impl Default for DiscoveryOpts {
 - Exact: every column is found
 - Cost: one I/O pass + parsing
 
-**Large files (>128 MiB)**:
+**Large files (>128 MiB)**: window count and size scale with file size
+(`dynamic_window_count` / `dynamic_window_size`):
 
-- Sample 16 windows of 2 MiB each (32 MiB total, ~6% of 533 MiB)
+- 128 MiB to 1 GiB: 16 windows of 2 MiB (32 MiB total)
+- 1 GiB to 10 GiB: 32 windows of 4 MiB (128 MiB total)
+- 10 GiB and up: 64 windows of 4 MiB (256 MiB total)
 - Windows are strided evenly through the file
 - Columns found in any window are included
-- Cost: ~5.3 ms on 16 threads (parallel sampling)
+- Cost: ~5.3 ms for a 533 MB file on 16 threads (parallel sampling)
 
 ### Accuracy { #accuracy }
 
@@ -4443,7 +4772,7 @@ typical CR XML exports:
 - A column appearing only in the last 1% of the file would be missed
 
 When a missed column is encountered at parse time, the engine raises
-`MergeError` with the message:
+`Error::Merge` with the message:
 
 ```
 unknown field "LateColumn" not in frozen schema (10 columns, exact=false);
@@ -4565,12 +4894,22 @@ that all columns from the `FrozenSchema` exist in the `TableBuilder`.
 
 ```rust
 pub fn ensure_schema(&mut self, schema: &FrozenSchema) -> Result<()> {
-    for (idx, name) in schema.column_names().iter().enumerate() {
-        if !self.column_names().contains(&name.to_string()) {
-            let ty = schema.column_types()[idx];
-            self.add_typed_column(name, ty, self.num_rows());
+    for (slot, name) in schema.column_names().iter().enumerate() {
+        if self.field_index.contains_key(name) {
+            continue; // already present
         }
+        let ty = schema.column_types()[slot].clone();
+        let col = ColumnBuilder::with_capacity(self.estimated_rows, &ty);
+        self.columns.push(col);
+        self.field_index.insert(name.to_string(), self.columns.len() - 1);
+        self.column_order.push(name.to_string());
     }
+    // Resize row_dirty bitmask to cover all columns.
+    let words = self.columns.len().div_ceil(64);
+    self.row_dirty.resize(words, 0);
+    // Freeze: any later field not in this schema is an unknown field
+    // and must hard-error on finish().
+    self.frozen = Some(Arc::new(schema.clone()));
     Ok(())
 }
 ```
@@ -4578,12 +4917,13 @@ pub fn ensure_schema(&mut self, schema: &FrozenSchema) -> Result<()> {
 Steps:
 
 1. Iterate over all columns in the schema.
-2. For each column not already in the builder:
-   a. Create a typed column builder for the correct `FieldType`.
-   b. Pre-fill with nulls up to the current row count.
-3. After this call, the builder has all declared columns.
+2. For each column not already in the builder, create a capacity-reserved
+   typed column builder for the correct `FieldType`. No rows are pre-filled:
+   `ensure_schema` runs before parsing, when the builder is empty.
+3. Freeze the schema on the builder so unknown fields hard-error at finish.
+4. After this call, the builder has all declared columns.
 
-### Why pre-fill with nulls? { #why-pre-fill-with-nulls }
+### Why pre-declare the columns? { #why-pre-fill-with-nulls }
 
 Consider a file where column "D" appears only in rows 500-1000. Without
 `ensure_schema`:
@@ -4594,7 +4934,8 @@ Consider a file where column "D" appears only in rows 500-1000. Without
 
 With `ensure_schema`:
 
-- Chunk 1: column "D" is added with 500 nulls
+- Chunk 1: column "D" exists as an empty builder; each row that lacks it is
+  null-filled per row by `finish_row`'s dirty-mask pass
 - Chunk 2: column "D" has values
 - At export time: batches have identical schemas
 
@@ -4607,7 +4948,7 @@ adds ~0.1 ms total (negligible vs parse time).
 
 `sort_columns` reorders the internal column list to match `schema_order`.
 Note: when `schema_order` is non-empty, `finish()` takes the projection
-path instead — it emits exactly the declared columns in the declared order
+path instead: it emits exactly the declared columns in the declared order
 (schema columns are pre-declared in `with_plan`, and any still missing are
 created null-filled), so `sort_columns` is effectively vestigial for the
 projection path.
@@ -4619,24 +4960,17 @@ pub fn sort_columns(&mut self) {
     if self.plan.schema_order.is_empty() {
         return;
     }
-
     let order = &self.plan.schema_order;
-    let mut indices: Vec<usize> = (0..self.columns.len()).collect();
-
-    indices.sort_by_key(|&i| {
-        let name = &self.column_names()[i];
-        order.iter().position(|n| n == name)
-            .unwrap_or(order.len() + i)
-    });
-
-    // Reorder columns and their metadata
-    self.reorder_columns(&indices);
+    let rank =
+        |name: &String| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
+    self.column_order.sort_by_key(rank);
 }
 ```
 
 Properties:
 
-- **Stable sort**: columns not in `schema_order` preserve relative order.
+- **Stable sort**: columns not in `schema_order` (key `usize::MAX`) preserve
+  relative order after the ordered ones.
 - **O(n log n)** where n = number of columns (typically <100).
 - **Called once**: at finish time, not per row.
 
@@ -4644,12 +4978,12 @@ Properties:
 
 Given columns `["D", "A", "C", "B"]` and `schema_order = ["A", "B", "C"]`:
 
-1. `["D", "A", "C", "B"]` with sort keys `[5, 0, 3, 1]`
-   - "D" not in schema_order -> key = 5 + 0 = 5
+1. `["D", "A", "C", "B"]` with rank keys `[usize::MAX, 0, 2, 1]`
+   - "D" not in schema_order -> key = `usize::MAX`
    - "A" at position 0 -> key = 0
    - "C" at position 2 -> key = 2
    - "B" at position 1 -> key = 1
-2. Sorted: `["A", "B", "C", "D"]`
+2. Sorted (stable): `["A", "B", "C", "D"]`
 
 ## Fast path vs merge path { #fast-path-vs-merge-path }
 
@@ -4660,44 +4994,56 @@ have identical schemas.
 
 Conditions:
 
-- `auto_dict` is false
-- All batches have identical schemas (guaranteed by `ensure_schema` +
-  `schema_order`)
+- `auto_dict` is false, and all chunks agree on column variant keys
+  (guaranteed by `ensure_schema` + `schema_order`), OR
+- `auto_dict` is true and schemas are consistent after a parallel per-chunk
+  `auto_dict_upgrade` (dictionaries are unified across chunks first when
+  needed)
 
 Behavior:
 
 - Each batch is exported independently in parallel
-- `engines_to_record_batches` builds one `RecordBatch` per chunk
-- No merge step needed
+- `engines_to_record_batches` builds one `RecordBatch` per chunk; it also
+  runs `unify_variants` / `promote_to_variant` to reconcile storage variants
+  across chunks before export
+- No sequential merge step needed
 - Throughput: ~4,980 MB/s on 533 MB
 
 ### Merge path (sequential export) { #merge-path }
 
 Conditions:
 
-- `auto_dict` is true, OR
-- Batches may have different schemas (auto discovery without `schema_order`)
+- Chunk schemas are inconsistent after upgrade (or inconsistent without
+  `auto_dict`): chunks disagree on a column's storage variant in a way the
+  per-chunk export cannot reconcile ahead of time
 
 Behavior:
 
-- Batches are merged sequentially via `extend`
-- `unify_variants` reconciles column types
-- `promote_to_variant` handles type mismatches
+- Batches are merged sequentially into one `TableBuilder` via `extend`
+- `merged.finish()` produces a single batch
 - Throughput: ~4,497 MB/s on 533 MB (-10%)
 
 ### Path selection { #path-selection }
 
+Simplified from `ParallelExecutor::parse`:
+
 ```rust
-fn select_export_path(
-    auto_dict: bool,
-    schemas_consistent: bool,
-) -> ExportPath {
-    if !auto_dict && schemas_consistent {
-        ExportPath::Fast
-    } else {
-        ExportPath::Merge
+if !plan.auto_dict && schemas_consistent(&engines) {
+    return engines_to_record_batches(engines, &plan);
+}
+if plan.auto_dict {
+    engines.par_iter_mut().for_each(|e| e.auto_dict_upgrade());
+    if schemas_consistent(&engines) {
+        unify_dictionaries_across_chunks(&mut engines);
+        return engines_to_record_batches(engines, &plan);
     }
 }
+// Merge path.
+let mut merged = TableBuilder::with_plan(...);
+for engine in engines {
+    merged.extend(engine)?;
+}
+Ok(vec![merged.finish()?])
 ```
 
 `schemas_consistent` checks that all engines agree on column variant keys.
@@ -4732,42 +5078,32 @@ Priority:
 
 This is called during `ensure_schema` to create the correct column builder.
 
-## UnknownFieldPolicy { #unknownfieldpolicy }
+## Unknown fields and strict types { #unknownfieldpolicy }
 
-When a field appears in the file but not in the schema, the engine needs to
-know what to do.
-
-```rust
-pub enum UnknownFieldPolicy {
-    /// Return an error (default).
-    Error,
-    /// Ignore the field, count occurrences, report at end.
-    Skip,
-}
-```
+The crate declares an `UnknownFieldPolicy` enum (`Error` / `Skip`) and
+re-exports it, but no code path currently reads it; it is reserved for
+future use. The actual behavior is fixed:
 
 ### Error behavior (default) { #error-behavior }
 
-With explicit schema (`exact = true`), unknown fields cause a hard error:
+With explicit schema (`exact = true`), unknown fields are recorded during
+parsing and cause a hard error at `finish()`:
 
 ```
-unknown field "LateColumn" not in frozen schema (10 columns, exact=false);
+unknown field "LateColumn" not in frozen schema (10 columns, exact=true);
 pass schema=[...] with full column list or use full-scan discovery
 ```
 
-This is the safe default: it prevents silent data loss.
+The same error with `exact=false` fires when sampled discovery missed a
+rare column (see [Accuracy](#accuracy)). This is the safe default: it
+prevents silent data loss. With a partial schema (`from_partial_plan`,
+`exact = false`), unknown fields are instead appended as new columns in
+discovery order.
 
-### Skip behavior { #skip-behavior }
-
-With `UnknownFieldPolicy::Skip`, unknown fields are ignored. The engine
-counts occurrences and reports at the end:
-
-```
-Warning: 3 unknown fields skipped (field_99, field_100, field_101)
-```
-
-Use this when the file may contain fields not in the schema and you want
-to process only the known fields.
+Unknown fields surface as `Error::Merge`. A related parse-time error mode
+is `strict_types`: when set, a non-null string value that does not parse
+as the declared `field_types` type is recorded and surfaced at `finish()`
+as `Error::Plan`.
 
 ## Integration with the pipeline { #integration-with-the-pipeline }
 
@@ -4789,11 +5125,12 @@ ExecutionPlan
     |         |
     |         +---> TableBuilder.ensure_schema (per chunk)
     |         |         |
-    |         |         +---> add_typed_column (per missing column)
+    |         |         +---> ColumnBuilder::with_capacity (per missing column)
+    |         |         +---> freeze schema on the builder
     |         |
     |         +---> sort_columns (at finish)
     |         |         |
-    |         |         +---> reorder columns to match schema_order
+    |         |         +---> stable-sort column_order to match schema_order
     |         |
     |         +---> engines_to_record_batches (fast path)
     |                   |
@@ -4801,10 +5138,16 @@ ExecutionPlan
     |
     +---> TableBuilder.push_field
               |
-              +---> schema.resolve(raw_name)
+              +---> plan.resolve_field(raw_name) + field_index probe
               |         |
               |         +---> Some(slot) -> put into column slot
               |         +---> None -> skip (dropped)
+              |
+              +---> expect_slot memcmp fast path (stable layout, row 2+)
+              |
+              +---> observer hooks (if plan.observer is set):
+              |         on_begin_row / on_put_field /
+              |         on_row_accepted / on_row_rejected
               |
               +---> column_type(name) -> typed builder
 ```
@@ -4816,7 +5159,7 @@ are rejected by `plan.resolve_field`, so `wants("unlisted_field")` returns
 `false` and the parser skips the field entirely (no scanning, no decoding).
 The wanted-column set (schema columns plus filter-referenced fields) is
 pre-declared in `TableBuilder::with_plan`, which makes the
-`wanted_mask`/`row_satisfied` short-circuit stable from the first row —
+`wanted_mask`/`row_satisfied` short-circuit stable from the first row, so
 adapters can byte-jump to the row close as soon as every wanted column has
 a value. At finish time the batch contains exactly the declared columns in
 the declared order; filter-only columns are projected out, and declared
@@ -4855,10 +5198,17 @@ During parsing:
 
 When `FilterRows` is used, the plan's `filter` is populated. During parsing:
 
-- After each row, the engine checks the predicate
-- If the row fails, all column values are popped (via `pop_row`)
-- If `field_types` is set, the predicate uses native comparison
-- If `field_types` is not set, the predicate falls back to string comparison
+- Predicate-first buffered evaluation: field values are buffered per row;
+  the predicate is evaluated as soon as its fields are seen
+  (`eval_predicate`), and at end of row the buffer is either committed to
+  the columns (`drain_buffered`) or discarded without touching them.
+- Adaptive fallback: when the predicate column's ordinal is >= 4/5 of the
+  column count, buffering is disabled (`buffer_worthwhile = false`) and the
+  engine falls back to direct push with pop-on-reject in `finish_row`
+  (`pop()` per column when the predicate fails).
+- Comparison flavor is per predicate: `Equal`/`NotEqual` are string-based;
+  `Compare`/`CompareLiteral` are typed using the columns' `field_types`,
+  with numeric promotion (Int64 vs Float64 compares as float).
 
 ## Performance budget { #performance-budget }
 
@@ -4876,7 +5226,7 @@ Without explicit schema:
 
 | Phase | Time | Notes |
 |-------|------|-------|
-| Discovery (parallel) | 5.3 ms | 16x2 MiB sampling. |
+| Discovery (parallel) | 5.3 ms | 16x2 MiB sampling at 533 MB; window count and size scale with file size. |
 | `from_discovered` | 0.01 ms | Apply renames/drops. |
 | `ensure_schema` | 0.1 ms | Same as above. |
 | `sort_columns` | 0.01 ms | Same as above. |
@@ -4916,11 +5266,15 @@ path. See [Columnar storage](./columnar.md) for the storage types themselves.
 | Float64(PrimColumn<f64>) | Float64 | Float64Array |
 | Boolean(PrimColumn<bool>) | Boolean | BooleanArray (BooleanBuffer) |
 | Date32(PrimColumn<i32>) | Date32 | Date32Array |
-| Timestamp(unit, PrimColumn<i64>) | Timestamp(unit, None) | PrimitiveArray<TimestampXType> |
-| Dictionary { codes, dict, index } | Dictionary(Int32, Utf8) | DictionaryArray<Int32Type> |
+| Timestamp(TimeUnit, Option<Box<str>>, PrimColumn<i64>) | Timestamp(unit, None) | PrimitiveArray<TimestampXType> |
+| Decimal128(u8, PrimColumn<i128>) | Decimal128(38, scale) | Decimal128Array |
+| Dictionary { codes, data, offsets, index } | Dictionary(Int32, Utf8) | DictionaryArray<Int32Type> |
 
 `arrow_datatype()` maps each variant to its Arrow type. `to_arrow_array()`
-builds the native array via zero-copy `std::mem::take` on internal buffers.
+moves internal buffers into the native array via `std::mem::take` (zero-copy
+for `StrColumn` and Dictionary). `PrimColumn<T>` exports collect into a fresh
+`ScalarBuffer`, and `to_arrow_bool` repacks into a `BooleanBuffer`, so
+primitive and boolean exports copy.
 
 ## Null handling { #null-handling }
 
@@ -4945,9 +5299,12 @@ of the unified type. This is a block fill, not per-cell.
 
 ### Value::Null and unparseable strings { #valuenull-and-unparseable-strings }
 
-Both become `None` in the column builder. `push_str` returns `None` for
-unparseable strings (e.g., "abc" into Int64 column). `Value::Null` is
-explicitly null.
+Both become `None` in the column builder. `push_str` returns `()`; the column
+stores `None` for unparseable strings (e.g., "abc" into Int64 column).
+`Value::Null` is explicitly null. Exception: with `plan.strict_types` set,
+a non-null string that fails `parses_as` for the declared `field_types` type
+is recorded as a strict violation and surfaced as an error by `finish()` (see
+the finish path below) instead of becoming `None`.
 
 ## String arena { #string-arena }
 
@@ -4961,8 +5318,9 @@ offsets: [0,     5,          10]             ← byte boundaries
 ### push { #push }
 
 `push(Some("hello"))` appends 5 bytes to `data`, pushes `data.len()` (=5)
-to `offsets`, pushes `true` to validity. `push(None)` pushes 0 to offsets
-and `false` to validity. No per-cell allocation beyond arena growth.
+to `offsets`, pushes `true` to validity. `push(None)` appends nothing to
+`data`, so the current offset is repeated, and pushes `false` to validity.
+No per-cell allocation beyond arena growth.
 
 ### pop { #pop }
 
@@ -4972,8 +5330,9 @@ for last-write-wins (duplicate field in same row) and row rejection.
 ### append { #append }
 
 Merges another column by base-shifting offsets: `base = self.data.len()`.
-Then extends `self.offsets` with `other.offsets[1..].map(|o| o + base)`.
-O(n) in offsets, not in bytes.
+Then extends `self.offsets` with `other.offsets[1..].map(|o| o + base)` and
+copies `other.data` via `extend_from_slice`. O(n) in offsets plus O(n) in
+bytes for the arena memcpy.
 
 ### Capacity { #capacity }
 
@@ -4987,14 +5346,24 @@ When a `Value::Str` is pushed to a typed column, the string is parsed:
 
 - **Int64**: `lexical::parse::<i64, _>(s.as_bytes())`: fast, SIMD-optimized
 - **Float64**: `lexical::parse::<f64, _>(s.as_bytes())`
-- **Boolean**: `s.parse::<bool>()`: accepts "true"/"false"/"1"/"0"
+- **Boolean**: `s.parse::<bool>()`: accepts only "true"/"false"; other
+  spellings become null (the wider "1"/"0"/"yes"/"no" set is used only by
+  the `is_type_at` type-detection path)
 - **Date32**: `chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")` minus Unix epoch
-- **Timestamp**: tries `"%Y-%m-%dT%H:%M:%S%.f"`, then
-  `"%Y-%m-%d %H:%M:%S%.f"`, then bare date as midnight. Converts via `and_utc()` to the target TimeUnit.
+- **Decimal128**: `parse_decimal128(s, scale)`: sign, integer, and fraction
+  parts are combined into a scaled `i128`; extra fraction digits beyond
+  `scale` are truncated
+- **Timestamp**: if the column declares `format=`, the custom chrono format
+  is tried first (as `NaiveDateTime`, then `NaiveDate` at midnight). Then
+  the built-ins: `"%Y-%m-%dT%H:%M:%S%.f"`, `"%Y-%m-%d %H:%M:%S%.f"`, and
+  bare date as midnight. Converts via `and_utc()` to the target TimeUnit.
 
-Unparseable strings become `None`. Cross-type `Value::Int64` into `Float64`
-widens; into `String` stringifies; into `Dictionary` encodes. Other
-cross-type cases become `None`.
+Unparseable strings become `None`. Cross-type conversions mostly succeed:
+`Value::Int64` into `Float64` widens, into `String` stringifies, into
+`Dictionary` encodes; `Float64` into `Int64` truncates; `Bool` converts into
+`String`/`Dictionary`; `Date32` and `Timestamp` convert into
+`Int64`/`Float64`/`String`/`Dictionary`. Cases with no defined conversion
+become `None`.
 
 ## Dictionary { #dictionary }
 
@@ -5033,21 +5402,33 @@ Used in `merge::extend` and `engines_to_record_batches`.
 
 `TableBuilder::finish()` does:
 
-1. **normalize**: truncate any column with `len > row_count` (partial row
+1. **Deferred errors**: returns `Err` if `unknown_error` (frozen-schema
+   violation) or `strict_error` (`strict_types` violation) was recorded
+   during ingestion.
+2. **Observer hook**: calls `observer.on_chunk_finished(accepted + rejected,
+   accepted, rejected)` when the plan declares an observer.
+3. **normalize**: truncate any column with `len > row_count` (partial row
    from truncated chunk), clear `row_dirty`. Idempotent.
-2. Early return with `RecordBatch::new_empty` if `column_order` is empty.
-3. **auto_dict_upgrade**: if `plan.auto_dict`, iterate columns and upgrade
+4. Early return with `RecordBatch::new_empty` if `column_order` is empty.
+5. **auto_dict_upgrade**: if `plan.auto_dict`, iterate columns and upgrade
    String builders with low cardinality to Dictionary. Threshold: 5% distinct
-   ratio, max 256 entries, min 512 rows.
-4. **sort_columns**: reorder `column_order` by `schema_order` rank. Does
-   not reorder `columns` or `field_index`; those stay insertion-ordered.
-5. **Build fields + arrays**: iterate `column_order`, look up each builder
+   ratio, max 256 entries, min 512 rows. The distinct cap is floored at 16
+   entries (`(len * ratio).max(16)`) so tiny columns can still upgrade.
+6. **Schema projection** (when `schema_order` is non-empty): build fields and
+   arrays directly from `schema_order`. Columns declared but absent from the
+   data are null-filled; non-schema columns are projected out. `sort_columns`
+   is not called on this branch.
+7. **sort_columns** (only when `schema_order` is empty, where it no-ops):
+   reorder `column_order` by `schema_order` rank. Does not reorder `columns`
+   or `field_index`; those stay insertion-ordered.
+8. **Build fields + arrays**: iterate `column_order`, look up each builder
    via `field_index`, call `arrow_datatype` and `to_arrow_array`.
-6. **Schema::new(fields)** + **RecordBatch::try_new**.
+9. **Schema::new(fields)** + **RecordBatch::try_new**.
 
 No borrowed bytes outlive `finish`. `StrColumn` owns its data and numeric
-Vecs are owned. The `to_arrow_array` methods use `std::mem::take` to move
-internal buffers into Arrow arrays (zero-copy export).
+Vecs are owned. `to_arrow_array` moves string and dictionary buffers into
+Arrow arrays via `std::mem::take` (zero-copy); primitive exports collect
+into fresh buffers.
 
 ## Compare filter reapplication { #compare-filter-reapplication }
 
@@ -5060,7 +5441,7 @@ This exists for callers that filter an already-built `RecordBatch` (e.g.,
 after merging chunks). It is not the per-row filter. Per-row
 `FilterPredicate::check` is authoritative; `apply_compare_filter` only
 reapplies pure Compare/And via `compare_columns` (casts to Float64 or Utf8,
-then `gt`/`lt`/`eq`/`neq`/`and`) and `filter_record_batch`.
+then `gt`/`lt`/`gt_eq`/`lt_eq`/`eq`/`neq`/`and`) and `filter_record_batch`.
 
 ## Memory layout { #memory-layout }
 
@@ -5071,7 +5452,8 @@ For a 533 MB XML file with 480K rows and 10 columns:
 - **PrimColumn<f64>**: ~3.8 MB data + ~60 KB validity
 - **Dictionary**: ~500 entries × ~20 bytes = ~10 KB dict + ~1.9 MB codes
 - **Total per chunk** (16 chunks): ~15 MB per chunk, ~240 MB total
-- **Arrow export**: moves buffers, no additional allocation
+- **Arrow export**: string and dictionary buffers move (zero-copy);
+  primitive exports collect into fresh buffers
 
 The arena-based `StrColumn` is the dominant memory consumer. For files with
 many unique strings, the arena can grow to 2-3× the raw data size. For
@@ -5327,19 +5709,15 @@ a single call: filters are pushed into the parser, drops never get scanned,
 and fused stages stay in Rust instead of falling back to Python:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource, DropFields, FilterRows, RenameFields
 
 # Fast because the adapter honors wants(), plan_overrides, and field_types.
-table = rypipe.read(
-    "sample.log",
-    format="log",
-    drop_fields=["id"],
-    field_mapping={"name": "user"},
-    filter={"field": "status", "op": "eq", "value": "active"},
-    field_types={"amount": "float64"},
-)
+table = (
+    LogSource("sample.log", field_types={"amount": "float64"})
+    | DropFields(["id"])
+    | RenameFields({"name": "user"})
+    | FilterRows(field="status", op="eq", value="active")
+).to_arrow()
 ```
 
 ========================================================================
@@ -5435,14 +5813,11 @@ the planner. Passing `memory=` switches the adapter into streaming mode
 the memory budget:
 
 ```python
-import rypipe, rypipe_log
-
-adapter = rypipe_log.LogAdapter()
-rypipe.register_adapter("log", adapter)
+from rypipe_log import LogSource
 
 # Streaming mode: chunk count and sizes come from plan_chunk_count.
-for batch in adapter.iter_record_batches(
-    "sample.log", memory="64MiB", batch_size=10_000
+for batch in LogSource("sample.log").iter_record_batches(
+    memory="64MiB", batch_size=10_000
 ):
     print(batch.num_rows)
 ```
@@ -5708,27 +6083,27 @@ same commands apply unchanged.
 ## What the end user sees { #what-the-end-user-sees }
 
 However the adapter is built internally, the finished product is a
-registered format the user drives through plain `rypipe` calls. A full
-session with the log adapter from this guide:
+self-contained package the user drives through its `Source` class; they
+never import **rypipe** itself. A full session with the log adapter from
+this guide:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource, FilterRows
 
 # One-shot read with projection, types, and a pushed-down filter.
-table = rypipe.read(
-    "sample.log",
-    format="log",
-    schema=["id", "name", "amount"],
-    field_types={"id": "int64", "amount": "float64"},
-    filter={"field": "status", "op": "eq", "value": "active"},
-)
+table = (
+    LogSource(
+        "sample.log",
+        schema=["id", "name", "amount"],
+        field_types={"id": "int64", "amount": "float64"},
+    )
+    | FilterRows(field="status", op="eq", value="active")
+).to_arrow()
 print(table.num_rows)
 
 # Or stream the same file with bounded memory.
-for batch in rypipe.iter_record_batches(
-    "sample.log", format="log", memory="64MiB", batch_size=10_000
+for batch in LogSource("sample.log").iter_record_batches(
+    memory="64MiB", batch_size=10_000
 ):
     print(batch.num_rows)
 ```
@@ -5991,6 +6366,30 @@ For a 533 MB file on a Ryzen 5800X:
 | Parsing | ~70% | `parse_chunk` is the hot path |
 | Column building | ~20% | Engine handles this |
 | Export | ~5% | Zero-copy, engine handles this |
+
+## Extension tiers { #extension-tiers }
+
+Users and adapter authors extend **rypipe** at four tiers. Each tier down
+is faster and harder; each tier up is easier and slower. Pick the highest
+tier that expresses what you need, and document the price when you expose
+a lower one:
+
+| Tier | Mechanism | Cost | Audience |
+|------|-----------|------|----------|
+| Declarative | Plan kwargs: `schema`, `field_types`, `filter` specs | Zero: compiled into the Rust parse | End users |
+| Expression | `_plan_kwargs()` on a stage returning plan data | Zero: fuses into the plan | Stage authors |
+| Rust trait | `Splitter`, `RecordParser`, `RowObserver` with default no-op methods | Zero to near-zero: static dispatch via `parse_chunk_generic` | Adapter authors |
+| Python hook | Observer callables, stage `apply()` | GIL acquisition per call (~50 ns); fine per row, painful per field | Debugging, prototyping |
+
+Two rules keep the ecosystem fast:
+
+- **Extend with data, not code.** If a feature can be expressed as plan
+  kwargs (a new filter op, a new type), add it there. It fuses for free
+  and works identically in every adapter.
+- **No Python callbacks in the hot loop.** Per-row Python hooks are a
+  debugging tool; per-field Python hooks cost ~0.5 s per 1M rows at 10
+  fields. If a hook gets hot, promote it: Python callable to expression,
+  expression to plan op, plan op to Rust trait method.
 
 ## Build and test { #build-and-test }
 
@@ -6275,22 +6674,18 @@ change to `parse_chunk`. For the end-to-end check through Python, see the
 ## What the end user sees { #what-the-end-user-sees }
 
 The `wants()` checks and typed `Value` variants in your `parse_chunk` pay
-off as free projection pushdown and typed columns. The user passes a filter
-and type hints; the parser skips dropped fields and the engine builds typed
-Arrow arrays directly:
+off as free projection pushdown and typed columns. The user chains a filter
+stage and passes type hints; the parser skips dropped fields and the engine
+builds typed Arrow arrays directly:
 
 ```python
-import rypipe, rypipe_log
+from rypipe_log import LogSource, FilterRows
 
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
-
-# filter is evaluated row-by-row during parsing; "amount" arrives as float64.
-table = rypipe.read(
-    "sample.log",
-    format="log",
-    field_types={"amount": "float64"},
-    filter={"field": "status", "op": "eq", "value": "active"},
-)
+# The filter is evaluated row-by-row during parsing; "amount" arrives as float64.
+table = (
+    LogSource("sample.log", field_types={"amount": "float64"})
+    | FilterRows(field="status", op="eq", value="active")
+).to_arrow()
 ```
 
 ========================================================================
@@ -6940,19 +7335,19 @@ dropped fields saves significant CPU.
     treatment and [Adapter design](../advanced/adapter-design.md#parse_chunk_generic)
     for how the engine drives it.
 
-    It is an optimization, not a requirement — the default implementation
+    It is an optimization, not a requirement: the default implementation
     delegates to `parse_chunk`, so behavior is identical either way. Reasons
     to skip it:
 
     * `parse_chunk` is still mandatory (the trait requires the object-safe
       method), so the usual shape is one generic helper plus a one-line
-      `parse_chunk` shim — extra boilerplate for a first adapter.
+      `parse_chunk` shim (extra boilerplate for a first adapter).
     * The generic method is not object-safe: anything driving your parser
       through `dyn RecordParser` (custom drivers, tests) still uses
       `parse_chunk`.
     * Monomorphization instantiates the parser body per concrete sink type,
-      which costs compile time and binary size — noticeable for large
-      parsers.
+      which costs compile time and binary size (noticeable for large
+      parsers).
     * The 5-10% only materializes when you are CPU-bound in the parse loop.
       For small files, I/O-bound reads, or formats dominated by UTF-8
       validation or allocation, it is in the noise. Migrate later if
@@ -7067,7 +7462,7 @@ impl RecordParser for LogParser {
                 // failing the whole chunk.
                 if let Some((key, value)) = part.split_once('=') {
                     // wants() is false for fields the plan drops or renames
-                    // away — skipping them saves real CPU.
+                    // away; skipping them saves real CPU.
                     if sink.wants(key) {
                         // Borrow from the input: zero-copy until the sink
                         // decides to materialize the value.
@@ -7305,7 +7700,7 @@ fn read_log(
     }
 
     // Run the whole parse in Rust: split, parse, fuse the plan, merge
-    // chunks — one RecordBatch comes out. Engine errors become ValueError.
+    // chunks; one RecordBatch comes out. Engine errors become ValueError.
     let batch = Pipeline::new(LogSplitter, LogParser)
         .with_plan(plan)
         .read_path(&path, use_mmap, prefault)
@@ -7488,12 +7883,10 @@ The scan primitives are invisible by design. Whether your parser uses
 read; the primitives only show up as speed:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # No scan-related options exist; SIMD byte-search is purely internal.
-table = rypipe.read("sample.log", format="log")
+table = LogSource("sample.log").to_arrow()
 ```
 
 ========================================================================
@@ -7529,7 +7922,7 @@ parsed values with no intermediate strings.
 
 `schema_order` declares the output schema as a **projection + order**: the
 output contains exactly the listed columns, in the listed order. Fields in
-the data that are not listed are skipped during parsing — `wants()` returns
+the data that are not listed are skipped during parsing: `wants()` returns
 `false` for them, so the adapter never scans, decodes, or materializes them.
 Listed columns that are absent from (some rows of) the data come out
 null-filled; extra/unknown fields in the data are ignored, not an error.
@@ -7586,6 +7979,23 @@ source = LogSource(
 | `timestamp[ms]` | `FieldType::Timestamp(Millisecond)` | `Timestamp<Millisecond>` |
 | `timestamp[us]` | `FieldType::Timestamp(Microsecond)` | `Timestamp<Microsecond>` |
 | `timestamp[ns]` | `FieldType::Timestamp(Nanosecond)` | `Timestamp<Nanosecond>` |
+
+A custom chrono format can be added to any timestamp spec:
+`timestamp[ms,format=%Y%m%d %H:%M]`. The custom format is tried first, the
+ISO layouts still match, and unparseable values follow the usual lenient
+rules (null, or an error under `strict_types`).
+
+### Lenient by default, strict on demand { #lenient-by-default }
+
+Missing or null fields always come out null, and a value that does not
+parse as its declared type (say `"abc"` in an `int64` column) also becomes
+null rather than an error. Users who would rather reject malformed data can
+pass `strict_types=True`: the first unparsable value aborts the read with
+an error naming the column, value, declared type, and row index (nulls are
+still allowed; strictness covers malformed data, not nullability). Adapter
+authors get this for free: the engine enforces it wherever a `Value::Str`
+is pushed into a declared-typed column. See
+[Schema and types](../advanced/schema-and-types.md#null-and-malformed-values).
 
 ## How the parser uses schema { #how-the-parser-uses-schema }
 
@@ -7819,7 +8229,7 @@ For formats where schema discovery is unreliable (extremely sparse data,
 heterogeneous records, or non-standard layouts), pass an explicit `schema`:
 
 ```python
-source = MyAdapter(
+source = LogSource(
     "esoteric.dat",
     schema=["id", "value", "timestamp"],
     field_types={"id": "int64", "value": "float64"},
@@ -7889,16 +8299,13 @@ columns; fields the user does not list are never scanned, and listed
 columns missing from some rows come out null-filled:
 
 ```python
-import rypipe, rypipe_log
+from rypipe_log import LogSource
 
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
-
-table = rypipe.read(
+table = LogSource(
     "sample.log",
-    format="log",
     schema=["id", "name", "amount"],          # column order, no discovery pass
     field_types={"id": "int64", "amount": "float64"},
-)
+).to_arrow()
 ```
 
 ========================================================================
@@ -8058,8 +8465,29 @@ work.
 
 ## The projection fast path { #the-projection-fast-path }
 
-When a projection selects 3 of 11 columns and all 3 arrive by field 4, the
-scanner can byte-jump to the row close tag, skipping fields 5-11.
+**Projection** is the relational operation of selecting a subset of columns
+from each row and discarding the rest. In rypipe it comes from three sources:
+`schema_order` (the output contains exactly the listed columns),
+`.drop(...)` / `DropFields` (named columns removed), and filter columns
+(parsed for predicate evaluation, then projected out of the output).
+
+**Projection pushdown** means moving that selection to the earliest possible
+point in the pipeline: the byte scanner itself. The theoretical win is that
+an unwanted column costs nothing at every stage it never reaches: no byte
+scanning, no UTF-8 decoding, no hash lookup, no allocation, no Arrow builder
+append. The engine exposes this as a chain of increasingly coarse signals:
+
+1. `wants(name)` / `resolve()`: per-field; skip this field's value.
+2. `wanted_mask()`: per-row; a bitmask answering `wants()` for all slots at
+   once.
+3. `row_satisfied()`: per-row short-circuit; once every wanted column in
+   the row has a value, the remaining fields can only be unwanted, so the
+   scanner may skip them without even reading their names.
+
+The third signal is what makes projection a scanner optimization rather than
+just a storage optimization. When a projection selects 3 of 11 columns and
+all 3 arrive by field 4, the scanner can byte-jump to the row close tag,
+skipping fields 5-11.
 
 ```
 sink.row_satisfied()  →  true  →  scanner calls find_row_close()
@@ -8099,57 +8527,177 @@ per field.
 
 ## The layout prediction fast path { #the-layout-prediction-fast-path }
 
-After the first row, the engine knows which slot each ordinal maps to.
-`expect_slot(ordinal)` returns `(slot, raw_name_bytes)`. The adapter compares
-raw bytes via memcmp instead of running the full attribute scan → UTF-8 decode
-→ hash → lookup pipeline.
+The generic per-field path does four pieces of work before a value lands in
+a column:
 
 ```
-expect_slot(ordinal)  →  Some((slot, expected))
-  memcmp(raw, expected) == 0  →  put_field_at(slot, value)  // skip decode + resolve
-  memcmp(raw, expected) != 0  →  layout_broken(ordinal)     // invalidate, fall back
+raw name bytes → UTF-8/entity decode → hash lookup → resolve (rename/drop) → slot
 ```
+
+The observation behind this fast path: in most row-oriented formats the
+**layout is stable**, meaning field number 3 of every row is the same
+column. Once one row has been parsed generically, the mapping
+`ordinal → (slot, name)` is known, and verifying it costs a single memcmp
+instead of the whole pipeline. (An *ordinal* is the field's position within
+the row, 0-based: first field is 0, second is 1, and so on.)
+
+The learning side is automatic: every generic `put_field` call records
+`(slot, name_bytes)` for its ordinal when no entry exists yet, so the first
+row (and any re-learn after an invalidation) costs nothing extra. Your
+adapter only opts into *using* the mapping. For each field:
+
+1. Ask `sink.expect_slot(ordinal)`. `None` means "nothing learned yet":
+   take the generic path, which learns the entry as a side effect.
+2. `Some((slot, expected))`: memcmp the field's raw name bytes against
+   `expected`.
+3. Match: push with `sink.put_field_at(slot, value)`. No decode, no hash,
+   no resolve.
+4. Mismatch: call `sink.layout_broken(ordinal)` to drop the stale entry,
+   then fall through to the generic path, which re-learns the ordinal from
+   this row's actual name.
+
+A complete adapter loop:
+
+```rust
+fn parse_row(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+    sink.begin_row();
+    let mut ordinal = 0u32;
+    for (raw_name, raw_value) in self.scan_fields(bytes) {
+        // Fast path: the engine cached a slot for this ordinal and the
+        // raw name bytes match. Skip decode + resolve entirely.
+        if let Some((slot, expected)) = sink.expect_slot(ordinal) {
+            if raw_name == expected {
+                sink.put_field_at(slot, Value::Str(Cow::Borrowed(raw_value)));
+                ordinal += 1;
+                continue;
+            }
+            // Layout changed (reordered, missing, or extra field).
+            // Invalidate so the generic path below re-learns the ordinal.
+            sink.layout_broken(ordinal);
+        }
+        // Generic path: decode + resolve + push. Also (re)learns the
+        // ordinal → (slot, name) mapping as a side effect.
+        let name = decode_name(raw_name);
+        if sink.wants(&name) {
+            sink.put_field(&name, Value::Str(Cow::Borrowed(raw_value)));
+        }
+        ordinal += 1;
+    }
+    sink.end_row();
+    Ok(())
+}
+```
+
+Three rules keep this sound:
+
+1. **Always memcmp before `put_field_at`.** `put_field_at` writes blindly to
+   a slot; without the comparison, a shifted layout puts values in the
+   wrong columns silently.
+2. **Always `layout_broken(ordinal)` on mismatch.** Otherwise the stale
+   entry either mismatches forever (you pay `expect_slot` + memcmp per row
+   for nothing) or, worse, matches a *different* field that happens to carry
+   the old name at this ordinal and writes it to the wrong slot.
+3. **Never cache slot numbers yourself.** Slots are only valid through
+   `expect_slot` for the current layout; a drop, rename, or schema change
+   invalidates them.
+
+One subtlety: the engine stores the **resolved** (post-rename) name bytes,
+so the memcmp only hits when the raw bytes are already the final name. A
+field whose name contains an entity (`&amp;`) or escapes never matches in
+raw form and always falls through to the generic path. That is correct,
+just not fast.
 
 **Cost comparison:**
 
 - Generic path: ~25 ns (find_attr_value + decode_attr + resolve + put_field)
 - Fast path: ~8 ns (memcmp + put_field_at)
 
-**When it helps:** Formats with stable field order across rows (CSV columns,
-XML attributes, JSONL keys). The first row learns the layout; subsequent rows
-skip the expensive resolution.
+**When it helps:** formats with stable field order across rows (CSV columns,
+XML attributes, JSONL keys). The first row learns the layout; subsequent
+rows skip the expensive resolution.
 
-**When it doesn't help:** Formats where field order changes between rows, or
+**When it doesn't help:** formats where field order changes between rows
+(every memcmp fails, so you pay for the attempt and the generic path), or
 where field names contain entities that need decoding before comparison.
 
 ## The predicate-first fast path { #the-predicate-first-fast-path }
 
-When a filter is active, the engine buffers fields until the predicate resolves.
-If the predicate passes mid-row, the engine switches to direct mode and drains
-the buffer.
+A filter creates a dilemma for the engine: a rejected row's values are
+wasted work, but you cannot know whether a row passes until its predicate
+column arrives, and that column may sit anywhere in the row. The two naive
+strategies both lose:
+
+- **Push everything, delete on reject:** values are materialized into Arrow
+  builders before the verdict; a rejected row pays full column writes plus
+  a per-column pop to remove them.
+- **Buffer the whole row, decide at `end_row`:** rejected rows cost nothing
+  in the columns, but every value of every *passing* row pays a buffer copy
+  first, even when the filter was decidable after field 2.
+
+Predicate-first is the middle ground: buffer only **until the predicate
+resolves**, then commit to one of the two strategies for the rest of the
+row. Fields arrive as `(slot, value)` pairs in a per-row buffer, and after
+each field the engine re-evaluates the predicate using the values seen so
+far:
 
 ```
-begin_row → [put_field × N] → end_row
-                │
-                ▼
-         check predicate slot
-         ├── Pass → direct mode (push remaining fields directly)
-         ├── Fail → discard buffer, skip row
-         └── Undecided → continue buffering
+begin_row → [buffered put_field × N] → end_row
+                  │
+                  ▼  after each field
+           predicate state
+           ├── Pass      → drain buffer into columns, switch to direct
+           │               mode: remaining fields push unbuffered
+           ├── Fail      → row_rejected() = true; end_row discards the
+           │               buffer (zero Arrow writes for this row)
+           └── Undecided → keep buffering
 ```
 
-The scanner checks `sink.row_rejected()` after each child element:
+A **Pass mid-row** means the buffer drains once and the rest of the row
+costs the same as an unfiltered parse. A **Fail mid-row** means nothing was
+ever written to a column, and the scanner can stop reading the row
+immediately. A rejected row therefore costs only its buffered fields up to
+the predicate column; a passing row pays the buffer only up to the
+predicate column too.
+
+Your adapter's part is one check per field: after pushing, ask
+`sink.row_rejected()` and byte-jump out of the row when the filter has
+already decided against it:
 
 ```rust
-if sink.row_rejected() {
-    let after = find_row_close(bytes, cur, row_tag, regions);
-    sink.end_row();
-    return Flow::At(after);
+sink.begin_row();
+for (raw_name, raw_value) in self.scan_fields(bytes) {
+    let name = decode_name(raw_name);
+    if sink.wants(&name) {
+        sink.put_field(&name, Value::Str(Cow::Borrowed(raw_value)));
+    }
+    // Filter decided against this row mid-row: skip to the row close,
+    // end_row throws the buffered fields away.
+    if sink.row_rejected() {
+        let after = find_row_close(bytes, cur, row_tag, regions);
+        sink.end_row();
+        return Ok(Flow::At(after));
+    }
 }
+sink.end_row();
 ```
 
-**Adaptive strategy:** If the predicate column appears late (> 4/5 of columns),
-buffering is a net loss. The engine switches to direct push + pop-on-reject.
+Two things worth knowing when combining this with other features:
+
+- `wants()` returns `true` for predicate columns even when they are
+  projected out of the output, because the engine needs their values to
+  evaluate the filter. They are parsed, used, and dropped at `finish()`.
+- Buffering is why `Cow::Borrowed` values must borrow from the chunk, not
+  from a temporary: the engine may hold a value past the point where your
+  per-field temporary is gone (see
+  [Parser: Cow::Borrowed](parser.md#1-use-cowborrowed-for-non-entity-text)).
+
+**Adaptive strategy:** buffering only pays when the predicate resolves
+early. The engine records the predicate column's ordinal on the first row;
+if it appears late (beyond 4/5 of the columns), buffering whole rows is a
+net loss, so from row 2 onward the engine switches to direct push +
+pop-on-reject: values go straight into the columns, and a row that fails at
+`end_row` has its values popped back out. The adapter code above is
+unchanged; `row_rejected()` simply stays `false` mid-row in that mode.
 
 ## Example: minimal sink { #example-minimal-sink }
 
@@ -8238,18 +8786,16 @@ appear and this test fails.
 
 ## What the end user sees { #what-the-end-user-sees }
 
-The sink and its fast paths are engine internals. The user calls `read`
-once and receives a finished `pyarrow.Table`; the per-field method
-hierarchy (`put_field_at`, `put_field_resolved`, ...) only shows up as
-throughput:
+The sink and its fast paths are engine internals. The user calls
+`to_arrow()` once and receives a finished `pyarrow.Table`; the per-field
+method hierarchy (`put_field_at`, `put_field_resolved`, ...) only shows up
+as throughput:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # begin_row/put_field/end_row have already run; this is a plain Arrow table.
-table = rypipe.read("sample.log", format="log")
+table = LogSource("sample.log").to_arrow()
 print(table.schema)
 ```
 
@@ -8370,12 +8916,10 @@ Comments and quoted fields are parsed correctly regardless of thread count,
 with no user-facing knob:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # Correct splitting inside comments/quotes is automatic; nothing to pass.
-table = rypipe.read("sample.log", format="log")
+table = LogSource("sample.log").to_arrow()
 ```
 
 ========================================================================
@@ -8568,12 +9112,10 @@ correct `Splitter` is registered, the engine picks split points and parallel
 threads on its own:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # The splitter runs behind the scenes; parallelism is automatic.
-table = rypipe.read("sample.log", format="log")
+table = LogSource("sample.log").to_arrow()
 ```
 
 ========================================================================
@@ -8601,7 +9143,7 @@ For a 533 MB file on a Ryzen 5800X:
 Your parser's job is to make the parsing phase fast. The engine handles
 everything else.
 
-## Technique 1: Declare schema upfront { #technique-1-declare-schema-upfront }
+## Declare schema upfront { #declare-schema-upfront }
 
 This is the single largest performance lever. When the column set is known,
 declare it with `schema_order` and `field_types`:
@@ -8636,7 +9178,7 @@ let plan = ExecutionPlan::new()
 
 See [Schema](./schema.md) for the full guide.
 
-## Technique 2: Check `wants()` before scanning { #technique-2-check-wants-before-scanning }
+## Check `wants()` before scanning { #check-wants-before-scanning }
 
 Always check `sink.wants(name)` before doing expensive extraction:
 
@@ -8660,7 +9202,7 @@ parsing or regex.
 
 **Performance gain:** +66% on `drop_all` workloads.
 
-## Technique 3: Use `scan::find` instead of raw `memchr` { #technique-3-use-scan-find }
+## Use `scan::find` instead of raw `memchr` { #technique-3-use-scan-find }
 
 The `rypipe_core::scan` module provides byte-search primitives with an
 O(1) fast path:
@@ -8684,7 +9226,7 @@ delimiters in each row.
 
 See [Scan primitives](./scan.md) for details.
 
-## Technique 4: Borrow strings with `Cow::Borrowed` { #technique-4-cow-borrowed }
+## Borrow strings with `Cow::Borrowed` { #technique-4-cow-borrowed }
 
 Always borrow from the input when possible:
 
@@ -8705,7 +9247,7 @@ add up to measurable throughput loss.
 **When to use `Cow::Owned`:** Only when you must modify the value (e.g.,
 unescape HTML entities, normalize whitespace, decode escaped characters).
 
-## Technique 5: Emit typed values { #technique-5-emit-typed-values }
+## Emit typed values { #technique-5-emit-typed-values }
 
 When the format has numeric or boolean data, parse directly into the
 correct `Value` variant:
@@ -8726,7 +9268,7 @@ declaration.
 
 **Performance gain:** 10-20% for numeric-heavy workloads.
 
-## Technique 6: Use `resolve` + `put_field_resolved` { #technique-6-resolve }
+## Use `resolve` + `put_field_resolved` { #technique-6-resolve }
 
 For hot paths, use single-hash-probe resolution:
 
@@ -8752,7 +9294,7 @@ This eliminates one hash-table access per field in your parser's inner loop.
 **When `wants()` is fine:** For fields that appear rarely or are checked
 once per row (not per field).
 
-## Technique 7: Implement `parse_chunk_generic` { #technique-7-parse-chunk-generic }
+## Implement `parse_chunk_generic` { #technique-7-parse-chunk-generic }
 
 For maximum performance, implement the devirtualized `parse_chunk_generic`:
 
@@ -8789,11 +9331,11 @@ fn parse_chunk_generic(&self, bytes: &[u8], sink: &mut impl ColumnarSink) -> Res
     mandatory anyway, the generic method is not object-safe (custom drivers
     using `dyn RecordParser` bypass it), and monomorphization costs compile
     time and binary size per sink type. If you are not CPU-bound in the
-    parse loop — small files, I/O-bound reads — the 5-10% is in the noise.
+    parse loop (small files, I/O-bound reads), the 5-10% is in the noise.
     The default impl delegates to `parse_chunk`, so migrating later is safe.
 
 
-## Technique 8: Implement `skip_regions` { #technique-8-skip-regions }
+## Implement `skip_regions` { #technique-8-skip-regions }
 
 If your format has comments, CDATA sections, or quoted strings that may
 contain false-positive delimiters, implement `skip_regions` by implementing
@@ -8836,7 +9378,7 @@ where delimiters can appear inside non-data regions.
 
 See [Skip regions](./skip-regions.md) for details.
 
-## Technique 9: Use SIMD for scanning { #technique-9-simd-scanning }
+## Use SIMD for scanning { #technique-9-simd-scanning }
 
 For formats with complex delimiters, use SIMD-accelerated scanning:
 
@@ -8866,6 +9408,36 @@ tags across large field values.
     Returning a fixed value regardless of data creates unbalanced chunks and
     hurts parallel efficiency. Always count delimiters in the sample.
 
+
+## Observer hooks for diagnostics { #observer-hooks }
+
+Attach a `RowObserver` to the plan to watch the parse without changing it:
+
+```rust
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use rypipe_core::{ExecutionPlan, RowObserver};
+
+#[derive(Default)]
+struct CountRejections {
+    rejected: AtomicUsize,
+}
+
+impl RowObserver for CountRejections {
+    fn on_row_rejected(&self, _row: usize) {
+        self.rejected.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+let counter = Arc::new(CountRejections::default());
+let plan = ExecutionPlan::new().with_observer(counter.clone());
+```
+
+Hooks fire from parse threads on every engine (serial, parallel, bounded,
+streaming), so keep them cheap and thread-safe. Buffered filter rows report
+`on_put_field` only when the row is accepted. From Python, pass
+`observer={"on_row_rejected": fn}` to the source instead; see the
+[stage protocol](../advanced/stage-protocol.md#observer-hooks).
 
 ## Benchmarking { #benchmarking }
 
@@ -8952,22 +9524,19 @@ dropped fields never reach `put_field` or a column builder.
 
 ## What the end user sees { #what-the-end-user-sees }
 
-The single most user-visible technique is schema declaration (Technique 1):
+The single most user-visible technique is schema declaration:
 the same `schema` and `field_types` kwargs you accept and forward are what
 the user passes to skip discovery and get typed columns:
 
 ```python
-import rypipe, rypipe_log
-
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
+from rypipe_log import LogSource
 
 # The +80% projection win, as two keyword arguments.
-table = rypipe.read(
+table = LogSource(
     "sample.log",
-    format="log",
     schema=["id", "amount"],
     field_types={"id": "int64", "amount": "float64"},
-)
+).to_arrow()
 ```
 
 ========================================================================
@@ -10481,6 +11050,7 @@ class Source(ABC):
         dictionary_columns=None,       # list[str]
         schema=None,                   # list[str]: project exactly these columns, in this order
         auto_dict=False,               # bool
+        observer=None,                 # dict[str, callable] | None: row observer hooks
         use_mmap=True,                 # bool
         batch_size=1024,               # int
     )
@@ -10622,23 +11192,56 @@ Cast column values. Supported callables: `int`, `float`, `str`, `bool`.
 
 ```python
 FilterRows(
-    predicate=None,            # Callable: arbitrary filter
+    predicate=None,            # Callable or rypipe.expr.Predicate
     *,
     field=None,                # str: column name (constant filter)
     op=None,                   # str: operator
     value=None,                # str: value (constant filter)
     field_a=None,              # str: left column (comparison)
     field_b=None,              # str: right column (comparison)
-    is_null=None,              # bool: keep rows where field is null/missing
+    is_null=None,              # bool: True keeps null/missing rows, False drops them
     is_type=None,              # str: keep rows where field matches this type
 )
 ```
 
-**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `not in`, `startswith`, `endswith`, `contains`, `strip`, `lower`, `upper`, `replace`, `len`
+**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, and `regex`
+(the value is a regular expression, searched against the string form of the
+field; invalid patterns raise at construction time)
 
 **Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 
 **Type check values:** `string`, `int64`, `float64`, `bool`, `date32`, `timestamp`, `decimal128`
+
+`predicate` may also be an expression predicate built with
+[`col()`](#expression-api); those fuse into the Rust parse loop just like the
+keyword forms. A plain callable (lambda or function) runs in Python as a
+fallback and is not fusable.
+
+### Expression API { #expression-api }
+
+```python
+from rypipe import col
+
+FilterRows(col("amount") > 100)
+FilterRows((col("age") >= 18) & col("name").startswith("A"))
+```
+
+`col(name)` references a column. Comparisons (`==`, `!=`, `>`, `<`, `>=`,
+`<=`) accept a literal or another `col(...)`. Methods:
+
+| Method | Meaning |
+|--------|---------|
+| `isin(values)` / `not_in(values)` | Membership test |
+| `startswith(s)` / `endswith(s)` / `contains(s)` | String prefix/suffix/substring |
+| `matches(pattern)` | Regex search (validated at construction) |
+| `between(lo, hi)` | Inclusive range, `lo <= x <= hi` |
+| `is_null()` / `is_not_null()` | Null presence checks |
+| `is_type(t)` | Type check (same values as `is_type=`) |
+
+Predicates compose with `&` (and), `|` (or), `~` (not) into arbitrarily
+nested trees. Everything an expression builds is fusable; anything the spec
+language cannot express raises at construction time. See
+[Expression filters](../architecture/expressions.md).
 
 ### FilterRowsAny { #filterrowsany }
 
@@ -10655,6 +11258,32 @@ FilterRowsAll(*filters: FilterRows)  # requires >= 2 filters
 ```
 
 Keep rows matching **all** filters (AND).
+
+### ObservedStage { #observedstage }
+
+Base class for stages whose side effects must survive fusion. Override
+`observer_hooks()` to return a hook dict:
+
+```python
+from rypipe.stages import ObservedStage
+
+class CountRejected(ObservedStage):
+    def __init__(self):
+        self.count = 0
+
+    def observer_hooks(self):
+        return {"on_row_rejected": self._count}
+
+    def _count(self, row_index):
+        self.count += 1
+```
+
+Valid hook keys: `on_begin_row(row_index)`, `on_put_field(row_index, name,
+slot, value)`, `on_row_accepted(row_index)`, `on_row_rejected(row_index)`,
+`on_chunk_finished(total, accepted, rejected)`. Hooks fire from parse
+threads; they must be thread-safe, and exceptions in hooks are printed and
+swallowed. The same dict can be passed to a source as `observer=`.
+See [Observer hooks](../advanced/stage-protocol.md#observer-hooks).
 
 ### FilterRowsNot { #filterrowsnot }
 
@@ -11163,7 +11792,7 @@ all forms and operators.
 
 `schema=[...]` is a **projection + order declaration**: the output contains
 exactly the listed columns, in the listed order. Fields in the data that are
-not listed are skipped during parsing (never decoded or materialized — this
+not listed are skipped during parsing (never decoded or materialized; this
 is the performance win), listed columns that are absent from some or all
 rows come out null-filled, and extra/unknown fields in the data are ignored
 rather than raising an error. `field_mapping` renames apply before schema
@@ -11173,7 +11802,7 @@ columns, and a column listed in both `schema` and `drop_fields` is dropped
 
 ```python
 src = CrystalXMLSource("report.xml", row_tag="Details", schema=["Name", "Amount"])
-print(src.schema())  # ['Name', 'Amount'] — Department/Status/Date never parsed
+print(src.schema())  # ['Name', 'Amount']: Department/Status/Date never parsed
 ```
 
 !!! tip
@@ -11663,15 +12292,14 @@ engine applies them while parsing, before any Python object is created:
 | `RenameFields` | Always | `field_mapping` |
 | `DropFields` | Always | `drop_fields` |
 | `CastTypes` | `int`, `float`, `bool` | `field_types` |
-| `FilterRows` | Keyword form (constant, column comparison, `is_null`, `is_type`) or a lambda matching a known pattern | `filter` |
+| `FilterRows` | Keyword form (constant, column comparison, `is_null`, `is_type`, `regex`) or an expression predicate (`col(...)`) | `filter` |
 
 Stages that cannot be expressed as plan options are **non-fusable**. They run
-in Python over the parsed batches. For `FilterRows`, that only happens when
-the lambda uses a pattern [the compiler](../architecture/lambda-compiler.md)
-does not recognize (calling your own
-functions, for example); comparisons, string methods, membership tests, and
-`and`/`or`/`not` logic all compile. See
-[Stages: callable predicate](stages.md#filterrows-callable) for the full list.
+in Python over the parsed batches. For `FilterRows`, that happens when the
+predicate is a plain lambda or function; comparisons, string methods, regex,
+membership tests, and `and`/`or`/`not` logic all fuse when written with
+`col(...)` expressions. See
+[Stages: expression predicates](stages.md#filterrows-expr) for the full list.
 
 ### Why plans matter { #why-plans-matter }
 
@@ -12017,7 +12645,9 @@ strings = src | FilterRows(field="Name", is_type="string")
 print(len(collect(strings)))  # 15
 ```
 
-`is_null=True` keeps rows where the field is null or missing. `is_type`
+`is_null=True` keeps rows where the field is null or missing; `is_null=False`
+does the opposite, keeping only rows where the field has a value, so it is
+the way to drop rows with nulls. `is_type`
 keeps rows where the field has the given type; valid types are `string`,
 `int64`, `float64`, `bool`, `dictionary`, `date32`, `timestamp`, and
 `decimal128`. Anything else raises a `ValueError`.
@@ -12056,8 +12686,8 @@ print(len(collect(not_active)))  # 3
 takes exactly one. They nest, so
 `FilterRowsAny(A, FilterRowsAll(B, FilterRowsNot(C)))` expresses
 `A or (B and not C)`. The inner filters must use a keyword form (constant,
-column comparison, `is_null`, or `is_type`); a plain callable cannot be
-combined this way and raises `ValueError`.
+column comparison, `is_null`, or `is_type`) or an expression predicate; a
+plain callable cannot be combined this way and raises `ValueError`.
 
 !!! tip
 
@@ -12068,9 +12698,53 @@ combined this way and raises `ValueError`.
 All three combinators are fusable: the whole tree is pushed into the Rust
 parse loop, exactly like a single keyword filter.
 
+### Regex filter { #filterrows-regex }
+
+Match a column against a regular expression with `op="regex"`. The pattern
+is searched (not anchored) against the string form of the value, and rows
+with a missing or null field are dropped:
+
+```python
+from crxml import CrystalXMLSource, FilterRows, collect
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+# Names that start with "A"
+a_names = src | FilterRows(field="Name", op="regex", value=r"^A")
+print(len(collect(a_names)))  # 1
+```
+
+An invalid pattern raises at construction time.
+
+### Expression predicates { #filterrows-expr }
+
+For anything beyond a single keyword comparison, build the predicate with
+`col()` from the expression API. Expressions compose with `&` (and), `|`
+(or), and `~` (not), and the whole tree fuses into the Rust parse loop:
+
+```python
+from crxml import CrystalXMLSource, FilterRows, col, collect
+
+src = CrystalXMLSource("report.xml", row_tag="Details")
+
+active_sales = src | FilterRows(
+    (col("Department") == "Sales") & (col("Status") == "Active")
+)
+print(len(collect(active_sales)))  # 3
+
+# Inclusive range and regex helpers
+mid = src | FilterRows(col("Amount").between(5000, 15000))
+errors = src | FilterRows(col("Name").matches(r"^A"))
+```
+
+Available methods: `startswith`, `endswith`, `contains`, `matches` (regex
+search), `between` (inclusive range), `isin`, `not_in`, `is_null`,
+`is_not_null`, `is_type`, plus the six comparison operators, which also work
+column-to-column (`col("a") > col("b")`).
+
 ### Callable predicate { #filterrows-callable }
 
-For anything more complex, pass a function that receives the row dict and
+For arbitrary logic, pass a function that receives the row dict and
 returns `True` to keep the row:
 
 ```python
@@ -12083,17 +12757,12 @@ print([r["Name"] for r in collect(a_names)])
 # ['Alice Johnson']
 ```
 
-Lambdas are not slow by default. When you pass a lambda, rypipe analyzes its
-bytecode at construction time and, for common patterns, compiles it into a
-Rust filter operation that runs fused inside the parse loop, just like the
-keyword form. Compilable patterns include field comparisons
-(`r["Amount"] == "100"`), string methods (`startswith`, `endswith`,
-`contains`, `strip`, `lower`, `upper`, `replace`), `len()` comparisons,
-`in` / `not in` membership, and `and` / `or` / `not` combinations of those.
-
-Only lambdas [the compiler](../architecture/lambda-compiler.md) does not
-recognize (calling your own functions, date parsing, and so on) run in Python
-per row.
+Plain lambdas and functions always run in Python, row by row, after the
+table is parsed; they are never fused into the Rust parse loop. Prefer the
+keyword forms or `col()` expressions when throughput matters. (The old
+in-tree lambda bytecode compiler was removed; see the standalone
+[lambda-compiler](https://github.com/emiliano-go/lambda-compiler) package if
+you need that.)
 
 For the full filter-spec format (including column-to-column comparison),
 see the [Python API reference](../reference/python-api.md#filterrows).
@@ -12131,11 +12800,12 @@ print(df.head(3))
 
 * `RenameFields` renames columns; `DropFields` removes them.
 * `CastTypes` converts strings to `int`, `float`, or `bool`.
-* `FilterRows` keeps matching rows: constant (`field`/`op`/`value`), column
-  comparison (`field_a`/`op`/`field_b`), null check (`is_null=True`), type
-  check (`is_type="..."`), or a lambda. Keyword forms and recognized lambdas
-  compile into Rust filter operations; only unrecognized lambdas run in
-  Python.
+* `FilterRows` keeps matching rows: constant (`field`/`op`/`value`,
+  including `op="regex"`), column comparison (`field_a`/`op`/`field_b`),
+  null check (`is_null=True`), type check (`is_type="..."`), an expression
+  predicate (`col("x") > 1`, `col("n").between(a, b)`), or a lambda. Keyword
+  forms and expressions compile into Rust filter operations; plain lambdas
+  run in Python.
 * `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` combine keyword-form
   filters into OR / AND / NOT trees, and nest.
 * Full parameter reference: [Python API](../reference/python-api.md#stages).

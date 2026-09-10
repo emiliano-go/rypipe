@@ -41,6 +41,8 @@ class Source(ABC):
         "_dictionary_columns",
         "_schema",
         "_auto_dict",
+        "_strict_types",
+        "_observer",
         "_use_mmap",
         "_batch_size",
         "_cached_arrow",
@@ -57,6 +59,8 @@ class Source(ABC):
         dictionary_columns: Optional[list[str]] = None,
         schema: Optional[list[str]] = None,
         auto_dict: bool = False,
+        strict_types: bool = False,
+        observer: Optional[dict[str, Any]] = None,
         use_mmap: bool = True,
         batch_size: int = 1024,
     ):
@@ -71,6 +75,8 @@ class Source(ABC):
         self._dictionary_columns = dictionary_columns or []
         self._schema = schema or []
         self._auto_dict = auto_dict
+        self._strict_types = strict_types
+        self._observer = observer
         self._use_mmap = use_mmap
         self._batch_size = batch_size
         self._cached_arrow = None
@@ -102,6 +108,10 @@ class Source(ABC):
         if self._schema:
             kwargs["schema"] = self._schema
         kwargs["auto_dict"] = self._auto_dict
+        if self._strict_types:
+            kwargs["strict_types"] = True
+        if self._observer:
+            kwargs["observer"] = dict(self._observer)
         return kwargs
 
     def schema(self) -> list[str]:
@@ -308,5 +318,12 @@ class Adapter(Source):
     def _read_arrow(self, plan_overrides: Optional[dict[str, Any]] = None) -> pa.Table:
         plan = self._build_plan_kwargs()
         if plan_overrides:
+            if plan.get("observer") and plan_overrides.get("observer"):
+                from .fusion import _merge_observer_hooks
+
+                _merge_observer_hooks(plan, plan_overrides["observer"])
+                plan_overrides = {
+                    k: v for k, v in plan_overrides.items() if k != "observer"
+                }
             plan.update(plan_overrides)
         return self.read(str(self._path), **plan)

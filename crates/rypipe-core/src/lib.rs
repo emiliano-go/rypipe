@@ -26,6 +26,7 @@ pub mod engine;
 pub mod error;
 pub mod input;
 pub mod merge;
+pub mod observer;
 pub mod parallel;
 pub mod parallel_stream;
 pub mod pipeline;
@@ -37,7 +38,7 @@ pub mod value;
 
 pub use arrow_export::apply_compare_filter;
 pub use auto::{resolve_engine, AutoConfig, EngineMode};
-pub use bounded::MemoryBudget;
+pub use bounded::{MemoryBudget, MAX_SPLIT_CHUNKS};
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 pub use decoder::{split_points_to_ranges, ColumnarSink, RecordParser, Splitter};
 pub use engine::{LocateOnly, TableBuilder};
@@ -49,12 +50,13 @@ pub use engine::{
 pub use error::{Error, Result};
 pub use input::InputBuffer;
 pub use merge::engines_to_record_batches;
+pub use observer::RowObserver;
 pub use parallel_stream::{
     discover_schema_for_bytes, discovery_profile, reset_discovery_profile, ParallelStreamOpts,
     ParallelStreamingBatchIterator, ParallelStreamingExecutor,
 };
 pub use pipeline::Pipeline;
-pub use plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate};
+pub use plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate, RegexSpec};
 pub use schema::{DiscoveryOpts, FrozenSchema, UnknownFieldPolicy};
 pub use streaming::StreamingBatchIterator;
 pub use value::Value;

@@ -23,14 +23,18 @@ reused across files and modes.
 
 - `new(splitter, parser)`: Creates with default plan.
 - `with_plan(plan)`: Replaces the plan (builder pattern).
-- `read_bytes(bytes)`: Single-threaded: one `TableBuilder`, one `parse_chunk`.
+- `read_bytes(bytes)`: Single-threaded: one `TableBuilder`, one `parse_chunk_generic`.
 - `read_bytes_par(bytes, num_chunks)`: Parallel via `ParallelExecutor`.
 - `read_bytes_stream(bytes, budget)`: Bounded-memory via `BoundedExecutor`.
+- `read_bytes_stream_consumer(bytes, budget, consumer)`: Bounded, calls `consumer` per batch.
 - `read_path(path, use_mmap, prefault)`: Opens file, calls `read_bytes`.
 - `read_path_par(path, num_chunks, use_mmap, prefault)`: Opens file, calls parallel.
 - `read_path_stream(path, budget, prefault)`: Opens file, calls bounded.
+- `read_path_stream_consumer(path, budget, prefault, consumer)`: Opens file, calls bounded streaming.
+- `read_path_stream_par(path, budget, prefault, opts)`: Parallel streaming; returns a
+  `ParallelStreamingBatchIterator` yielding batches as they are produced.
 
-All six methods share the same splitter, parser, and plan. The adapter
+All methods share the same splitter, parser, and plan. The adapter
 implements `Splitter` and `RecordParser` once; the engine handles the rest.
 
 ## ParallelExecutor { #parallelexecutor }
@@ -50,11 +54,15 @@ where P: RecordParser + Clone + Send + Sync
 
 1. **Split**: `splitter.find_split_points(bytes, num_chunks)` → `split_points_to_ranges`
 2. **Parse in parallel**: `rayon::into_par_iter` over ranges, each creating a
-   `TableBuilder`, calling `validate` + `parse_chunk`, returning the builder.
-   Panics are caught via `catch_unwind`.
-3. **Fast path** (no auto_dict, schemas consistent):
-   `engines_to_record_batches` exports per-chunk batches with unified schema.
-4. **Merge path** (auto_dict or inconsistent schemas):
+   `TableBuilder`, calling `validate` + `parse_chunk_generic`, returning the
+   builder. Panics are caught via `catch_unwind`.
+3. **Fast path** (schemas consistent): `engines_to_record_batches` exports
+   per-chunk batches with unified schema.
+4. **auto_dict upgrade** (if `auto_dict` set): per-chunk `auto_dict_upgrade()`
+   in parallel, then dictionaries are unified across chunks
+   (`dict::unify_dictionaries` + `remap_codes`/`replace_dict`) and the fast
+   path is kept when schemas are consistent afterward.
+5. **Merge path** (schemas still inconsistent):
    Sequential `extend` loop → single merged batch.
 
 ### Fast path vs merge path { #fast-path-vs-merge-path }
@@ -64,9 +72,10 @@ unifies schema via `unify_variants` and `promote_to_variant` so all batches
 share one `Schema`. Missing columns become `null_array`. `rayon::par_iter`
 builds arrays in parallel.
 
-The merge path (`extend` loop) returns a single merged batch and handles
-`auto_dict` visibility (full cardinality) and irreconcilable type errors
-with `Error::Merge` naming the column.
+The merge path (`extend` loop) returns a single merged batch and surfaces
+irreconcilable type errors with `Error::Merge` naming the column. It is
+reached only when schemas remain inconsistent (after any `auto_dict`
+upgrade, which otherwise stays on the fast path).
 
 ### schemas_consistent { #schemas_consistent }
 
@@ -78,8 +87,13 @@ or `string`/`dictionary` falls to merge path for promotion.
 ```rust
 pub struct BoundedExecutor {
     budget: MemoryBudget,
+    split_cap: usize,
 }
 ```
+
+`BoundedExecutor::new(budget)` defaults `split_cap` to `MAX_SPLIT_CHUNKS`;
+`with_split_cap(cap)` overrides it. `Pipeline` sets the cap from
+`plan.max_split_chunks` when that plan field is set.
 
 ### MemoryBudget { #memorybudget }
 
@@ -99,20 +113,28 @@ Estimates chunk sizes from budget:
 2. `total_rows_est = bytes.len() / bytes_per_row`
 3. `rows_per_batch = (budget.bytes() / bytes_per_row).max(1).min(total_rows_est)`
 4. `num_batches = (total_rows_est / rows_per_batch).max(1)`
-5. `split_points = splitter.find_split_points(bytes, num_batches.min(MAX_SPLIT_CHUNKS))`
+5. `split_points = splitter.find_split_points(bytes, num_batches.min(self.split_cap))`
 6. Convert to ranges
 
-`MAX_SPLIT_CHUNKS = 100_000` caps split points to prevent pathological overhead.
+`split_cap` (default `MAX_SPLIT_CHUNKS = 100_000`, overridable via
+`plan.max_split_chunks`) caps split points to prevent pathological overhead.
 
 ### run_bytes { #run_bytes }
 
-For each chunk:
+`run_bytes` is a thin wrapper over `run_bytes_stream` with a
+`CollectingConsumer`. The streaming loop, for each chunk:
 
 1. Slice `&bytes[chunk.start..chunk.end]`
 2. Create per-chunk `TableBuilder`
-3. `validate` + `parse_chunk`
+3. `validate` + `parse_chunk_generic`
 4. `extend` into batch engine
-5. Flush when `rows_in_batch >= rows_per_batch`
+5. Flush when `rows_in_batch >= rows_per_batch` or
+   `batch_engine.bytes_used() >= budget.bytes()`; the batch is cut via
+   `split_off(n)`, with `n` shrunk by a byte-based estimate when the byte
+   budget is the trigger
+6. Apply `apply_compare_filter` to each flushed batch if `plan.filter` is set
+7. After the loop, surface deferred strict-types and unknown-field errors
+   (unknown-field as `Error::Merge`) accumulated across chunks
 
 ### run (file-based) { #run }
 
@@ -126,7 +148,9 @@ Opens `InputBuffer`. If `Mmap`:
 This keeps RSS low: mapping released before parse loop, only one chunk
 buffer live at a time.
 
-If `Owned` (compressed or small file): delegates to `run_bytes`.
+If `Owned` (compressed input, or the `mmap` feature disabled): delegates to
+`run_bytes_stream`. There is no size-based choice; `use_mmap` is set from the
+`mmap` feature flag alone.
 
 ## InputBuffer { #inputbuffer }
 
@@ -177,19 +201,34 @@ open(path, use_mmap, prefault):
 
 Merges another `TableBuilder` into self:
 
-1. Create missing columns with null backfill
-2. For each column in order: check variant equality, promote if needed
+1. Propagate a deferred `strict_error` from the other builder, and carry over
+   the observer counters `rows_accepted`/`rows_rejected` (per-row observer
+   hooks already fired in the chunk's thread)
+2. Create missing columns with null backfill
+3. For each column in order: check variant equality, promote if needed
    (`int64` → `float64`, `string` → `dictionary`), then `extend_owned`
-3. Update `row_count`
+4. Update `row_count`
+
+### Row observers { #row-observers }
+
+`ExecutionPlan` carries an optional `observer: Arc<dyn RowObserver>` (set via
+`with_observer`). The hooks `on_begin_row`, `on_put_field`, `on_row_accepted`,
+`on_row_rejected`, and `on_chunk_finished` fire during parse in every driver
+above. In parallel mode the per-row hooks fire on the chunk's worker thread;
+`extend` then merges the accepted/rejected totals so the final
+`on_chunk_finished` sees the full counts.
 
 ### engines_to_record_batches { #engines_to_record_batches }
 
 Exports per-chunk builders without serial merge:
 
-1. Normalize and retain non-empty builders
-2. Unify schema via `unify_variants` + `promote_to_variant`
-3. `par_iter` over engines to build arrays per unified order
-4. Apply `apply_compare_filter` per batch if filter is present
+1. Surface deferred per-chunk errors first: `unknown_error` as `Error::Merge`,
+   then `strict_error`; with `strict_types` this is the fast path's only error
+   surface
+2. Normalize and retain non-empty builders
+3. Unify schema via `unify_variants` + `promote_to_variant`
+4. `par_iter` over engines to build arrays per unified order
+5. Apply `apply_compare_filter` per batch if filter is present
 
 ## Arrow export { #arrow-export }
 
@@ -201,7 +240,7 @@ The filter works by:
 
 1. Checking `is_pure_compare_tree` (no Or/Not/Equal/NotEqual)
 2. Building a boolean mask via `compare_columns` (cast to Float64 or Utf8,
-   then gt/lt/eq/neq/and)
+   then gt/lt/gt_eq/lt_eq/eq/neq); `And` trees are combined in `compare_mask`
 3. Applying `filter_record_batch` to produce the filtered batch
 
 See [Storage and export](./storage.md) for Arrow type mapping and null

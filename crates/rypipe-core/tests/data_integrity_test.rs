@@ -1097,7 +1097,7 @@ fn all_column_types_push_and_export() {
         ("D", FieldType::Date32),
         (
             "T",
-            FieldType::Timestamp(arrow::datatypes::TimeUnit::Microsecond),
+            FieldType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
         ),
         ("P", FieldType::Dictionary),
     ];

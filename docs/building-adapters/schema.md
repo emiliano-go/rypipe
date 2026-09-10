@@ -27,7 +27,7 @@ parsed values with no intermediate strings.
 
 `schema_order` declares the output schema as a **projection + order**: the
 output contains exactly the listed columns, in the listed order. Fields in
-the data that are not listed are skipped during parsing — `wants()` returns
+the data that are not listed are skipped during parsing: `wants()` returns
 `false` for them, so the adapter never scans, decodes, or materializes them.
 Listed columns that are absent from (some rows of) the data come out
 null-filled; extra/unknown fields in the data are ignored, not an error.
@@ -84,6 +84,23 @@ source = LogSource(
 | `timestamp[ms]` | `FieldType::Timestamp(Millisecond)` | `Timestamp<Millisecond>` |
 | `timestamp[us]` | `FieldType::Timestamp(Microsecond)` | `Timestamp<Microsecond>` |
 | `timestamp[ns]` | `FieldType::Timestamp(Nanosecond)` | `Timestamp<Nanosecond>` |
+
+A custom chrono format can be added to any timestamp spec:
+`timestamp[ms,format=%Y%m%d %H:%M]`. The custom format is tried first, the
+ISO layouts still match, and unparseable values follow the usual lenient
+rules (null, or an error under `strict_types`).
+
+### Lenient by default, strict on demand { #lenient-by-default }
+
+Missing or null fields always come out null, and a value that does not
+parse as its declared type (say `"abc"` in an `int64` column) also becomes
+null rather than an error. Users who would rather reject malformed data can
+pass `strict_types=True`: the first unparsable value aborts the read with
+an error naming the column, value, declared type, and row index (nulls are
+still allowed; strictness covers malformed data, not nullability). Adapter
+authors get this for free: the engine enforces it wherever a `Value::Str`
+is pushed into a declared-typed column. See
+[Schema and types](../advanced/schema-and-types.md#null-and-malformed-values).
 
 ## How the parser uses schema { #how-the-parser-uses-schema }
 
@@ -317,7 +334,7 @@ For formats where schema discovery is unreliable (extremely sparse data,
 heterogeneous records, or non-standard layouts), pass an explicit `schema`:
 
 ```python
-source = MyAdapter(
+source = LogSource(
     "esoteric.dat",
     schema=["id", "value", "timestamp"],
     field_types={"id": "int64", "value": "float64"},
@@ -387,14 +404,11 @@ columns; fields the user does not list are never scanned, and listed
 columns missing from some rows come out null-filled:
 
 ```python
-import rypipe, rypipe_log
+from rypipe_log import LogSource
 
-rypipe.register_adapter("log", rypipe_log.LogAdapter())
-
-table = rypipe.read(
+table = LogSource(
     "sample.log",
-    format="log",
     schema=["id", "name", "amount"],          # column order, no discovery pass
     field_types={"id": "int64", "amount": "float64"},
-)
+).to_arrow()
 ```

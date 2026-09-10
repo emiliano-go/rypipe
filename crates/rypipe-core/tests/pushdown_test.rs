@@ -369,11 +369,11 @@ fn test_timestamp_compare_filter() {
     let mut plan = ExecutionPlan::new();
     plan.field_types.insert(
         "Start".to_string(),
-        FieldType::Timestamp(TimeUnit::Microsecond),
+        FieldType::Timestamp(TimeUnit::Microsecond, None),
     );
     plan.field_types.insert(
         "End".to_string(),
-        FieldType::Timestamp(TimeUnit::Microsecond),
+        FieldType::Timestamp(TimeUnit::Microsecond, None),
     );
     plan.filter = Some(FilterPredicate::Compare {
         field_a: "Start".to_string(),
