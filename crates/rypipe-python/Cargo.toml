@@ -18,5 +18,5 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 # which requires Arrow 59.x. The C Data Interface handles the crossing via FFI.
 # crxml (the main consumer) uses Arrow 55.2.0 directly, not rypipe-python.
 arrow = { version = "59.2", default-features = false, features = ["pyarrow", "ffi"] }
-rypipe-core = { path = "../rypipe-core" }
+rypipe-core = { path = "../rypipe-core", features = ["compress-all"] }
 mimalloc = { version = "0.1", default-features = false }

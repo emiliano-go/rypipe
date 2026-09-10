@@ -9,7 +9,7 @@ Each page takes one optimization topic and explains the mechanism, the tuning kn
 | Page | What you will learn |
 |------|---------------------|
 | [Fusion](./fusion.md) | How `RenameFields`, `DropFields`, `CastTypes`, and `FilterRows` (keyword form or `col()` expression) are rewritten into a single `ExecutionPlan`; what is fusable and what falls back to Python. |
-| [Stage protocol](./stage-protocol.md) | The three methods every stage implements; why re-exporting works; when to re-implement. |
+| [Stage protocol](./stage-protocol.md) | The three methods every stage implements; why re-exporting works; when to re-implement; custom `_to_spec()` producers for fusable filters. |
 | [Execution modes](./execution-modes.md) | `columnar`, `parallel`, `stream`, and `parallel_streaming`; the `resolve_engine` heuristic; when each mode wins. |
 | [Streaming](./streaming.md) | Constant-memory batch streaming with `iter_record_batches`, `BatchConsumer`, and Arrow-ecosystem writers; when streaming falls back to materialization. |
 | [Memory and chunking](./memory-and-chunking.md) | How `BoundedExecutor` enforces a memory budget; sizing chunks for files larger or smaller than RAM. |

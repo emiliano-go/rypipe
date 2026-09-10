@@ -310,10 +310,14 @@ let plan = ExecutionPlan::new().with_observer(counter.clone());
 ```
 
 Hooks fire from parse threads on every engine (serial, parallel, bounded,
-streaming), so keep them cheap and thread-safe. Buffered filter rows report
-`on_put_field` only when the row is accepted. From Python, pass
-`observer={"on_row_rejected": fn}` to the source instead; see the
-[stage protocol](../advanced/stage-protocol.md#observer-hooks).
+streaming), so keep them cheap and thread-safe. A Rust hook is a plain
+function call (a few nanoseconds, parallel across chunks). The Python
+equivalent (`observer={"on_row_rejected": fn}` on the source, see the
+[stage protocol](../advanced/stage-protocol.md#observer-hooks)) pays a GIL
+acquisition plus a Python call per event (~50 ns), serialized against other
+Python threads. Prefer the Rust `RowObserver` for hot paths; use the Python
+dict for debugging and prototyping. Buffered filter rows report
+`on_put_field` only when the row is accepted.
 
 ## Benchmarking { #benchmarking }
 

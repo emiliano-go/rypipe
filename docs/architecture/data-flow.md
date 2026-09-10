@@ -29,14 +29,18 @@ input came from `read_path`. `ExecutionPlan` applied per row in `finish_row`
 ```
 Pipeline::read_bytes_par(bytes, num_chunks)
   → splitter.find_split_points(bytes, num_chunks)
+
   → split_points_to_ranges → Vec<Range>
+
   → rayon::into_par_iter
     each range:
       TableBuilder::with_plan(est, plan.clone())
       parser.validate(&bytes[range])
       parser.parse_chunk_generic(&bytes[range], &mut sink)
       Ok(sink)
+      
   → collect::<Result<Vec<TableBuilder>>>()
+
   → if !auto_dict && schemas_consistent:
       engines_to_record_batches (fast path)
     else if auto_dict:
@@ -46,6 +50,7 @@ Pipeline::read_bytes_par(bytes, num_chunks)
     else (schemas inconsistent):
       merged.extend(each engine) → merged.finish() (merge path)
       apply_compare_filter if plan.filter set
+
   → Vec<RecordBatch>
 ```
 
@@ -68,7 +73,9 @@ Pipeline::read_bytes_stream(bytes, budget)
       capped at split_cap (default MAX_SPLIT_CHUNKS = 100_000,
       overridable via plan.max_split_chunks)
     chunks = splitter.find_split_points(bytes, num_batches)
+
   → batch_engine = TableBuilder::with_plan(...)
+
   → for chunk in chunks:
       chunk_engine = TableBuilder::with_plan(...)
       parser.validate(chunk_bytes)
@@ -82,7 +89,9 @@ Pipeline::read_bytes_stream(bytes, budget)
         batch = to_consume.finish()
         apply_compare_filter(batch, filter) if plan.filter set
         batches.push(batch)
+        
   → flush remainder (same finish + apply_compare_filter)
+
   → Vec<RecordBatch>
 ```
 

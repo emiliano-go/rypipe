@@ -339,12 +339,13 @@ fallback and is not fusable.
 ### Expression API { #expression-api }
 
 ```python
-from rypipe import col
+import crxml
 
-FilterRows(col("amount") > 100)
-FilterRows((col("age") >= 18) & col("name").startswith("A"))
+crxml.FilterRows(crxml.col("amount") > 100)
+crxml.FilterRows((crxml.col("age") >= 18) & crxml.col("name").startswith("A"))
 ```
 
+Adapters re-export `col` (crxml does), so users never import `rypipe.expr`.
 `col(name)` references a column. Comparisons (`==`, `!=`, `>`, `<`, `>=`,
 `<=`) accept a literal or another `col(...)`. Methods:
 

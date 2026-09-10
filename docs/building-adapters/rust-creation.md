@@ -444,6 +444,14 @@ let pos = bytes.iter().position(|&b| b == b'<');  // Bad: 5-10x slower
 
 ## PyO3 bindings { #pyo3-bindings }
 
+!!! note
+
+    This section is **optional**: it is only needed if the adapter must be
+    callable from Python. `rypipe-core` has no Python dependency, so a
+    Rust-only adapter stops here: `Pipeline::read_path` gives you a
+    `RecordBatch` directly, and everything above (traits, plan, tests)
+    already works without PyO3.
+
 The walkthrough crate exposes a single `read_log` function instead of
 Python classes. It receives the merged pushdown plan from the Python side,
 builds an `ExecutionPlan`, runs the `Pipeline`, and exports the batch as a

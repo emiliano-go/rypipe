@@ -61,15 +61,28 @@ The engine provides `TableBuilder` as the production
 |-----------|---------|
 | **`LogSource(Source)`** | Pipeline-capable source with `_read_arrow()` and plan forwarding |
 | **`rypipe_log.stages/`** | Re-exports of `CastTypes`, `FilterRows`, `RenameFields`, `DropFields` from `rypipe.stages` |
+| **`rypipe_log` expression helpers** | Re-export of `col` (and optionally `Predicate`) from `rypipe.expr` so users can build fusable filters without importing **rypipe** |
 | **Registration** | Adapter registered at import time via side-effect import |
+
+!!! note
+
+    The Python layer is **optional**. `rypipe-core` has zero Python
+    dependency: to ship a Rust-only adapter (a library or binary with no
+    Python runtime), implement the two Rust traits below, drive them with
+    [`Pipeline`](../reference/rust-api.md#pipeline), and simply skip the
+    PyO3 section in [Rust adapter creation](./rust-creation.md#pyo3-bindings)
+    and everything after it in the [walkthrough](./walkthrough.md). See
+    [Rust API](../reference/rust-api.md) and
+    [why Python?](../why-python.md#6-when-rust-only-does-make-sense-and-rypipe-still-supports-it).
 
 !!! note
 
     Adapters **re-export the API**: they re-export pipeline stage classes
     (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) from
-    `rypipe.stages` and sink functions (`collect`, `to_arrow`, `to_pandas`,
-    `to_polars`, `to_parquet`, `to_csv`) so users never import from
-    **rypipe** directly. This makes the adapter self-contained.
+    `rypipe.stages`, sink functions (`collect`, `to_arrow`, `to_pandas`,
+    `to_polars`, `to_parquet`, `to_csv`), and the expression entry points
+    (`col`, optionally `Predicate`) from `rypipe.expr`, so users never import
+    from **rypipe** directly. This makes the adapter self-contained.
 
 
 ## Adapter API contract { #adapter-api-contract }

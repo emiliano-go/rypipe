@@ -18,7 +18,7 @@ Run it yourself:
 cargo run --release -p rypipe-core --example bench_throughput
 ```
 
-Hardware: Linux workstation, AMD Ryzen 9 5900X, DDR4-3200, release build.
+Hardware: Linux workstation, AMD Ryzen 7 5800X, DDR4-3200, release build.
 
 | Path | Rows | Time | Rows/s | MB/s | RSS |
 |------|------|------|--------|------|-----|

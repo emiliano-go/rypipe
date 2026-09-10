@@ -1,14 +1,14 @@
 # Expression filters { #expression-filters }
 
-`FilterRows` accepts an expression predicate built with `rypipe.expr.col`.
+`FilterRows` accepts an expression predicate built with `col`.
 Expressions construct the same filter spec dicts the Rust engine fuses,
 declaratively and without any bytecode analysis:
 
 ```python
-from rypipe import col, FilterRows
+import crxml
 
-source | FilterRows(col("amount") > 100)
-source | FilterRows((col("age") >= 18) & col("name").startswith("A"))
+source | crxml.FilterRows(crxml.col("amount") > 100)
+source | crxml.FilterRows((crxml.col("age") >= 18) & crxml.col("name").startswith("A"))
 ```
 
 Anything the spec language cannot express raises at construction time, so
@@ -31,8 +31,10 @@ ExecutionPlan.filter = CompareLiteral { field: "amount", op: CompareOp::Gt, valu
 
 An expression compares to a literal or another column; the result is a
 `Predicate` whose `_to_spec()` produces the plan spec. `Predicate` objects
-compose with `&` (and), `|` (or), and `~` (not), producing nested
-`{"and": [...]}`, `{"or": [...]}`, `{"not": ...}` specs.
+compose with `&` (and), `|` (or), and `~` (not): operator overloads via
+`__and__`/`__or__`/`__invert__`, producing nested `{"and": [...]}`,
+`{"or": [...]}`, `{"not": ...}` specs. (`|` is overloaded twice in rypipe:
+on sources it builds pipelines, on predicates it means OR; context decides.)
 
 ## Supported operations { #supported-operations }
 
@@ -57,6 +59,15 @@ string form specs carry, and the engine compares with native-typed numeric
 promotion. `matches()` validates the pattern with `re.compile` at
 construction time and the engine applies it as a regex search against the
 string form of the value.
+
+## Custom spec producers { #custom-spec-producers }
+
+Any object with a callable `_to_spec()` method can be passed as the
+`FilterRows` predicate: the returned dict is used as the filter spec, so it
+fuses exactly like the built-in forms. Adapters and libraries can ship their
+own expression helpers on this protocol; see
+[Custom spec producers](../advanced/stage-protocol.md#custom-spec-producers)
+for the contract and an example.
 
 ## Plain callables fall back to Python { #python-fallback }
 

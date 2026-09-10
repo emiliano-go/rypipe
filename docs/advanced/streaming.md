@@ -11,11 +11,6 @@
 
 The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)` in `bounded.rs`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine/table_builder.rs`) to keep RSS at `budget + batch`.
 
-## Memory guarantee { #memory-guarantee }
-
-* **Rust-only:** `budget + batch + export buffer`. With `batch_size=1` and `memory="64KB"` and small rows (~1 KB for `crxml` `Details`), peak is a few tens of KB plus the `mmap` mapping (dropped after `plan_chunks`). This is the **64 KB** target in the spec.
-* **Python:** `pyarrow.RecordBatch` + interpreter overhead make true 64 KB impossible, but `iter_record_batches` is still bounded: peak stays at `budget + one batch + export buffer` no matter how large the input file is. Measure it yourself with `resource.getrusage` on a large file; throughput of the bounded path is within a few percent of the full-RAM columnar path in `crxml`'s `benchmarks/bench_extended.py` matrix.
-
 ## Rust API { #rust-api }
 
 ```rust
