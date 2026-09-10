@@ -515,13 +515,12 @@ impl ParallelStreamingExecutor {
         }
         for h in handles {
             h.join().map_err(|_| {
-                crate::Error::Parser(format!(
-                    "worker panicked during parallel parse. \
+                crate::Error::Parser("worker panicked during parallel parse. \
                      This usually indicates a bug in the parser (e.g., returning \
                      Cow::Borrowed that outlives the input chunk, or an unwrap() \
                      on None/Err during parsing). Check your RecordParser::parse_chunk \
                      implementation for incorrect lifetime handling or missing error checks."
-                ))
+                    .to_string())
             })??;
         }
         Ok(())

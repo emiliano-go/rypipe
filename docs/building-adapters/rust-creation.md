@@ -496,7 +496,7 @@ fn read_log(
             // Type names arrive as strings ("int64", "float64", ...);
             // reject unknown ones with a Python ValueError naming both
             // the type and the field.
-            let ft = FieldType::from_str(&type_str).ok_or_else(|| {
+            let ft = type_str.parse::<FieldType>().map_err(|_| {
                 PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
             })?;
             plan.field_types.insert(name, ft);

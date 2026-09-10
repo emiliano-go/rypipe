@@ -896,7 +896,7 @@ impl ColumnBuilder {
                 v.push(value.and_then(|s| parse_timestamp(s, *unit, fmt.as_deref())));
             }
             ColumnBuilder::Decimal128(scale, v) => {
-                v.push(value.and_then(|s| parse_decimal128(&s, *scale)));
+                v.push(value.and_then(|s| parse_decimal128(s, *scale)));
             }
             ColumnBuilder::Dictionary {
                 codes,
@@ -1374,7 +1374,6 @@ impl ColumnBuilder {
                     }
                 },
                 ColumnBuilder::Decimal128(scale, _) => {
-                    use arrow::datatypes::Decimal128Type;
                     let arr: Decimal128Array = PrimitiveArray::from(vec![None::<i128>; 0]);
                     Arc::new(arr.with_precision_and_scale(38, *scale as i8).unwrap())
                 }
@@ -1398,7 +1397,6 @@ impl ColumnBuilder {
                 TimeUnit::Nanosecond => v.to_arrow::<TimestampNanosecondType>()?,
             },
             ColumnBuilder::Decimal128(scale, v) => {
-                use arrow::datatypes::Decimal128Type;
                 let values: Vec<Option<i128>> = (0..v.len()).map(|i| v.get(i)).collect();
                 let arr: Decimal128Array = values.into_iter().collect();
                 Arc::new(arr.with_precision_and_scale(38, *scale as i8)?)
@@ -1498,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_parses_as_timestamp_format() {
-        let ft = FieldType::from_str("timestamp[us,format=%Y%m%d]").unwrap();
+        let ft = "timestamp[us,format=%Y%m%d]".parse::<FieldType>().unwrap();
         assert!(parses_as("20240115", &ft));
         assert!(parses_as("2024-01-15", &ft)); // ISO fallback
         assert!(!parses_as("abc", &ft));

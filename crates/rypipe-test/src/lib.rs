@@ -212,7 +212,6 @@ pub mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
 
     proptest! {
         #[test]
@@ -254,7 +253,7 @@ mod tests {
     #[test]
     fn test_parse_test_bytes() {
         let bytes = b"A=1 B=2\nC=3\n";
-        let mut sink = parse_test_bytes(bytes);
+        let sink = parse_test_bytes(bytes);
         assert_eq!(sink.num_rows(), 2);
     }
 }
