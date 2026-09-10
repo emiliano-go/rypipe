@@ -335,7 +335,7 @@ fn test_timestamp_pushdown() {
         let mut plan = ExecutionPlan::new();
         plan.field_types.insert(
             "T".to_string(),
-            FieldType::from_str(type_str).expect("valid type"),
+            type_str.parse::<FieldType>().expect("valid type"),
         );
 
         let batch = parse_bytes(b"T=2024-01-15T10:30:00\nT=bad\n", plan);

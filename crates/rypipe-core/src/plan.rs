@@ -18,27 +18,27 @@ pub enum FieldType {
     Decimal128(u8),
 }
 
-impl FieldType {
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for FieldType {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "string" => Some(FieldType::String),
-            "int64" => Some(FieldType::Int64),
-            "float64" => Some(FieldType::Float64),
-            "bool" | "boolean" => Some(FieldType::Boolean),
-            "dictionary" => Some(FieldType::Dictionary),
-            "date32" => Some(FieldType::Date32),
-            s if s.starts_with("timestamp") => parse_timestamp_spec(s),
-            "decimal128" => Some(FieldType::Decimal128(18)),
+            "string" => Ok(FieldType::String),
+            "int64" => Ok(FieldType::Int64),
+            "float64" => Ok(FieldType::Float64),
+            "bool" | "boolean" => Ok(FieldType::Boolean),
+            "dictionary" => Ok(FieldType::Dictionary),
+            "date32" => Ok(FieldType::Date32),
+            s if s.starts_with("timestamp") => parse_timestamp_spec(s).ok_or(()),
+            "decimal128" => Ok(FieldType::Decimal128(18)),
             s if s.starts_with("decimal128(") => {
                 let scale = s
                     .trim_start_matches("decimal128(")
                     .trim_end_matches(')')
                     .parse::<u8>()
-                    .ok()?;
-                Some(FieldType::Decimal128(scale))
+                    .map_err(|_| ())?;
+                Ok(FieldType::Decimal128(scale))
             }
-            _ => None,
+            _ => Err(()),
         }
     }
 }
@@ -367,29 +367,30 @@ pub enum ArithOp {
     Div,
 }
 
-impl ArithOp {
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for ArithOp {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "+" | "add" => Some(ArithOp::Add),
-            "-" | "sub" => Some(ArithOp::Sub),
-            "*" | "mul" => Some(ArithOp::Mul),
-            "/" | "div" => Some(ArithOp::Div),
-            _ => None,
+            "+" | "add" => Ok(ArithOp::Add),
+            "-" | "sub" => Ok(ArithOp::Sub),
+            "*" | "mul" => Ok(ArithOp::Mul),
+            "/" | "div" => Ok(ArithOp::Div),
+            _ => Err(()),
         }
     }
 }
 
-impl CompareOp {
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for CompareOp {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            ">" | "gt" => Some(CompareOp::Gt),
-            "<" | "lt" => Some(CompareOp::Lt),
-            ">=" | "ge" => Some(CompareOp::Ge),
-            "<=" | "le" => Some(CompareOp::Le),
-            "==" | "eq" => Some(CompareOp::Eq),
-            "!=" | "ne" => Some(CompareOp::Ne),
-            _ => None,
+            ">" | "gt" => Ok(CompareOp::Gt),
+            "<" | "lt" => Ok(CompareOp::Lt),
+            ">=" | "ge" => Ok(CompareOp::Ge),
+            "<=" | "le" => Ok(CompareOp::Le),
+            "==" | "eq" => Ok(CompareOp::Eq),
+            "!=" | "ne" => Ok(CompareOp::Ne),
+            _ => Err(()),
         }
     }
 }
@@ -920,35 +921,35 @@ mod tests {
     #[test]
     fn test_timestamp_spec_plain() {
         assert_eq!(
-            FieldType::from_str("timestamp"),
-            Some(FieldType::Timestamp(TimeUnit::Microsecond, None))
+            "timestamp".parse::<FieldType>(),
+            Ok(FieldType::Timestamp(TimeUnit::Microsecond, None))
         );
         assert_eq!(
-            FieldType::from_str("timestamp[ns]"),
-            Some(FieldType::Timestamp(TimeUnit::Nanosecond, None))
+            "timestamp[ns]".parse::<FieldType>(),
+            Ok(FieldType::Timestamp(TimeUnit::Nanosecond, None))
         );
     }
 
     #[test]
     fn test_timestamp_spec_format() {
         assert_eq!(
-            FieldType::from_str("timestamp[ms,format=%Y%m%d %H:%M]"),
-            Some(FieldType::Timestamp(
+            "timestamp[ms,format=%Y%m%d %H:%M]".parse::<FieldType>(),
+            Ok(FieldType::Timestamp(
                 TimeUnit::Millisecond,
                 Some("%Y%m%d %H:%M".into())
             ))
         );
         // Unit omitted: defaults to microseconds.
         assert_eq!(
-            FieldType::from_str("timestamp[format=%d/%m/%Y]"),
-            Some(FieldType::Timestamp(
+            "timestamp[format=%d/%m/%Y]".parse::<FieldType>(),
+            Ok(FieldType::Timestamp(
                 TimeUnit::Microsecond,
                 Some("%d/%m/%Y".into())
             ))
         );
         // Unknown unit or unknown option key: rejected.
-        assert_eq!(FieldType::from_str("timestamp[fortnights]"), None);
-        assert_eq!(FieldType::from_str("timestamp[us,color=red]"), None);
-        assert_eq!(FieldType::from_str("timestamp[us,format=]"), None);
+        assert_eq!("timestamp[fortnights]".parse::<FieldType>(), Err(()));
+        assert_eq!("timestamp[us,color=red]".parse::<FieldType>(), Err(()));
+        assert_eq!("timestamp[us,format=]".parse::<FieldType>(), Err(()));
     }
 }

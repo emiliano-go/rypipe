@@ -257,7 +257,7 @@ fn read_log(
     plan.auto_dict = auto_dict;
     if let Some(ft) = field_types {
         for (name, type_str) in ft {
-            let ft = FieldType::from_str(&type_str).ok_or_else(|| {
+            let ft = type_str.parse::<FieldType>().map_err(|_| {
                 PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
             })?;
             plan.field_types.insert(name, ft);

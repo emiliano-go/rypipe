@@ -48,7 +48,7 @@ source = MyAdapter(
 
 The engine builds the correct Arrow array from the first row. It does not store intermediate strings and recast later. This saves memory and CPU.
 
-Supported type strings (as accepted by `FieldType::from_str`):
+Supported type strings (as accepted by `FieldType`'s `std::str::FromStr` implementation, so `type_str.parse::<FieldType>()`):
 
 | Type string | Rust `FieldType` | Notes |
 |-------------|------------------|-------|

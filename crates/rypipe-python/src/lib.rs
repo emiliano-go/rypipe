@@ -76,7 +76,7 @@ pub fn py_err_from_rypipe(err: rypipe_core::Error) -> PyErr {
 #[pyfunction]
 #[pyo3(signature = (file_size, memory=None, threads=None, schema=None, has_parallel=true, has_columnar=true))]
 fn resolve_engine<'py>(
-    py: Python<'py>,
+    _py: Python<'py>,
     file_size: u64,
     memory: Option<Bound<'py, pyo3::types::PyAny>>,
     threads: Option<usize>,

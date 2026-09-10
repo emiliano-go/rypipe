@@ -64,7 +64,7 @@ pub fn execution_plan_from_kwargs(
 
     if let Some(ft) = field_types {
         for (name, type_str) in ft {
-            let ft = FieldType::from_str(&type_str).ok_or_else(|| {
+            let ft = type_str.parse::<FieldType>().map_err(|_| {
                 let valid = "string, int64, float64, bool, dictionary, date32, \
                              timestamp, timestamp[s|ms|us|ns], decimal128, decimal128(scale)";
                 PlanError::new_err(format!(
@@ -159,7 +159,7 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
     if f.contains("field_a")? && f.contains("field_b")? {
         let field_a: String = f.get_item("field_a")?.unwrap().extract()?;
         let field_b: String = f.get_item("field_b")?.unwrap().extract()?;
-        let cop = CompareOp::from_str(&op).ok_or_else(|| {
+        let cop = op.parse::<CompareOp>().map_err(|_| {
             let valid = ">, <, >=, <=, ==, !=";
             PlanError::new_err(format!("unsupported compare op {op:?}; valid: {valid}"))
         })?;
@@ -184,7 +184,7 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         } else {
             op.clone()
         };
-        let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
+        let cop = cmp_op_str.parse::<CompareOp>().map_err(|_| {
             let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
             PlanError::new_err(format!(
                 "unsupported compare op {cmp_op_str:?}; valid: {valid}"
@@ -250,7 +250,7 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             .get_item("value")?
             .ok_or_else(|| PlanError::new_err("is_type filter must include 'value' key"))?
             .extract::<String>()?;
-        let field_type = FieldType::from_str(&type_str).ok_or_else(|| {
+        let field_type = type_str.parse::<FieldType>().map_err(|_| {
             let valid = "string, int64, float64, bool, dictionary, date32, \
                          timestamp, timestamp[s|ms|us|ns], decimal128, decimal128(scale)";
             PlanError::new_err(format!(
@@ -281,7 +281,7 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             } else {
                 "=".to_string()
             };
-            let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
+            let cop = cmp_op_str.parse::<CompareOp>().map_err(|_| {
                 let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
                 PlanError::new_err(format!(
                     "unsupported compare op {cmp_op_str:?}; valid: {valid}"
@@ -312,7 +312,7 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             } else {
                 ">".to_string()
             };
-            let cop = CompareOp::from_str(&cmp_op_str).ok_or_else(|| {
+            let cop = cmp_op_str.parse::<CompareOp>().map_err(|_| {
                 let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
                 PlanError::new_err(format!(
                     "unsupported compare op {cmp_op_str:?}; valid: {valid}"
@@ -325,7 +325,7 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             }
         }
         other => {
-            let cop = CompareOp::from_str(other).ok_or_else(|| {
+            let cop = other.parse::<CompareOp>().map_err(|_| {
                 let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le, starts_with, ends_with, contains, strip, lower, upper, length, is_null, is_type, regex";
                 PlanError::new_err(format!("unsupported filter op {other:?}; valid: {valid}"))
             })?;

@@ -249,8 +249,9 @@ pub enum FieldType {
     Timestamp(TimeUnit),
 }
 
-impl FieldType {
-    pub fn from_str(s: &str) -> Option<Self>;
+impl std::str::FromStr for FieldType {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err>;
     // Recognized: "string", "int64", "float64", "bool", "boolean",
     // "dictionary", "date32", "timestamp", "timestamp[s]", etc.
 }
@@ -261,8 +262,9 @@ impl FieldType {
 ```rust
 pub enum CompareOp { Gt, Lt, Ge, Le, Eq, Ne }
 
-impl CompareOp {
-    pub fn from_str(s: &str) -> Option<Self>;
+impl std::str::FromStr for CompareOp {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err>;
     // Recognized: ">"|"gt", "<"|"lt", ">="|"ge", "<="|"le", "=="|"eq", "!="|"ne"
 }
 ```

@@ -259,7 +259,7 @@ pub fn read_file(path: &str, schema: Option<Vec<String>>, field_types: Option<Ha
     // Apply field_types if provided
     if let Some(types) = field_types {
         for (name, type_str) in &types {
-            if let Some(ft) = FieldType::from_str(type_str) {
+            if let Ok(ft) = type_str.parse::<FieldType>() {
                 plan.field_types.insert(name.clone(), ft);
             }
         }
