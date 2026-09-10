@@ -60,7 +60,8 @@ pip install crxml
 ```
 
 ```python
-from crxml import CrystalXMLSource, CastTypes, FilterRows
+import crxml
+from crxml import CrystalXMLSource, CastTypes, FilterRows, col
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
@@ -72,10 +73,22 @@ result = (
     source
     | CastTypes({"Amount": float})
     | FilterRows(field="Status", op="==", value="Active")
-).to_arrow()
+    | crxml.to_arrow()
+)
+
+# Expression predicates fuse into the Rust parse loop too
+result = (
+    source
+    | FilterRows((col("Amount") > 100) & (col("Status") == "Active"))
+    | crxml.to_arrow()
+)
 
 # Convert to DataFrame
 df = source.to_pandas()
+
+# Constant-memory streaming
+for batch in source.iter_record_batches(memory="64MiB"):
+    writer.write_batch(batch)
 ```
 
 ## Why rypipe
@@ -85,9 +98,9 @@ df = source.to_pandas()
   infrastructure. An adapter is two small traits, not a full engine.
   crxml (Crystal Reports XML) is the reference adapter that proved this model.
 
-- **Performance without compromise.** Parallel ~4.5 GB/s, single-thread ~1 GB/s.
-  Zero-copy Arrow export. Predicate-first evaluation. Layout prediction via memcmp.
-  Performance numbers are measured against crxml workloads.
+- **Performance without compromise.** ~4.2 GB/s parallel, ~950 MB/s
+  single-threaded (Ryzen 7 5800X, crxml workloads). Zero-copy Arrow export.
+  Predicate-first evaluation. Layout prediction via memcmp.
 
 - **Correctness by construction.** Differential testing, fuzz targets, property
   tests, and a tier-ladder profiler.
@@ -108,8 +121,14 @@ df = source.to_pandas()
   when necessary.
 - **GIL-free parsing**: heavy work runs outside Python's GIL.
 - **Parallel by default**: chunked parsing with `rayon` scales to many cores.
-- **Memory bounded**: stream files larger than RAM with a configurable budget.
+- **Memory bounded**: stream files larger than RAM with `iter_record_batches`
+  and a configurable budget.
 - **Pushdown filters**: rename, drop, type, and filter rows while parsing.
+- **Expression API**: polars-style `col(...)` predicates that fuse into the
+  parse loop, composable with `&`, `|`, `~`.
+- **Observer hooks**: per-row callbacks from the engine, in Rust or Python.
+- **Transparent decompression**: gzip, zstd, and lz4 inputs detected by magic
+  bytes and decompressed automatically.
 - **Pipeline API**: chainable rename/drop/cast/filter stages with automatic fusion.
 - **Arrow native**: produces `RecordBatch` and exports via the C Data Interface.
 
