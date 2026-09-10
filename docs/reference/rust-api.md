@@ -30,6 +30,12 @@ pub trait Splitter: Send + Sync {
     fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
         None  // default: no skip regions
     }
+
+    /// Find safe split points. Default: nominal offsets → next_record_start
+    /// → skip-region rejection → dedup → sort. Override only with measured reason.
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
+        // default 5-step algorithm
+    }
 }
 ```
 
@@ -65,12 +71,25 @@ pub trait ColumnarSink {
     fn end_row(&mut self);
     fn finish(&mut self) -> Result<RecordBatch>;
 
-    // With defaults
+    // Name resolution and field pushing
     fn wants(&self, _name: &str) -> bool { true }
     fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> { Some(name) }
+    fn resolve_raw<'a>(&'a self, raw_name: &'a [u8]) -> Option<&'a str> { ... }
+    fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) { ... }
+    fn put_field_at(&mut self, _slot: u32, value: Value<'_>) { ... }
+    fn resolve_and_put(&mut self, name: &str, value: Value<'_>) { ... }
+    fn resolve_and_put_raw(&mut self, raw_name: &[u8], value: Value<'_>) { ... }
+    fn put_row(&mut self, fields: &[(&str, Value<'_>)]) { ... }
+
+    // Row state
     fn row_rejected(&self) -> bool { false }
     fn row_satisfied(&self) -> bool { false }
-    // ... more methods with defaults
+
+    // Engine hints
+    fn needs_value(&self) -> bool { true }
+    fn needs_resolve(&self) -> bool { true }
+    fn wanted_mask(&self) -> u64 { 0 }
+    fn expect_slot(&self, _ordinal: u32) -> Option<(u32, &[u8])> { None }
 }
 ```
 
@@ -184,6 +203,9 @@ pub struct ExecutionPlan {
     pub auto_dict: bool,                          // auto-dictionary
     pub dict_threshold: Option<f64>,              // auto-dict threshold
     pub dict_max_size: Option<usize>,             // auto-dict max size
+    pub strict_types: bool,                       // reject malformed data
+    pub max_split_chunks: Option<usize>,          // cap on streaming chunks
+    pub observer: Option<Arc<dyn RowObserver>>,   // per-row hooks
 }
 ```
 
@@ -197,9 +219,14 @@ ExecutionPlan::new()
     .type_as("col", FieldType::Float64)
     .dictionary("col")
     .filter_eq("status", "active")
+    .filter_ne("status", "inactive")
     .filter_compare("price", CompareOp::Gt, "cost")
     .schema_order(["a", "b", "c"])
     .with_auto_dict(true)
+    .with_dict_threshold(0.05)
+    .with_dict_max_size(256)
+    .with_strict_types(true)
+    .with_max_split_chunks(1000)
 ```
 
 !!! note "From the Python side"
@@ -215,9 +242,12 @@ ExecutionPlan::new()
     | `.drop()` / `.drop_many()` | `drop_fields=[...]` or `crxml.DropFields` |
     | `.type_as(col, ty)` | `field_types={"col": "float64"}` or `crxml.CastTypes` |
     | `.dictionary(col)` | `dictionary_columns=["col"]` |
-    | `.filter_eq(...)` / `.filter_compare(...)` | `filter={...}` spec dict or `crxml.FilterRows` |
+    | `.filter_eq(...)` / `.filter_ne(...)` / `.filter_compare(...)` | `filter={...}` spec dict or `crxml.FilterRows` |
     | `.schema_order([...])` | `schema=["a", "b", "c"]` |
     | `.with_auto_dict(true)` | `auto_dict=True` |
+    | `.with_strict_types(true)` | `strict_types=True` |
+    | `.with_max_split_chunks(n)` | `max_split_chunks=n` or `chunks=n` |
+    | `.with_observer(Arc::new(obs))` | `observer={"on_row_rejected": fn, ...}` |
 
     ```python
     import crxml
@@ -293,7 +323,7 @@ pub enum FilterPredicate {
     Lower { field: String, op: CompareOp, value: String },
     Upper { field: String, op: CompareOp, value: String },
     Replace { field: String, old: String, new: String, op: CompareOp, value: String },
-    Length { field: String, op: CompareOp, value: i64 },
+    Length { field: String, op: CompareOp, value: String },
 
     // Membership
     In { field: String, values: Vec<String> },
@@ -309,7 +339,7 @@ pub enum FilterPredicate {
         arith_op: ArithOp,
         arith_value: f64,
         cmp_op: CompareOp,
-        cmp_value: f64,
+        cmp_value: String,
     },
 
     // Boolean
@@ -410,6 +440,15 @@ where
     // Streaming
     pub fn read_bytes_stream(&self, bytes: &[u8], budget: MemoryBudget) -> Result<Vec<RecordBatch>>;
     pub fn read_path_stream(&self, path: impl AsRef<Path>, budget: MemoryBudget, prefault: bool) -> Result<Vec<RecordBatch>>;
+
+    // Streaming with callback (constant memory, no batch collection)
+    pub fn read_bytes_stream_consumer<C>(&self, bytes: &[u8], budget: MemoryBudget, consumer: C) -> Result<()>
+    where C: BatchConsumer;
+    pub fn read_path_stream_consumer<C>(&self, path: impl AsRef<Path>, budget: MemoryBudget, prefault: bool, consumer: C) -> Result<()>
+    where C: BatchConsumer;
+
+    // Parallel streaming
+    pub fn read_path_stream_par(&self, path: impl AsRef<Path>, budget: MemoryBudget, num_chunks: usize, prefault: bool) -> Result<Vec<RecordBatch>>;
 }
 ```
 
@@ -436,6 +475,30 @@ where
     `RecordBatch` via the Arrow PyO3 bridge; per-chunk Rust results become
     per-chunk Python objects on streaming paths.
 
+## MemoryBudget { #memorybudget }
+
+Budget for bounded-memory streaming reads.
+
+```rust
+pub struct MemoryBudget {
+    bytes: usize,
+}
+
+impl MemoryBudget {
+    pub fn new(bytes: usize) -> Self;
+}
+```
+
+## BatchConsumer { #batchconsumer }
+
+Callback trait for streaming reads without batch collection.
+
+```rust
+pub trait BatchConsumer {
+    fn accept(&mut self, batch: RecordBatch) -> Result<()>;
+}
+```
+
 ## FrozenSchema { #frozenschema}
 
 Resolved schema for a parse run.
@@ -445,12 +508,22 @@ pub struct FrozenSchema { /* fields private */ }
 
 impl FrozenSchema {
     pub fn from_plan(names: &[&str], plan: &ExecutionPlan) -> Self;
+    pub fn from_partial_plan(names: &[&str], plan: &ExecutionPlan) -> Self;
     pub fn from_discovered(names_in_order: &[String], plan: &ExecutionPlan) -> Self;
     pub fn num_columns(&self) -> usize;
     pub fn column_names(&self) -> &[Arc<str>];
     pub fn column_types(&self) -> &[FieldType];
     pub fn resolve(&self, raw_name: &str) -> Option<u32>;
+    pub fn is_exact(&self) -> bool;
 }
+
+// Schema discovery helpers (public functions)
+pub fn dynamic_window_count(file_size: u64) -> usize;
+pub fn dynamic_window_size(file_size: u64) -> usize;
+pub fn layout_signature(bytes: &[u8], opts: &DiscoveryOpts) -> (u64, u64);
+pub fn insert_schema_cache(sig: (u64, u64), order: Arc<Vec<String>>);
+pub fn clear_schema_cache();
+pub fn schema_cache_stats() -> (u64, u64);
 ```
 
 ## DiscoveryOpts { #discoveryopts }
@@ -509,7 +582,6 @@ pub fn record_batch_to_pyarrow(
 | `XmlError` | `ParseError` | XML-specific parse error. |
 | `PlanError` | `PyException` | Invalid plan kwargs. |
 | `MergeError` | `PyException` | Schema mismatch between chunks. |
-| `ParserError` | `PyException` | Parser misbehavior (adapter bug). |
 
 ## Error enum { #error }
 
@@ -556,6 +628,7 @@ Proptest strategies for generating test data:
 
 ```rust
 use rypipe_test::fixtures::{MALFORMED_UTF8, NESTED_QUOTES, EMPTY_VALUES};
+use rypipe_test::fixtures::long_column_name;
 ```
 
 | Fixture | Description |
@@ -563,6 +636,7 @@ use rypipe_test::fixtures::{MALFORMED_UTF8, NESTED_QUOTES, EMPTY_VALUES};
 | `MALFORMED_UTF8` | 5 byte sequences that fail UTF-8 validation |
 | `NESTED_QUOTES` | 5 strings with nested single/double quotes |
 | `EMPTY_VALUES` | 5 empty/blank value variants |
+| `long_column_name(len)` | Generate a column name of the given length |
 
 ### Helpers { #helpers }
 
@@ -573,7 +647,7 @@ use rypipe_test::{KeyValueParser, NewlineSplitter};
 
 | Helper | Purpose |
 |--------|---------|
-| `parse_test_bytes(bytes, splitter, parser, plan)` | Parse bytes into `Vec<RecordBatch>` |
+| `parse_test_bytes(bytes)` | Parse bytes into a `TableBuilder` |
 | `assert_batches_equal(batches, expected_rows)` | Assert row count and non-empty batches |
 | `KeyValueParser` | `key=value` parser for test adapters |
 | `NewlineSplitter` | Newline splitter for test adapters |

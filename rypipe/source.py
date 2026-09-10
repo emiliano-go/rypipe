@@ -116,6 +116,8 @@ class Source(ABC):
 
     def schema(self) -> list[str]:
         """Return the output column names from the first row."""
+        if self._schema:
+            return list(self._schema)
         first = next(iter(self), None)
         return [*first] if first else []
 

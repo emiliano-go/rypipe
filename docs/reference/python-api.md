@@ -169,6 +169,7 @@ class Source(ABC):
         dictionary_columns=None,       # list[str]
         schema=None,                   # list[str]: project exactly these columns, in this order
         auto_dict=False,               # bool
+        strict_types=False,            # bool: reject malformed data instead of nulling
         observer=None,                 # dict[str, callable] | None: row observer hooks
         use_mmap=True,                 # bool
         batch_size=1024,               # int
@@ -188,14 +189,14 @@ def _read_arrow(self, plan_overrides: dict | None = None) -> pyarrow.Table:
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `.to_arrow()` | `pyarrow.Table` | Parse and cache the table. |
-| `.to_pandas(memory=None, dtype_backend="pyarrow")` | `pd.DataFrame` | Convert to pandas. Pass `memory=` for streaming. |
-| `.to_polars(memory=None)` | `pl.DataFrame` | Convert to Polars. Pass `memory=` for streaming. |
-| `.to_parquet(path, memory=None, **kwargs)` | `None` | Write to Parquet. Pass `memory=` for streaming. |
+| `.to_pandas(memory=None, dtype_backend="pyarrow", **kwargs)` | `pd.DataFrame` | Convert to pandas. Pass `memory=` for streaming, `threads` in `**kwargs`. |
+| `.to_polars(memory=None, **kwargs)` | `pl.DataFrame` | Convert to Polars. Pass `memory=` for streaming, `threads` in `**kwargs`. |
+| `.to_parquet(path, memory=None, **kwargs)` | `None` | Write to Parquet. Pass `memory=` for streaming, Parquet options in `**kwargs`. |
 | `.schema()` | `list[str]` | Column names from first row. |
 | `.clear_cache()` | `None` | Drop cached table. |
 | `.iter_arrow_batches(batch_size=None)` | `Iterator[RecordBatch]` | Yield batches. |
 | `.iter_record_batches(memory="64MiB", batch_size=None)` | `Iterator[RecordBatch]` | Stream batches. |
-| `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts. |
+| `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts. All values are strings; use `CastTypes` or `field_types` for real types. |
 | `.__or__(stage)` | `Pipeline` | Pipe operator for stages. |
 
 ### to_pandas() details { #to-pandas-details }
@@ -240,6 +241,57 @@ Common options:
 | `use_dictionary` | `bool \| list` | `True` | Enable/disable dictionary encoding |
 | `write_statistics` | `bool` | `True` | Write column statistics |
 
+## discover_schema() { #discover-schema }
+
+Discover column names for a file without a full parse. Scans the file once
+and returns the column names after applying `field_mapping`, `drop_fields`,
+etc.
+
+```python
+crxml.discover_schema(
+    source,                     # str | Path: file path
+    *,
+    row_tag="Details",          # str: row element name
+    field_mapping=None,         # dict[str, str] | None
+    drop_fields=None,           # list[str] | None
+    filter=None,                # dict | None
+    field_types=None,           # dict[str, str] | None
+    dictionary_columns=None,    # list[str] | None
+    schema=None,                # list[str] | None
+    auto_dict=False,            # bool
+) -> list[str]
+```
+
+**Returns:** `list[str]` — column names in output order.
+
+## CrystalXMLSource { #crystalxmlsource }
+
+Concrete `Source` subclass for Crystal Reports XML files (provided by the
+`crxml` adapter). Extends `Source.__init__` with adapter-specific params:
+
+```python
+class CrystalXMLSource(Source):
+    def __init__(
+        self,
+        source,                          # str | Path
+        *,
+        row_tag="Row",                   # str: XML element name for one row
+        engine="auto",                   # "auto" | "stream" | "columnar" | "parallel"
+        threads=0,                       # int: parser threads (0 = all cores)
+        memory=None,                     # str | int | None: memory bound
+        chunks=None,                     # int | None: number of parallel chunks
+        max_split_chunks=None,           # int | None: max split chunks
+        # ... plus all Source.__init__ kwargs ...
+    )
+```
+
+Additional methods beyond `Source`:
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `.to_arrow(combine=False)` | `pyarrow.Table` | Parse and cache. `combine=True` merges chunked columns. |
+| `.iter_record_batches(memory="64MiB", batch_size=None, threads=None)` | `Iterator[RecordBatch]` | Stream batches with parallel support. |
+
 ## Adapter { #adapter }
 
 Convenience base class. Subclasses implement `read()` instead of
@@ -257,6 +309,9 @@ A chain of stages applied to a Source.
 
 ```python
 class Pipeline:
+    def __init__(self, source, stages=None, *, batch_size=1024):
+        """Create a pipeline. Usually built via source | stage, not directly."""
+
     def __or__(self, stage) -> Pipeline:
         """Append a stage and return a new Pipeline."""
 
@@ -323,9 +378,10 @@ FilterRows(
 )
 ```
 
-**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, and `regex`
-(the value is a regular expression, searched against the string form of the
-field; invalid patterns raise at construction time)
+**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `regex`,
+`starts_with`, `ends_with`, `contains`
+(the value is a regular expression for `regex`, searched against the string
+form of the field; invalid patterns raise at construction time)
 
 **Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 
@@ -415,16 +471,18 @@ Negate a filter.
 
 ## Sinks { #sinks }
 
-Standalone functions for materializing pipeline results.
+Standalone functions for materializing pipeline results. All functions
+accept `memory=` for bounded-memory streaming when the pipeline supports
+`iter_record_batches()`.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `rypipe.collect(pipeline)` | `list[dict]` | Collect all rows. |
+| `rypipe.collect(pipeline, memory=None)` | `list[dict]` | Collect all rows. |
 | `rypipe.to_arrow(pipeline)` | `pyarrow.Table` | Materialize to table. |
-| `rypipe.to_pandas(pipeline)` | `pd.DataFrame` | Materialize to pandas. |
-| `rypipe.to_polars(pipeline)` | `pl.DataFrame` | Materialize to Polars. |
+| `rypipe.to_pandas(pipeline, memory=None, dtype_backend="pyarrow")` | `pd.DataFrame` | Materialize to pandas. |
+| `rypipe.to_polars(pipeline, memory=None)` | `pl.DataFrame` | Materialize to Polars. |
 | `rypipe.to_csv(pipeline, path, ...)` | `None` | Write to CSV. |
-| `rypipe.to_parquet(pipeline, path, ...)` | `None` | Write to Parquet. |
+| `rypipe.to_parquet(pipeline, path, memory=None, ...)` | `None` | Write to Parquet. |
 
 ### to_csv() { #to-csv }
 
@@ -447,4 +505,3 @@ rypipe.to_csv(
 | `rypipe.XmlError` | `ParseError` | XML-specific parse error. |
 | `rypipe.PlanError` | `Exception` | Invalid plan kwargs. |
 | `rypipe.MergeError` | `Exception` | Schema mismatch between chunks. |
-| `rypipe.ParserError` | `Exception` | Parser misbehavior (adapter bug). |
