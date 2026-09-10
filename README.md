@@ -37,9 +37,14 @@
 
 ## What is rypipe
 
-`rypipe` is a format-agnostic columnar ingestion engine. It separates
-format-specific parsing from format-agnostic execution. Add a new format by
-implementing two small traits: `Splitter` and `RecordParser`.
+`rypipe` is a format- and source-agnostic ingestion framework that provides a
+common execution runtime for turning arbitrary record-oriented data sources
+into typed columnar data. It separates format-specific parsing from
+format-agnostic execution, so the same engine can parse XML, JSON, CSV, HTML,
+or any other row-oriented format once you provide a small adapter.
+
+Add a new format by implementing two small traits: `Splitter` and
+`RecordParser`.
 
 `rypipe` itself does **not** ship parsers. Those live in separate adapter
 packages. Install the engine plus the adapters you need.
@@ -93,8 +98,8 @@ for batch in source.iter_record_batches(memory="64MiB"):
 
 ## Why rypipe
 
-- **One runtime, many formats.** XML, JSON, CSV, and any future format share
-  the same parallel scheduler, memory-bounded executor, and pushdown
+- **One runtime, many formats.** XML, JSON, CSV, HTML, TSV, and any future
+  format share the same parallel scheduler, memory-bounded executor, and pushdown
   infrastructure. An adapter is two small traits, not a full engine.
   crxml (Crystal Reports XML) is the reference adapter that proved this model.
 
@@ -114,6 +119,9 @@ for batch in source.iter_record_batches(memory="64MiB"):
 - **Not a query engine.** No joins, aggregations, window functions, or SQL.
 - **Not a parser.** Each format needs an adapter package.
 - **Not a data warehouse.** It ingests into Arrow; it does not store or serve.
+- **Not pure Python.** Adapters are written in Rust for performance. Python
+  users consume data through adapter APIs; they do not need to write Rust
+  unless creating a new adapter.
 
 ## Features
 
