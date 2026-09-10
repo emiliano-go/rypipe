@@ -283,11 +283,11 @@ first. This enables earlier short-circuit in both combinators.
 ## Plan construction from Python { #plan-construction-from-python }
 
 ```python
-from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+import crxml
 
-src | RenameFields({"old": "new"}) | DropFields(["id"]) | \
-    FilterRows(field="status", op="==", value="active") | \
-    CastTypes({"amount": float})
+src | crxml.RenameFields({"old": "new"}) | crxml.DropFields(["id"]) | \
+    crxml.FilterRows(field="status", op="==", value="active") | \
+    crxml.CastTypes({"amount": float})
 ```
 
 Each stage has `_plan_kwargs()` that returns a dict. `plan_split` merges
@@ -296,8 +296,9 @@ combined with an implicit `and`, and `observer` hook dicts merge per-hook
 (chaining callables when several stages provide the same hook). Non-fusable
 stages (custom callables) run over the returned table.
 
-Filters can also be built with the expression API (`rypipe.expr.col(...)`);
-such predicates expose `_to_spec()` and are fusable like plain spec dicts.
+Filters can also be built with the expression API (the adapter's
+re-exported `col(...)`); such predicates expose `_to_spec()` and are fusable
+like plain spec dicts.
 `FilterRows(field=..., is_null=False)` becomes
 `{"not": {"field": ..., "op": "is_null"}}`.
 

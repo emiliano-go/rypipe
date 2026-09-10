@@ -104,8 +104,6 @@ typing, and Arrow logic in one place.
 | `scan` | Portable byte-search primitives (find, find2, find_literal) |
 | `bench` | Tier ladder, alloc_baseline, ParProfile (behind bench feature) |
 | `schema` | FrozenSchema, DiscoveryOpts, layout_signature caching |
-
-See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `dict` | SeedDict, unify_dictionaries, apply_remap |
 | `block_masks` | SIMD 64-byte block delimiter scanning |
 | `parallel_stream` | ParallelStreamingExecutor, discovery, ordered/unordered delivery |
@@ -215,6 +213,6 @@ push/pop cycles for selective filters.
 ### Why not override find_split_points? { #why-not-override-find_split_points }
 
 The default implementation applies the measured 2 MiB chunk floor that
-prevents sub-MB chunk collapse. Two adapters got this wrong: TSV collected
-first K newlines (negative scaling), crxml scanned entire file for `<!`
-(25% overhead). The default eliminates this bug class.
+prevents sub-MB chunk collapse. Custom overrides are a recurring source of
+performance bugs (sampling too little data, or scanning far more of the file
+than needed), so the default eliminates this bug class.

@@ -12,7 +12,7 @@ Pushdown fusion is the process by which the Python `Pipeline` rewrites a chain o
 ```python
 # Stages are imported from the adapter package; they are the same
 # classes the framework's stage protocol defines.
-from crxml import CrystalXMLSource, RenameFields, DropFields, FilterRows, CastTypes, to_pandas
+from crxml import CrystalXMLSource, RenameFields, DropFields, FilterRows, CastTypes, to_pandas, col
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
@@ -24,9 +24,7 @@ df = to_pandas(
     | CastTypes({"amount": float})
 )
 
-# Expression predicates (rypipe.expr) are fusable too:
-from rypipe import col
-
+# Expression predicates are fusable too:
 df = to_pandas(
     source
     | FilterRows((col("amount") > 100) & (col("status") == "active"))
@@ -118,13 +116,13 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 | `RenameFields` | `field_map` | Multiple renames merge into one map. |
 | `DropFields` | `drop_fields` | Merges as a set union. |
 | `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
-| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`, including `op="regex"`), `is_null`, `is_type`, or an expression predicate from `rypipe.expr` (comparisons, `startswith`, `endswith`, `contains`, `matches`, `between`, `isin`, `not_in`, compound `&`/`|`/`~`); all are evaluated per-row during parse. |
+| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`, including `op="regex"`), `is_null`, `is_type`, or an expression predicate built with the adapter's re-exported `col` (comparisons, `startswith`, `endswith`, `contains`, `matches`, `between`, `isin`, `not_in`, compound `&`/`|`/`~`); all are evaluated per-row during parse. |
 | `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` | `filter` | `And`, `Or`, `Not` trees built from the same leaf shapes; evaluated per-row with short circuiting; fully fusable. |
 | `ObservedStage` (or any stage returning observer hooks) | `observer` | Hook dicts merge per-hook; callables for the same hook chain in stage order. |
 
 `FilterRows` is fusable when it uses a keyword-form predicate (`field`,
 `op`, `value` or `field_a`, `op`, `field_b`), or an expression predicate
-built with `rypipe.expr.col` (see [expression filters](../architecture/expressions.md)).
+built with the adapter's re-exported `col` (see [expression filters](../architecture/expressions.md)).
 `FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable;
 they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
 

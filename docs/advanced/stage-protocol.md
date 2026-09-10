@@ -77,7 +77,7 @@ If any stage returns `None` from `_plan_kwargs()`, the pipeline splits:
 3. The non-fusable stage runs in Python over the materialized table.
 4. The remaining stages run in Python (or fuse a second plan if possible).
 
-This fallback is correct but 10–50× slower. Only return `None` from
+This fallback is correct but 10-50× slower. Only return `None` from
 `_plan_kwargs()` when fusion is genuinely impossible.
 
 ## Why re-exporting works { #why-re-exporting-works }
@@ -142,6 +142,23 @@ class LoggingFilterRows(FilterRows):
         logger.debug("dropped row %d", row_index)
 ```
 
+How the call reaches your method: the engine runs in Rust, so `_log_rejected`
+is not called directly by Python code. The dict you pass is stored in the plan
+and wrapped by a Rust `RowObserver` (`PyObserver`) that holds a reference to
+the Python callable. When the Rust filter drops a row, it fires
+`on_row_rejected`, the wrapper acquires the GIL and invokes your bound method:
+
+```text
+Rust engine (fused parse+filter loop)
+    row fails predicate ──► PyObserver::on_row_rejected(row_index)
+                               │  (acquires GIL)
+                               ▼
+Python: LoggingFilterRows._log_rejected(row_index)  →  logger.debug(...)
+```
+
+Yes: `_log_rejected` is effectively called from Rust, once per rejected row,
+re-entrant into Python.
+
 The `_plan_kwargs()` method is inherited and extended, so the filter still
 fuses into the parse loop, and the `on_row_rejected` hook fires from inside
 the engine for every rejected row.
@@ -151,6 +168,78 @@ The naive alternative (overriding `apply()` to log and delegating to
 runs in Python, so `apply()` is never called and nothing is logged. Rule of
 thumb: overriding `apply()` on a fusable stage drops your override whenever
 fusion succeeds; put side effects in observer hooks instead.
+
+## Custom spec producers { #custom-spec-producers }
+
+`FilterRows(predicate=obj)` fuses any object that carries a `_to_spec()`
+method: the dict it returns becomes the filter spec, so a custom predicate
+runs in the Rust parse loop exactly like the built-in forms. Minimal custom
+producer:
+
+```python
+from rypipe.stages import FilterRows
+
+class Weekday:
+    """Keep Mon-Fri rows; fusable like any other spec."""
+
+    def __init__(self, field: str):
+        self._field = field
+
+    def _to_spec(self) -> dict:
+        return {"field": self._field, "op": "not_in", "values": ["Sat", "Sun"]}
+
+src | FilterRows(Weekday("day"))
+```
+
+Here `_to_spec()` is the whole implementation: `FilterRows` duck-types on
+it (no arguments, returns a spec dict in the shapes from
+[Supported operations](../architecture/expressions.md#supported-operations)
+or nested `and`/`or`/`not`), so a plain class works with no `rypipe.expr`
+import. What a plain class does not get is composition (no `&`/`|`/`~`).
+For that, use the built-in `Predicate`, which provides `_to_spec()` for
+you.
+
+With `Predicate`, `_to_spec()` is an accessor, not a hook you implement:
+`Predicate.__init__(spec)` stores the dict as `self._spec` (that is the
+whole constructor), and the inherited `_to_spec()` returns it to the plan
+builder. So the subclass pattern below, calling `super().__init__(spec)`,
+sets everything up; there is no `_to_spec()` to write. Only override
+`_to_spec()` for lazily computed specs, and even then keep `self._spec`
+populated, because the `&`/`|`/`~` operators read the attribute directly
+rather than calling the method.
+
+If your producer subclasses `Predicate` (or returns an instance of it),
+composition comes for free. `Predicate` overloads the bitwise operators `&`
+(and), `|` (or), and `~` (not) via `__and__` / `__or__` / `__invert__`, and
+subclasses inherit `_to_spec()`. These are predicate composition, not
+pipeline syntax:
+
+```python
+from rypipe.expr import Predicate   # framework base class (adapter code)
+from crxml import col               # users get col from the adapter
+
+class Rating(Predicate):
+    def __init__(self, field: str):
+        super().__init__({"field": field, "op": ">=", "value": "4"})
+
+# & / | / ~ here combine predicates; | on the source builds the pipeline
+src | FilterRows(Rating("stars") & ~col("hidden").is_null())
+```
+
+(Composing two `Predicate`s returns a base `Predicate`, so combinations lose
+the subclass type; only the spec matters downstream, so this is cosmetic.)
+
+Two caveats:
+
+- The spec must be expressible in the spec language. There is no fallback:
+  an unknown operator fails when the plan is built, not at row time.
+- Adding a genuinely new operator is a Rust change: a new `FilterPredicate`
+  variant in `rypipe-core` plus a parsing arm in
+  `rypipe-python/src/plan_kwargs.rs` (`parse_filter_spec`). See the
+  [Rust API](../reference/rust-api.md#filterpredicate).
+
+Libraries and adapters can ship their own expression helpers on top of this
+protocol without touching rypipe.
 
 ## Observer hooks { #observer-hooks }
 
@@ -178,6 +267,10 @@ Notes:
 - `on_put_field` takes the GIL per call from Python (roughly 50ns, about
   0.5s for 1M rows with 10 fields). Prefer row-level hooks in Python; keep
   field-level hooks in Rust.
+- Adapter authors can attach a pure-Rust `RowObserver` via
+  `ExecutionPlan::with_observer` instead: no Python bindings, no GIL, a few
+  nanoseconds per event, fully parallel across parse threads. See the
+  [Rust API](../reference/rust-api.md#rowobserver).
 - When several stages provide the same hook, the pipeline chains the
   callables in stage order instead of overwriting.
 

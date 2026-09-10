@@ -1919,7 +1919,7 @@ If any stage returns `None` from `_plan_kwargs()`, the pipeline splits:
 3. The non-fusable stage runs in Python over the materialized table.
 4. The remaining stages run in Python (or fuse a second plan if possible).
 
-This fallback is correct but 10–50× slower. Only return `None` from
+This fallback is correct but 10-50× slower. Only return `None` from
 `_plan_kwargs()` when fusion is genuinely impossible.
 
 ## Why re-exporting works { #why-re-exporting-works }

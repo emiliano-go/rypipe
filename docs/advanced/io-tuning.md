@@ -29,13 +29,13 @@ For files that fit in RAM, mmap is usually fastest because it avoids an explicit
 
 The page cache is the biggest factor for repeated reads. If a file has been read recently, it is probably in cache, and mmap or buffered reads will be fast regardless of the underlying storage.
 
-For one-off reads of large files, storage bandwidth is the limit. A modern NVMe SSD can sustain 3-7 GB/s sequential reads; a SATA SSD is closer to 500 MB/s; network storage varies widely.
+For one-off reads of large files, storage bandwidth is the limit. A modern NVMe SSD can sustain 3-7 GB/s sequential reads (PCIe Gen3/Gen4; Gen5 drives reach ~14 GB/s); a SATA SSD is closer to 500 MB/s; network storage varies widely.
 
 ## SSD vs NVMe vs network storage { #ssd-vs-nvme-vs-network-storage }
 
 | Storage | Typical sequential read | Implications |
 |---------|------------------------|--------------|
-| NVMe SSD | 3-7 GB/s | Parser can be the bottleneck; parallel mode helps. |
+| NVMe SSD | 3-7 GB/s (PCIe Gen3/4); up to ~14 GB/s (Gen5) | Parser can be the bottleneck; parallel mode helps. |
 | SATA SSD | 400-600 MB/s | May be I/O-bound for simple formats; still fast enough for most XML/JSON. |
 | Network (NFS/S3) | 50-500 MB/s | Latency and throughput vary; streaming may be safer than mmap. |
 | Cold object storage | <100 MB/s | Consider downloading first or using buffered reads. |
@@ -56,6 +56,13 @@ In bounded stream mode, the input buffer is dropped before the parse phase begin
 | zstd | `28 b5 2f fd` | `zstd` |
 | lz4 (frame) | `04 22 4d 18` | `lz4` |
 
+These features are **off by default** in `rypipe-core`, but `rypipe-python`
+enables `compress-all`, so the Python wheels ship with all three codecs and
+detection works out of the box. An adapter embedding `rypipe-core` directly
+must opt in the same way: `features = ["gzip"]` (or `zstd`, `lz4`,
+`compress-all`). With the features disabled, a compressed file opens as raw
+bytes and the parser fails on the magic bytes.
+
 Detection is by content, not by file extension. Because decompression produces an owned `Vec<u8>`, `use_mmap` and `prefault` have no effect on compressed inputs, and peak memory includes the full decompressed size. For very large compressed files, plan the memory budget accordingly.
 
 ## Summary { #summary }
@@ -63,5 +70,5 @@ Detection is by content, not by file extension. Because decompression produces a
 - Use `mmap` + `prefault=True` for cached or RAM-resident files.
 - Use `mmap` + `prefault=False` for large streaming files.
 - Use buffered reads for network or portable deployments.
-- Compressed inputs (gzip, zstd, lz4) decompress transparently into memory.
+- Compressed inputs (gzip, zstd, lz4) decompress transparently into memory (enabled by default via `rypipe-python`; adapters embedding `rypipe-core` opt in with the codec features).
 - Match the parser throughput to storage bandwidth; do not over-parallelize an I/O-bound workload.

@@ -86,6 +86,60 @@ pub trait SkipRegionFinder: Send + Sync {
 }
 ```
 
+!!! note "From the Python side"
+
+    Python never implements these traits. End users import the adapter, not
+    **rypipe**; here with the reference adapter [crxml](../crxml-adapter.md):
+
+    ```python
+    import crxml
+
+    # engine="auto" picks columnar/parallel/stream from the file size
+    table = crxml.CrystalXMLSource("data.xml", row_tag="Details").to_arrow()
+    table = crxml.CrystalXMLSource(
+        "big.xml", row_tag="Details", engine="parallel"
+    ).to_arrow()                                       # Pipeline::read_path_par
+    ```
+
+    Everything above (`Splitter`, `RecordParser`, `ColumnarSink`,
+    `SkipRegionFinder`) runs inside the adapter's Rust crate; the Python
+    call crosses the boundary exactly once, on entry.
+
+### RowObserver { #rowobserver }
+
+Per-row hooks fired by `TableBuilder` during parsing. Attach via
+[`ExecutionPlan::with_observer`](#executionplan). All methods default to
+no-ops; implement only the ones you need. Hooks fire from parse threads on
+every engine (serial, parallel, bounded, streaming), so keep them cheap and
+thread-safe.
+
+```rust
+pub trait RowObserver: Send + Sync {
+    fn on_begin_row(&self, row_index: usize) {}
+    fn on_put_field(&self, row_index: usize, resolved_name: &str,
+                    slot: usize, value: &Value<'_>) {}
+    fn on_row_accepted(&self, row_index: usize) {}
+    fn on_row_rejected(&self, row_index: usize) {}
+    fn on_chunk_finished(&self, total: usize, accepted: usize, rejected: usize) {}
+}
+```
+
+```rust
+let plan = ExecutionPlan::new().with_observer(Arc::new(MyObserver));
+```
+
+See [Observer hooks for diagnostics](../building-adapters/techniques.md#observer-hooks)
+for a complete counting example.
+
+`RowObserver` is **Rust-only**: no Python bindings are involved at any
+point, so a hook is a plain function call on the parse thread (a few
+nanoseconds, runs fully parallel across chunks). The Python equivalent is
+passing `observer={"on_row_rejected": fn, ...}` in plan kwargs, which wraps
+the callables in a `PyObserver`: every event acquires the GIL and calls
+into Python (~50 ns per call), serialized against other Python threads.
+Both paths are fine per row; the difference matters when the hook fires per
+field or at high row rates. For hot paths, prefer a Rust `RowObserver`.
+
 ## Value enum { #value }
 
 Represents a parsed field value.
@@ -101,6 +155,19 @@ pub enum Value<'a> {
     Null,                    // Explicit null
 }
 ```
+
+The Python-side type mapping (as seen in `pyarrow` tables and in observer
+hook arguments):
+
+| `Value` | Python | `pyarrow` |
+|---------|--------|-----------|
+| `Str` | `str` | `string`/`dictionary` |
+| `Int64` | `int` | `int64` |
+| `Float64` | `float` | `float64` |
+| `Bool` | `bool` | `bool` |
+| `Date32` | `int` (days since epoch) | `date32` |
+| `Timestamp` | `int` (unit from `field_types`) | `timestamp` |
+| `Null` | `None` | null |
 
 ## ExecutionPlan { #executionplan }
 
@@ -134,6 +201,40 @@ ExecutionPlan::new()
     .schema_order(["a", "b", "c"])
     .with_auto_dict(true)
 ```
+
+!!! note "From the Python side"
+
+    Each builder method corresponds to a keyword argument on
+    `Source.__init__` (or a fusable pipeline stage whose `_plan_kwargs()`
+    produces the same key). Adapters re-export the stages, so users write
+    `crxml.FilterRows`, never `rypipe.stages.FilterRows`:
+
+    | Rust | Python (crxml) |
+    |------|----------------|
+    | `.rename(old, new)` | `field_mapping={"old": "new"}` or `crxml.RenameFields` |
+    | `.drop()` / `.drop_many()` | `drop_fields=[...]` or `crxml.DropFields` |
+    | `.type_as(col, ty)` | `field_types={"col": "float64"}` or `crxml.CastTypes` |
+    | `.dictionary(col)` | `dictionary_columns=["col"]` |
+    | `.filter_eq(...)` / `.filter_compare(...)` | `filter={...}` spec dict or `crxml.FilterRows` |
+    | `.schema_order([...])` | `schema=["a", "b", "c"]` |
+    | `.with_auto_dict(true)` | `auto_dict=True` |
+
+    ```python
+    import crxml
+
+    table = (
+        crxml.CrystalXMLSource(
+            "data.xml", row_tag="Details", field_mapping={"usr": "user"}
+        )
+        | crxml.FilterRows(field="status", op="==", value="active")
+        | crxml.RenameFields({"old": "new"})
+        | crxml.to_arrow()
+    )
+    ```
+
+    The pipeline's fusion layer merges stage `_plan_kwargs()` into these
+    source kwargs and passes them to the adapter's Rust `read_*` function
+    as plain kwargs, which builds this `ExecutionPlan`.
 
 ## FieldType { #fieldtype }
 
@@ -213,10 +314,23 @@ pub enum FilterPredicate {
     NotField { field: String },
     Always(bool),
 
+    // Regex
+    Regex { field: String, re: RegexSpec },
+
     // Logical combinators
     And(Box<FilterPredicate>, Box<FilterPredicate>),
     Or(Box<FilterPredicate>, Box<FilterPredicate>),
     Not(Box<FilterPredicate>),
+}
+
+/// Compiled regex plus its pattern.
+pub struct RegexSpec {
+    pub pattern: String,
+    pub compiled: regex::Regex,
+}
+
+impl RegexSpec {
+    pub fn new(pattern: impl Into<String>) -> Result<Self, regex::Error>;
 }
 
 impl FilterPredicate {
@@ -225,6 +339,44 @@ impl FilterPredicate {
     pub fn not(inner: Self) -> Self;
 }
 ```
+
+!!! note "From the Python side"
+
+    Predicates serialize to a plain dict spec (the `filter=` kwarg), so the
+    same filter reads identically from both languages. Three ways to build
+    one:
+
+    ```python
+    # 1. Keyword form (a positional arg is a plain callable, not fusable)
+    crxml.FilterRows(field="status", op="==", value="active")
+
+    # 2. Expression API (polars-style; same spec, composes with &, |, ~)
+    # (adapters re-export col; users never import rypipe.expr)
+    crxml.FilterRows((crxml.col("age") >= 18) & crxml.col("name").startswith("A"))
+
+    # 3. Logical combinators over keyword-form filters
+    crxml.FilterRowsAll(     # {"and": [spec, spec]}
+        crxml.FilterRows(field="a", op=">", value="1"),
+        crxml.FilterRows(field="b", op="==", value="x"),
+    )
+    crxml.FilterRowsNot(     # {"not": spec}
+        crxml.FilterRows(field="status", op="==", value="active")
+    )
+    ```
+
+    The spec dict is what `FilterRows._plan_kwargs()` returns and what the
+    adapter's Rust kwargs hand to `execution_plan_from_kwargs`.
+
+    **Extending expressions:** Python libraries can add new *spec producers*
+    freely: any object with a `_to_spec()` method returning a spec dict can
+    be passed as `FilterRows(predicate=obj)`, and `Predicate` composes with
+    the standard `&`/`|`/`~`. Adding a genuinely new *operator* is a Rust
+    change: a new `FilterPredicate` variant in
+    `rypipe-core` (`plan.rs`) plus a parsing arm in
+    `rypipe-python/src/plan_kwargs.rs` (`parse_filter_spec`). Until both
+    land, the spec language cannot express the operator and expression
+    construction raises instead of silently falling back to Python. See
+    [Expression filters](../architecture/expressions.md).
 
 ## Pipeline { #pipeline }
 
@@ -258,6 +410,29 @@ where
     pub fn read_path_stream(&self, path: impl AsRef<Path>, budget: MemoryBudget, prefault: bool) -> Result<Vec<RecordBatch>>;
 }
 ```
+
+!!! note "From the Python side"
+
+    End users import the adapter, not **rypipe**. With the reference
+    adapter [crxml](../crxml-adapter.md), the execution modes map to
+    `CrystalXMLSource` options:
+
+    | Rust | Python (crxml) |
+    |------|----------------|
+    | `read_path` | `crxml.CrystalXMLSource(path, row_tag="Row").to_arrow()` |
+    | `read_path_par` | `CrystalXMLSource(..., engine="parallel").to_arrow()` |
+    | `read_path_stream` (bounded memory) | `src.iter_record_batches(memory="64MiB", batch_size=...)` |
+    | `with_plan(plan)` | source kwargs + fused `crxml.*` stages |
+
+    ```python
+    src = crxml.CrystalXMLSource("big.xml", row_tag="Row")
+    for batch in src.iter_record_batches(memory="64MiB"):
+        writer.write_batch(batch)
+    ```
+
+    The return value crosses the boundary once as a `pyarrow.Table` /
+    `RecordBatch` via the Arrow PyO3 bridge; per-chunk Rust results become
+    per-chunk Python objects on streaming paths.
 
 ## FrozenSchema { #frozenschema}
 

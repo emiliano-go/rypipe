@@ -59,7 +59,7 @@ the finish path below) instead of becoming `None`.
 
 ```
 data:    [h][e][l][l][o][w][o][r][l][d]     ← two strings
-offsets: [0,     5,          10]             ← byte boundaries
+offsets: [0,          5,            10]     ← byte boundaries
 ```
 
 ### push { #push }
