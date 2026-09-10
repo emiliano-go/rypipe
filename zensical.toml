@@ -134,6 +134,9 @@ name = "rypipe on PyPI"
 "Why Python?" = "why-python.md"
 
 [[project.nav]]
+"Changelog" = "changelog.md"
+
+[[project.nav]]
 "Performance" = "performance.md"
 
 [[project.nav]]
