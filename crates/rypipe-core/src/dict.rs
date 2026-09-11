@@ -95,8 +95,8 @@ pub(crate) fn unify_dictionaries(
             for i in seed.len()..(offsets.len() - 1) {
                 let start = offsets[i] as usize;
                 let end = offsets[i + 1] as usize;
-                let val = std::str::from_utf8(&data[start..end]).unwrap_or("");
-                let k: Box<str> = val.into();
+                let val = String::from_utf8_lossy(&data[start..end]);
+                let k: Box<str> = val.as_ref().into();
                 if !global_index.contains_key(&k) {
                     global_index.insert(k.clone(), next_code);
                     global_data.extend_from_slice(val.as_bytes());
@@ -128,8 +128,8 @@ pub(crate) fn unify_dictionaries(
             for i in 0..local_len {
                 let start = offsets[i] as usize;
                 let end = offsets[i + 1] as usize;
-                let val = std::str::from_utf8(&data[start..end]).unwrap_or("");
-                let k: Box<str> = val.into();
+                let val = String::from_utf8_lossy(&data[start..end]);
+                let k: Box<str> = val.as_ref().into();
                 let Some(&g) = global_index.get(&k) else {
                     // Entry not in global index (corrupted chunk or adversarial input);
                     // treat as unmappable, skip remapping for this code.

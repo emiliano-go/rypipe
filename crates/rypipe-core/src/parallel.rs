@@ -230,7 +230,7 @@ impl ParallelExecutor {
                 for i in 0..(unified_dict.offsets.len() - 1) {
                     let start = unified_dict.offsets[i] as usize;
                     let end = unified_dict.offsets[i + 1] as usize;
-                    let s = std::str::from_utf8(&unified_dict.data[start..end]).unwrap_or("");
+                    let s = String::from_utf8_lossy(&unified_dict.data[start..end]);
                     let k: Box<str> = s.into();
                     new_index.insert(k, i as i32);
                 }
