@@ -182,9 +182,8 @@ impl NullableColumn<i32> {
         for i in 0..self.len() {
             if self.validity.is_valid(i) {
                 let v = &mut self.values[i];
-                debug_assert!((*v as usize) < map.len(), "code out of bounds in remap");
-                unsafe {
-                    *v = *map.get_unchecked(*v as usize);
+                if let Some(&remapped) = map.get(*v as usize) {
+                    *v = remapped;
                 }
             }
         }
