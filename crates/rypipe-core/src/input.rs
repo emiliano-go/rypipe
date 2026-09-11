@@ -31,9 +31,10 @@ impl<R: Read> Read for LimitReader<R> {
         let n = self.inner.read(buf)?;
         if n as u64 > self.remaining {
             self.remaining = 0;
-            return Err(std::io::Error::other(
-                "decompressed output exceeds size limit (possible decompression bomb)",
-            ));
+            return Err(std::io::Error::other(format!(
+                "decompressed output exceeds {} byte limit (possible decompression bomb)",
+                self.remaining + n as u64
+            )));
         }
         self.remaining -= n as u64;
         Ok(n)
