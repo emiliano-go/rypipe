@@ -125,7 +125,7 @@ pub trait Splitter: Send + Sync {
             return vec![0, bytes.len()];
         }
         let n = plan_chunk_count(bytes.len(), max_chunks, SplitMode::Parallel);
-        let nominals: Vec<usize> = (1..n).map(|i| bytes.len() * i / n).collect();
+        let nominals: Vec<usize> = (1..n).map(|i| bytes.len() / n * i).collect();
 
         use rayon::prelude::*;
 
