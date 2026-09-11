@@ -7,7 +7,7 @@ description: Release notes for rypipe, newest first. Tracks features, fixes, and
 
 All notable changes to rypipe, newest first. Versions follow semantic versioning and are tagged in the repository.
 
-## Unreleased
+## [0.3.0] - 2026-09-11
 
 ### Added
 
@@ -49,7 +49,7 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **`Pipeline` expanded.** 3 new methods: `read_bytes_stream_consumer`, `read_path_stream_consumer`, `read_path_stream_par`.
 - **`ExecutionPlan` gained fields.** `strict_types: bool`, `max_split_chunks: Option<usize>`, `observer: Option<Arc<dyn RowObserver>>`.
 
-## [2.2.0] - 2026-09-04
+## [0.2.2] - 2026-09-04
 
 ### Added
 
@@ -62,7 +62,7 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **Prose text cleanup.** Replaced ` : ` with `, ` across 4 files.
 - **Documentation fixes.** Removed redundant Pages table, fixed missing blank lines before numbered lists, updated performance numbers in why-python.
 
-## [2.1.0] - 2026-09-03
+## [0.2.1] - 2026-09-03
 
 ### Fixed
 
@@ -77,7 +77,7 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 
 - **Documentation expanded.** Added tagline, "Why rypipe", "What rypipe is not" sections. Fixed 6 audit findings.
 
-## [2.0.0] - 2026-09-02
+## [0.2.0] - 2026-09-02
 
 ### Added
 
