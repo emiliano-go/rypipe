@@ -45,6 +45,7 @@ def test_and_or_not():
     }
     spec = ((col("a") == 1) | (col("b") == 2))._to_spec()
     assert spec["or"][0] == {"field": "a", "op": "==", "value": "1"}
+    assert spec["or"][1] == {"field": "b", "op": "==", "value": "2"}
     spec = (~(col("x") == 1))._to_spec()
     assert spec == {"not": {"field": "x", "op": "==", "value": "1"}}
 
