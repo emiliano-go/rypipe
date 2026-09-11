@@ -193,14 +193,17 @@ impl ParallelExecutor {
                 }
                 let col_name = unify_col.unwrap();
                 // Build seed from first chunk, unify, remap.
-                let first_data =
+                let first_data = if let Some(&idx) = engines[0].field_index.get(&col_name) {
                     if let crate::columnar::ColumnBuilder::Dictionary { data, offsets, .. } =
-                        &engines[0].columns[engines[0].field_index[&col_name]]
+                        &engines[0].columns[idx]
                     {
                         (data.clone(), offsets.clone())
                     } else {
                         return engines_to_record_batches(engines, &plan);
-                    };
+                    }
+                } else {
+                    return engines_to_record_batches(engines, &plan);
+                };
                 // Build SeedDict from the contiguous buffer
                 let mut seed_values = Vec::new();
                 let mut seed_offsets = Vec::with_capacity(first_data.1.len());
