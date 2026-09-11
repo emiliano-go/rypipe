@@ -19,7 +19,7 @@ pub enum FieldType {
 }
 
 impl std::str::FromStr for FieldType {
-    type Err = ();
+    type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "string" => Ok(FieldType::String),
@@ -28,17 +28,18 @@ impl std::str::FromStr for FieldType {
             "bool" | "boolean" => Ok(FieldType::Boolean),
             "dictionary" => Ok(FieldType::Dictionary),
             "date32" => Ok(FieldType::Date32),
-            s if s.starts_with("timestamp") => parse_timestamp_spec(s).ok_or(()),
+            s if s.starts_with("timestamp") => parse_timestamp_spec(s)
+                .ok_or_else(|| format!("invalid timestamp spec: {s:?}")),
             "decimal128" => Ok(FieldType::Decimal128(18)),
             s if s.starts_with("decimal128(") => {
                 let scale = s
                     .trim_start_matches("decimal128(")
                     .trim_end_matches(')')
                     .parse::<u8>()
-                    .map_err(|_| ())?;
+                    .map_err(|e| format!("invalid decimal128 scale: {e}"))?;
                 Ok(FieldType::Decimal128(scale))
             }
-            _ => Err(()),
+            _ => Err(format!("unknown field type: {s:?}")),
         }
     }
 }
@@ -971,8 +972,8 @@ mod tests {
             ))
         );
         // Unknown unit or unknown option key: rejected.
-        assert_eq!("timestamp[fortnights]".parse::<FieldType>(), Err(()));
-        assert_eq!("timestamp[us,color=red]".parse::<FieldType>(), Err(()));
-        assert_eq!("timestamp[us,format=]".parse::<FieldType>(), Err(()));
+        assert!("timestamp[fortnights]".parse::<FieldType>().is_err());
+        assert!("timestamp[us,color=red]".parse::<FieldType>().is_err());
+        assert!("timestamp[us,format=]".parse::<FieldType>().is_err());
     }
 }
