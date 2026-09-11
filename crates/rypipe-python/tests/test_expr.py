@@ -1,5 +1,7 @@
 """Tests for the expression API (spec generation only, no engine)."""
 
+import re
+
 import pytest
 
 from rypipe.expr import col
@@ -112,7 +114,7 @@ def test_matches():
         "op": "regex",
         "value": r"^ERR\d+$",
     }
-    with pytest.raises(Exception):
+    with pytest.raises(re.error):
         col("code").matches("(")
     with pytest.raises(TypeError):
         col("code").matches(123)
