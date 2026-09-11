@@ -109,7 +109,11 @@ class _EndsWithPredicate:
 
 
 class _RegexPredicate:
-    """Fusable predicate: regex search against str(r["field"])"""
+    """Fusable predicate: regex search against str(r["field"])
+
+    Warning: user-supplied regex patterns can cause catastrophic backtracking
+    (ReDoS) on adversarial input. Use simple patterns for untrusted data.
+    """
     __slots__ = ("_field", "_value", "_compiled")
 
     def __init__(self, field: str, value: str):
