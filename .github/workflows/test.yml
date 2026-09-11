@@ -45,6 +45,21 @@ jobs:
       - name: Clippy workspace
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  deny:
+    name: Supply chain audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check advisories, licenses, and bans
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans
+
   benchmark:
     name: Engine throughput benchmark
     runs-on: ubuntu-latest
