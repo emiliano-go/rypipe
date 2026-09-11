@@ -5,6 +5,7 @@
 //! no format-specific logic and no Python/FFI dependencies.
 
 #![allow(unexpected_cfgs)]
+#![warn(unsafe_code)]
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
