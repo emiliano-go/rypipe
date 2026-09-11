@@ -99,6 +99,14 @@ fn resolve_engine<'py>(
         None
     };
 
+    if let Some(t) = threads {
+        if t == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "threads must be >= 1",
+            ));
+        }
+    }
+
     let config = rypipe_core::AutoConfig {
         file_size,
         memory: memory_bytes,
