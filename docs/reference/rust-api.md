@@ -362,6 +362,8 @@ pub struct RegexSpec {
 }
 
 impl RegexSpec {
+    /// Compile a regex pattern. Returns an error if the pattern is invalid
+    /// or the compiled automaton exceeds 1 MiB.
     pub fn new(pattern: impl Into<String>) -> Result<Self, regex::Error>;
 }
 

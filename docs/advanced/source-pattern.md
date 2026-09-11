@@ -135,7 +135,7 @@ from rypipe import Adapter, resolve_engine
 
 class CrystalXMLSource(Adapter):
     def __init__(self, path, *, row_tag="Row", engine="auto",
-                 threads=0, memory=None, **kwargs):
+                 threads=None, memory=None, **kwargs):
         self._row_tag = row_tag
         self._engine = engine
         self._threads = threads

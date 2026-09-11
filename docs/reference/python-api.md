@@ -123,12 +123,17 @@ rypipe.resolve_engine(
     file_size,                # int: file size in bytes (required)
     *,                        # keyword-only from here
     memory=None,              # int | str | None: memory budget (e.g. "64MiB")
-    threads=None,             # int | None: number of threads
+    threads=None,             # int | None: number of threads (must be >= 1 if provided)
     schema=None,              # list[str] | None: projected column names, in order
     has_parallel=True,        # bool: adapter has parallel support
     has_columnar=True,        # bool: adapter has columnar support
 ) -> str
 ```
+
+!!! note "Validation"
+    `threads` must be >= 1 if provided. Passing `threads=0` raises `ValueError`.
+    `memory` must be a positive finite number or a valid memory string (e.g. `"64MiB"`).
+    Empty or negative memory strings raise `ValueError`.
 
 Returns one of: `"columnar"`, `"parallel"`, `"stream"`, `"parallel_streaming"`.
 
@@ -379,9 +384,15 @@ FilterRows(
 ```
 
 **Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `regex`,
-`starts_with`, `ends_with`, `contains`
+`starts_with`, `ends_with`, `contains`, `in`, `not_in`, `replace`,
+`strip`, `lstrip`, `rstrip`, `lower`, `upper`, `length`
 (the value is a regular expression for `regex`, searched against the string
 form of the field; invalid patterns raise at construction time)
+
+!!! note "Limits"
+    - `in`/`not_in` values lists are capped at **100,000 elements**.
+    - `replace` with empty `old` string is rejected (would insert before every character).
+    - Nested filter specs (via `and`/`or`/`not`) are limited to **128 levels** of nesting.
 
 **Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 

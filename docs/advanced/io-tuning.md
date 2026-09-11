@@ -65,6 +65,12 @@ bytes and the parser fails on the magic bytes.
 
 Detection is by content, not by file extension. Because decompression produces an owned `Vec<u8>`, `use_mmap` and `prefault` have no effect on compressed inputs, and peak memory includes the full decompressed size. For very large compressed files, plan the memory budget accordingly.
 
+!!! warning "Decompression bomb protection"
+    Decompressed output is capped at **1 GiB**. Compressed inputs that would
+    exceed this limit are rejected mid-stream (via `LimitReader`) to prevent
+    OOM kills. The error message includes the actual byte count. If you need
+    to process files larger than 1 GiB, use uncompressed input or mmap.
+
 ## Summary { #summary }
 
 - Use `mmap` + `prefault=True` for cached or RAM-resident files.
