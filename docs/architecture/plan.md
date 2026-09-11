@@ -119,7 +119,7 @@ pub enum FieldType {
 
 `Timestamp` carries an optional chrono format string, parsed from specs like
 `timestamp[ms,format=%Y%m%d]` (unit defaults to `us`). `Decimal128(u8)` takes
-a scale (default 18 via the `decimal128` spec).
+a scale (default 18 via the `decimal128` spec, capped at 38 for Arrow compatibility).
 
 ## FilterPredicate { #filterpredicate }
 
@@ -171,7 +171,8 @@ pub enum FilterPredicate {
 ```
 
 `RegexSpec` pairs the pattern string with its compiled `regex::Regex`; the
-Python filter spec op `"regex"` builds one.
+Python filter spec op `"regex"` builds one. Compiled patterns are capped at
+**1 MiB** to limit memory use and reduce ReDoS risk.
 
 ### Check method { #check-method }
 

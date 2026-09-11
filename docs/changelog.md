@@ -7,6 +7,44 @@ description: Release notes for rypipe, newest first. Tracks features, fixes, and
 
 All notable changes to rypipe, newest first. Versions follow semantic versioning and are tagged in the repository.
 
+## [0.3.2] - 2026-09-11
+
+### Security
+
+- **Decompression bomb protection.** Added 1 GiB limit on decompressed output via `LimitReader`. Compressed inputs (gzip, zstd, lz4) that would decompress beyond 1 GiB are rejected mid-stream to prevent OOM kills.
+- **Regex size limit.** Compiled regex patterns are capped at 1 MiB to reduce ReDoS risk and memory consumption.
+- **Supply chain audit.** Added `cargo-deny` advisory/license/ban checks to CI. Pinned all GitHub Actions to full commit SHAs.
+- **Predicate nesting depth limit.** Filter specs are limited to 128 levels of nesting to prevent stack overflow from adversarial input.
+- **In/NotIn values list cap.** Values lists are capped at 100,000 elements to prevent excessive memory allocation and O(n) per-row scan amplification.
+- **Replace filter empty-old rejection.** `Replace` filter with empty `old` string is rejected to prevent per-row memory amplification (`old=""` inserts `new` before every character).
+- **Decimal128 scale cap.** Scale values are capped at 38 (Arrow maximum) to prevent i8 overflow in the Arrow schema.
+
+### Fixed
+
+- **Filter comparisons on unparseable values.** Typed filter comparisons (`Int64`, `Float64`) now fail when values cannot be parsed, instead of silently comparing as 0/0.0. Division by zero in `ArithOp::Div` now returns false instead of producing infinity/NaN.
+- **Dictionary UTF-8 corruption.** Dictionary merge paths use `from_utf8_lossy` instead of `unwrap_or("")` to preserve corrupt data with replacement characters instead of silently creating empty-string entries.
+- **HashMap unwrap panics in dictionary unification.** `dict.rs` and `parallel.rs` HashMap lookups now use graceful fallback instead of panicking on missing keys from corrupted input.
+- **Dictionary code bounds checks.** Dictionary code indexing in `columnar.rs` now returns `None` for out-of-bounds codes instead of panicking.
+- **Bounds checks on `find_literal` and `in_skip_region`.** Prevent panics when `at > hay.len()` or when opener extends past the target position.
+- **Empty ranges from degenerate splitter.** `bounded.rs` and `parallel.rs` now guard against empty chunk ranges, matching the existing guard in `parallel_stream.rs`.
+- **RowObserver panic safety in bounded path.** Observer hooks in the bounded parse path are now wrapped in `catch_unwind`, matching the parallel path behavior.
+- **`FieldType::FromStr` error type.** Changed from `()` to `String` for actionable error messages that include the bad input.
+- **LimitReader error message.** Decompression bomb error now includes the actual byte count.
+- **`threads=0` rejected.** `resolve_engine` now rejects `threads=0` with a clear error.
+- **`parse_memory_string` validation.** Empty, negative, and non-finite memory strings are now rejected.
+- **Plan parameter validation.** `auto_dict_threshold` (must be 0.0-1.0), `auto_dict_max_size` (must be >= 1), and `max_split_chunks` (must be >= 1) are now validated.
+- **`StrColumn::with_capacity` cap.** Allocation is capped at 1M rows to prevent multi-gigabyte allocations from bad row-size estimates.
+- **Overflow-safe chunk splitting.** `bytes.len() * i / n` replaced with `bytes.len() / n * i` to prevent integer overflow on large files.
+- **TOCTOU mitigation.** Path is canonicalized before file reopen in bounded stream to prevent symlink swap between mmap planning and reading.
+
+### Changed
+
+- **Poisoned lock recovery.** Schema cache and parallel stream locks now recover from poisoned state via `unwrap_or_else(|e| e.into_inner())` instead of panicking.
+- **Unsafe `get_unchecked` removed.** Dictionary code remapping in `columnar.rs` and `dict.rs` uses bounds-checked `get()` instead of `unsafe get_unchecked`.
+- **`warn(unsafe_code)` lint.** Added to `rypipe-core` crate root. Removed blanket `#![allow(unsafe_code)]` from `input.rs`.
+- **Regex size limit raised.** From 256 KiB to 1 MiB to reduce false positives on legitimate patterns.
+- **Dead code removed.** Legacy `run_mapped` and `apply_plan_filter` functions deleted from `bounded.rs`.
+
 ## [0.3.1] - 2026-09-11
 
 ### Fixed
