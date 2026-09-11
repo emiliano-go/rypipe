@@ -247,12 +247,10 @@ pub trait ColumnarSink {
     /// resolution, hash lookups, and attribute scanning.  Used by adapters
     /// that have verified the field identity via `expect_slot` + memcmp.
     ///
-    /// Default: delegates to `put_field` with a synthetic name (slow path).
-    /// Engines that track slot indices should override this.
+    /// Default: discards the value. Engines MUST override this to push
+    /// directly to columns by slot index; the default silently drops data.
     #[inline]
     fn put_field_at(&mut self, _slot: u32, value: Value<'_>) {
-        // Fallback: can't push without a name; discard.
-        // Engines override this to push directly to columns[slot].
         let _ = value;
     }
 
