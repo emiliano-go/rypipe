@@ -378,7 +378,7 @@ impl ParallelStreamingExecutor {
         let split_points = splitter.find_split_points(actual_bytes, num_chunks);
         let mut ranges = crate::decoder::split_points_to_ranges(&split_points, actual_bytes.len());
         if ranges.is_empty() {
-            ranges.push(0..bytes.len());
+            ranges.push(0..actual_bytes.len());
         }
 
         let chunks_with_seq: Vec<(usize, std::ops::Range<usize>)> =
