@@ -145,20 +145,32 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
 
     // Always-true / always-false
     if f.contains("always")? {
-        let val: bool = f.get_item("always")?.unwrap().extract()?;
+        let val: bool = f
+            .get_item("always")?
+            .ok_or_else(|| PlanError::new_err("filter 'always' key missing"))?
+            .extract()?;
         return Ok(FilterPredicate::Always(val));
     }
 
     // Not-field (truthiness negation)
     if f.contains("not_field")? {
-        let field: String = f.get_item("not_field")?.unwrap().extract()?;
+        let field: String = f
+            .get_item("not_field")?
+            .ok_or_else(|| PlanError::new_err("filter 'not_field' key missing"))?
+            .extract()?;
         return Ok(FilterPredicate::NotField { field });
     }
 
     // Column-to-column filter: field_a + op + field_b
     if f.contains("field_a")? && f.contains("field_b")? {
-        let field_a: String = f.get_item("field_a")?.unwrap().extract()?;
-        let field_b: String = f.get_item("field_b")?.unwrap().extract()?;
+        let field_a: String = f
+            .get_item("field_a")?
+            .ok_or_else(|| PlanError::new_err("filter 'field_a' key missing"))?
+            .extract()?;
+        let field_b: String = f
+            .get_item("field_b")?
+            .ok_or_else(|| PlanError::new_err("filter 'field_b' key missing"))?
+            .extract()?;
         let cop = op.parse::<CompareOp>().map_err(|_| {
             let valid = ">, <, >=, <=, ==, !=";
             PlanError::new_err(format!("unsupported compare op {op:?}; valid: {valid}"))
@@ -172,9 +184,18 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
 
     // Replace: field + old + new + cmp_op + value
     if f.contains("old")? && f.contains("new")? {
-        let field: String = f.get_item("field")?.unwrap().extract()?;
-        let old: String = f.get_item("old")?.unwrap().extract()?;
-        let new: String = f.get_item("new")?.unwrap().extract()?;
+        let field: String = f
+            .get_item("field")?
+            .ok_or_else(|| PlanError::new_err("replace filter 'field' key missing"))?
+            .extract()?;
+        let old: String = f
+            .get_item("old")?
+            .ok_or_else(|| PlanError::new_err("replace filter 'old' key missing"))?
+            .extract()?;
+        let new: String = f
+            .get_item("new")?
+            .ok_or_else(|| PlanError::new_err("replace filter 'new' key missing"))?
+            .extract()?;
         let value = f
             .get_item("value")?
             .ok_or_else(|| PlanError::new_err("replace filter must include 'value' key"))?
@@ -201,8 +222,13 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
 
     // Collection membership: field + op + values
     if f.contains("values")? {
-        let field: String = f.get_item("field")?.unwrap().extract()?;
-        let values_py = f.get_item("values")?.unwrap();
+        let field: String = f
+            .get_item("field")?
+            .ok_or_else(|| PlanError::new_err("filter 'field' key missing"))?
+            .extract()?;
+        let values_py = f
+            .get_item("values")?
+            .ok_or_else(|| PlanError::new_err("filter 'values' key missing"))?;
         let values: Vec<String> = values_py.extract()?;
         return Ok(match op.as_str() {
             "in" => FilterPredicate::In { field, values },
@@ -303,7 +329,11 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
                     op: cop,
                     value,
                 },
-                _ => unreachable!(),
+                _ => {
+                    return Err(PlanError::new_err(format!(
+                        "unsupported string transform op {op:?}"
+                    )));
+                }
             }
         }
         "length" => {
