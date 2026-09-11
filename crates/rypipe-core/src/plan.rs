@@ -648,7 +648,12 @@ impl FilterPredicate {
                         ArithOp::Add => field_f64 + arith_value,
                         ArithOp::Sub => field_f64 - arith_value,
                         ArithOp::Mul => field_f64 * arith_value,
-                        ArithOp::Div => field_f64 / arith_value,
+                        ArithOp::Div => {
+                            if arith_value == 0.0 {
+                                return false;
+                            }
+                            field_f64 / arith_value
+                        }
                     };
                     let cmp_f64 = cmp_value.parse::<f64>().unwrap_or(0.0);
                     return apply_op(*cmp_op, result.partial_cmp(&cmp_f64));
