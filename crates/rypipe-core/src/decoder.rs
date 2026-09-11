@@ -192,6 +192,9 @@ pub trait RecordParser: Send + Sync {
 
 /// Sink for decoder events.  The decoder calls `begin_row` / `put_field` /
 /// `end_row` for each record.
+///
+/// Implementations must be `Send + Sync` when used with the parallel or
+/// parallel_streaming executors. `TableBuilder` satisfies this.
 pub trait ColumnarSink {
     fn begin_row(&mut self);
     fn put_field(&mut self, name: &str, value: Value<'_>);
