@@ -7,6 +7,16 @@ description: Release notes for rypipe, newest first. Tracks features, fixes, and
 
 All notable changes to rypipe, newest first. Versions follow semantic versioning and are tagged in the repository.
 
+## [0.3.1] - 2026-09-11
+
+### Fixed
+
+- **Flaky schema cache test.** Removed global counter assertions from `schema_cache_hits_misses_and_plan_changes` that were affected by parallel test interference.
+
+### Changed
+
+- **Publishing CI: test blocker.** Both PyPI and crates.io publishing workflows now run tests as a required gate before publishing.
+
 ## [0.3.0] - 2026-09-11
 
 ### Added
