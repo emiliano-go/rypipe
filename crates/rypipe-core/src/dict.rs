@@ -130,8 +130,16 @@ pub(crate) fn unify_dictionaries(
                 let end = offsets[i + 1] as usize;
                 let val = std::str::from_utf8(&data[start..end]).unwrap_or("");
                 let k: Box<str> = val.into();
-                let g = *global_index.get(&k).unwrap();
-                let local = *index.get(k.as_ref()).unwrap();
+                let Some(&g) = global_index.get(&k) else {
+                    // Entry not in global index (corrupted chunk or adversarial input);
+                    // treat as unmappable, skip remapping for this code.
+                    map.push(i as i32);
+                    continue;
+                };
+                let Some(&local) = index.get(k.as_ref()) else {
+                    map.push(i as i32);
+                    continue;
+                };
                 if g != local {
                     is_identity = false;
                 }
