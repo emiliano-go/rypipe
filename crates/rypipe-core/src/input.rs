@@ -8,6 +8,38 @@ use crate::Result;
 #[allow(dead_code)] // used only when a decompression feature is enabled
 const MAX_DECOMPRESSED_BYTES: u64 = 1 << 30;
 
+/// A `Read` wrapper that aborts once the total bytes read exceeds a limit.
+/// Used to cap decompressed output and prevent decompression-bomb OOM kills.
+#[allow(dead_code)] // used only when a decompression feature is enabled
+struct LimitReader<R> {
+    inner: R,
+    remaining: u64,
+}
+
+#[allow(dead_code)] // used only when a decompression feature is enabled
+impl<R: Read> LimitReader<R> {
+    fn new(inner: R, limit: u64) -> Self {
+        Self {
+            inner,
+            remaining: limit,
+        }
+    }
+}
+
+impl<R: Read> Read for LimitReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n as u64 > self.remaining {
+            self.remaining = 0;
+            return Err(std::io::Error::other(
+                "decompressed output exceeds size limit (possible decompression bomb)",
+            ));
+        }
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
+
 /// Compression codecs recognized by leading magic bytes. Each codec is
 /// compiled in only when its Cargo feature (`gzip`, `zstd`, `lz4`) is
 /// enabled; inputs are detected independently of file extension.
@@ -80,6 +112,7 @@ fn detect_compression(path: &Path) -> Option<Compression> {
 }
 
 /// Decompress `path` with `codec` into an owned buffer.
+/// Aborts early if decompressed output exceeds [`MAX_DECOMPRESSED_BYTES`].
 #[cfg_attr(
     not(any(feature = "gzip", feature = "zstd", feature = "lz4")),
     allow(unused_variables)
@@ -90,39 +123,27 @@ fn decompress(path: &Path, codec: Compression) -> Result<Vec<u8>> {
         Compression::Gzip => {
             let mut out = Vec::new();
             let mut reader = std::fs::File::open(path)?;
-            let mut decoder = flate2::read::GzDecoder::new(&mut reader);
-            decoder.read_to_end(&mut out)?;
-            if out.len() as u64 > MAX_DECOMPRESSED_BYTES {
-                return Err(crate::Error::Io(std::io::Error::other(
-                    "decompressed output exceeds 1 GiB limit (possible decompression bomb)",
-                )));
-            }
+            let decoder = flate2::read::GzDecoder::new(&mut reader);
+            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES)
+                .read_to_end(&mut out)?;
             Ok(out)
         }
         #[cfg(feature = "zstd")]
         Compression::Zstd => {
             let mut out = Vec::new();
             let mut reader = std::fs::File::open(path)?;
-            let mut decoder = zstd::stream::read::Decoder::new(&mut reader)?;
-            decoder.read_to_end(&mut out)?;
-            if out.len() as u64 > MAX_DECOMPRESSED_BYTES {
-                return Err(crate::Error::Io(std::io::Error::other(
-                    "decompressed output exceeds 1 GiB limit (possible decompression bomb)",
-                )));
-            }
+            let decoder = zstd::stream::read::Decoder::new(&mut reader)?;
+            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES)
+                .read_to_end(&mut out)?;
             Ok(out)
         }
         #[cfg(feature = "lz4")]
         Compression::Lz4 => {
             let mut out = Vec::new();
             let mut reader = std::fs::File::open(path)?;
-            let mut decoder = lz4_flex::frame::FrameDecoder::new(&mut reader);
-            decoder.read_to_end(&mut out)?;
-            if out.len() as u64 > MAX_DECOMPRESSED_BYTES {
-                return Err(crate::Error::Io(std::io::Error::other(
-                    "decompressed output exceeds 1 GiB limit (possible decompression bomb)",
-                )));
-            }
+            let decoder = lz4_flex::frame::FrameDecoder::new(&mut reader);
+            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES)
+                .read_to_end(&mut out)?;
             Ok(out)
         }
         // Only reachable when a codec's cargo feature is disabled; detection
