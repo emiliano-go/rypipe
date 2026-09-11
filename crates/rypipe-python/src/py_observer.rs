@@ -4,6 +4,12 @@
 //! Hook errors are printed (unraisable) and swallowed: a broken observer must
 //! never abort a parse. Field-level hooks take the GIL per call, so prefer
 //! row-level hooks from Python.
+//!
+//! **Performance warning**: when used with parallel or parallel_streaming
+//! executors, per-field hooks (`on_put_field`) acquire the GIL from every
+//! worker thread on every field of every row. This serializes all Python
+//! execution and can turn a parallel parse into a GIL-thrashed one. Always
+//! prefer `on_row_accepted`/`on_row_rejected` for parallel workloads.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
