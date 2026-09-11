@@ -1030,45 +1030,49 @@ impl TableBuilder {
                                         Some(crate::plan::FieldType::Int64),
                                         Some(crate::plan::FieldType::Int64),
                                     ) => {
-                                        let ai: i64 =
-                                            lexical::parse(a.as_bytes()).ok().unwrap_or(0);
-                                        let bi: i64 =
-                                            lexical::parse(b.as_bytes()).ok().unwrap_or(0);
+                                        let Some(ai) = lexical::parse::<i64, _>(a.as_bytes()).ok() else {
+                                            return PredicateState::Fail;
+                                        };
+                                        let Some(bi) = lexical::parse(b.as_bytes()).ok() else {
+                                            return PredicateState::Fail;
+                                        };
                                         Some(ai.cmp(&bi))
                                     }
                                     (
                                         Some(crate::plan::FieldType::Float64),
                                         Some(crate::plan::FieldType::Float64),
                                     ) => {
-                                        let af: f64 =
-                                            lexical::parse(a.as_bytes()).ok().unwrap_or(0.0);
-                                        let bf: f64 =
-                                            lexical::parse(b.as_bytes()).ok().unwrap_or(0.0);
+                                        let Some(af) = lexical::parse::<f64, _>(a.as_bytes()).ok() else {
+                                            return PredicateState::Fail;
+                                        };
+                                        let Some(bf) = lexical::parse::<f64, _>(b.as_bytes()).ok() else {
+                                            return PredicateState::Fail;
+                                        };
                                         af.partial_cmp(&bf)
                                     }
                                     (
                                         Some(crate::plan::FieldType::Int64),
                                         Some(crate::plan::FieldType::Float64),
                                     ) => {
-                                        let ai: f64 = lexical::parse::<i64, _>(a.as_bytes())
-                                            .ok()
-                                            .unwrap_or(0)
-                                            as f64;
-                                        let bf: f64 =
-                                            lexical::parse(b.as_bytes()).ok().unwrap_or(0.0);
-                                        ai.partial_cmp(&bf)
+                                        let Some(ai) = lexical::parse::<i64, _>(a.as_bytes()).ok() else {
+                                            return PredicateState::Fail;
+                                        };
+                                        let Some(bf) = lexical::parse::<f64, _>(b.as_bytes()).ok() else {
+                                            return PredicateState::Fail;
+                                        };
+                                        (ai as f64).partial_cmp(&bf)
                                     }
                                     (
                                         Some(crate::plan::FieldType::Float64),
                                         Some(crate::plan::FieldType::Int64),
                                     ) => {
-                                        let af: f64 =
-                                            lexical::parse(a.as_bytes()).ok().unwrap_or(0.0);
-                                        let bi: f64 = lexical::parse::<i64, _>(b.as_bytes())
-                                            .ok()
-                                            .unwrap_or(0)
-                                            as f64;
-                                        af.partial_cmp(&bi)
+                                        let Some(af) = lexical::parse::<f64, _>(a.as_bytes()).ok() else {
+                                            return PredicateState::Fail;
+                                        };
+                                        let Some(bi) = lexical::parse::<i64, _>(b.as_bytes()).ok() else {
+                                            return PredicateState::Fail;
+                                        };
+                                        af.partial_cmp(&(bi as f64))
                                     }
                                     // Mixed typed/untyped or String vs non-numeric type:
                                     // type mismatch; fail the comparison.
@@ -1281,19 +1285,25 @@ impl TableBuilder {
                 cmp_value,
             } => match tb.get_buffered_str(field) {
                 Some(actual) => {
-                    let field_f64 = actual.parse::<f64>().unwrap_or(0.0);
+                    let field_f64 = match actual.parse::<f64>() {
+                        Ok(v) => v,
+                        Err(_) => return PredicateState::Fail,
+                    };
                     let result = match arith_op {
                         crate::plan::ArithOp::Add => field_f64 + arith_value,
                         crate::plan::ArithOp::Sub => field_f64 - arith_value,
                         crate::plan::ArithOp::Mul => field_f64 * arith_value,
                         crate::plan::ArithOp::Div => {
-                            if arith_value == 0.0 {
+                            if *arith_value == 0.0 {
                                 return PredicateState::Fail;
                             }
                             field_f64 / arith_value
                         }
                     };
-                    let cmp_f64 = cmp_value.parse::<f64>().unwrap_or(0.0);
+                    let cmp_f64 = match cmp_value.parse::<f64>() {
+                        Ok(v) => v,
+                        Err(_) => return PredicateState::Fail,
+                    };
                     match result.partial_cmp(&cmp_f64) {
                         Some(ord) => {
                             let pass = match cmp_op {
@@ -1420,7 +1430,10 @@ impl TableBuilder {
             FilterPredicate::Length { field, op, value } => match tb.get_buffered_str(field) {
                 Some(actual) => {
                     let len = actual.len() as f64;
-                    let cmp_val = value.parse::<f64>().unwrap_or(0.0);
+                    let cmp_val = match value.parse::<f64>() {
+                        Ok(v) => v,
+                        Err(_) => return PredicateState::Fail,
+                    };
                     match len.partial_cmp(&cmp_val) {
                         Some(ord) => {
                             let pass = match op {
