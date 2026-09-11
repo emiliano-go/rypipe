@@ -13,10 +13,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python build tools
+        run: pip install maturin pytest pyarrow pandas polars
+
+      - name: Build Python extension
+        run: maturin build --release --manifest-path crates/rypipe-python/Cargo.toml
+
+      - name: Run Python tests
+        run: |
+          pip install target/wheels/*.whl
+          pytest crates/rypipe-python/tests/
+
   # The extension is built against the stable ABI (abi3-py310), so a single
   # wheel per platform covers CPython 3.10 and every later version.
   linux:
     name: Wheel (${{ matrix.platform }} ${{ matrix.target }})
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -59,6 +93,7 @@ jobs:
 
   macos:
     name: Wheel (macOS ${{ matrix.target }})
+    needs: test
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -86,6 +121,7 @@ jobs:
 
   windows:
     name: Wheel (Windows ${{ matrix.target }})
+    needs: test
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -114,6 +150,7 @@ jobs:
 
   sdist:
     name: Source distribution
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
