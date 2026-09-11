@@ -502,10 +502,10 @@ pub struct RegexSpec {
 }
 
 impl RegexSpec {
-    /// Maximum compiled regex size in bytes (256 KiB). Patterns that compile
+    /// Maximum compiled regex size in bytes (1 MiB). Patterns that compile
     /// to larger automata are rejected to limit memory use and reduce ReDoS
     /// risk.
-    const SIZE_LIMIT: usize = 256 * 1024;
+    const SIZE_LIMIT: usize = 1024 * 1024;
 
     pub fn new(pattern: impl Into<String>) -> std::result::Result<Self, regex::Error> {
         let pattern = pattern.into();
