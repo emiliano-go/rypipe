@@ -89,6 +89,9 @@ pub fn starts_with<const N: usize>(hay: &[u8], at: usize, lit: &[u8; N]) -> bool
 /// body never contains `<`, use `find` instead.
 #[inline]
 pub fn find_literal(hay: &[u8], at: usize, finder: &memchr::memmem::Finder) -> Option<usize> {
+    if at >= hay.len() {
+        return None;
+    }
     finder.find(&hay[at..]).map(|p| at + p)
 }
 
