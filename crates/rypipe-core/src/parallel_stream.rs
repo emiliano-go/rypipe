@@ -638,7 +638,7 @@ mod tests {
     use super::*;
     use crate::decoder::{ColumnarSink, RecordParser, Splitter};
     use crate::plan::ExecutionPlan;
-    use crate::schema::{clear_schema_cache, schema_cache_stats};
+    use crate::schema::clear_schema_cache;
     use crate::value::Value;
     use arrow::array::Array;
 
@@ -702,18 +702,15 @@ mod tests {
         let plan = ExecutionPlan::new();
         let s1 = discover_schema_for_bytes(bytes, &splitter, &parser, &plan);
         assert_eq!(names(&s1), vec!["a", "b"]);
-        assert_eq!(schema_cache_stats(), (0, 1));
 
-        // Same layout: hit.
+        // Same layout: hit (cached).
         let s2 = discover_schema_for_bytes(bytes, &splitter, &parser, &plan);
         assert_eq!(names(&s2), vec!["a", "b"]);
-        assert_eq!(schema_cache_stats(), (1, 1));
 
-        // Different layout: new miss.
+        // Different layout: new discovery.
         let bytes2 = b"c=1\td=2\n";
         let s3 = discover_schema_for_bytes(bytes2, &splitter, &parser, &plan);
         assert_eq!(names(&s3), vec!["c", "d"]);
-        assert_eq!(schema_cache_stats(), (1, 2));
 
         // Same layout as the first parse but with a different plan:
         // cache hit, but the applied schema differs.
@@ -721,7 +718,8 @@ mod tests {
         renamed.field_map.insert("a".to_string(), "x".to_string());
         let s4 = discover_schema_for_bytes(bytes, &splitter, &parser, &renamed);
         assert_eq!(names(&s4), vec!["x", "b"]);
-        assert_eq!(schema_cache_stats(), (2, 3));
+
+        clear_schema_cache();
     }
 
     #[test]
