@@ -50,9 +50,34 @@ pub fn execution_plan_from_kwargs(
     }
 
     plan.auto_dict = auto_dict;
+
+    if let Some(t) = auto_dict_threshold {
+        if !t.is_finite() || t < 0.0 || t > 1.0 {
+            return Err(crate::PlanError::new_err(format!(
+                "auto_dict_threshold must be between 0.0 and 1.0, got {t}"
+            )));
+        }
+    }
     plan.dict_threshold = auto_dict_threshold;
+
+    if let Some(m) = auto_dict_max_size {
+        if m == 0 {
+            return Err(crate::PlanError::new_err(
+                "auto_dict_max_size must be >= 1",
+            ));
+        }
+    }
     plan.dict_max_size = auto_dict_max_size;
+
     plan.strict_types = strict_types;
+
+    if let Some(m) = max_split_chunks {
+        if m == 0 {
+            return Err(crate::PlanError::new_err(
+                "max_split_chunks must be >= 1",
+            ));
+        }
+    }
     plan.max_split_chunks = max_split_chunks;
 
     if let Some(obs) = observer {
