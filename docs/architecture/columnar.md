@@ -150,7 +150,7 @@ dictionaries. The incremental path:
 2. Find first divergent dictionary across chunks
 3. Build `SeedDict` from first chunk
 4. `unify_dictionaries`: global dict + per-chunk remap tables (O(dict_size))
-5. `remap_codes`: in-place code remap via `get_unchecked` (serial loop over
+5. `remap_codes`: in-place code remap via bounds-checked `get` (serial loop over
    chunk engines; only step 1 runs under rayon)
 6. `replace_dict`: swap local dict for unified dict
 
