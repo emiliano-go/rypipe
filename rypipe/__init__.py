@@ -320,7 +320,7 @@ def iter_record_batches(
         yield from ad.iter_record_batches(str(path), memory=memory, batch_size=batch_size, **kwargs)  # type: ignore
         return
     # Generic fallback: use bounded read then split (still materializes, but works for any adapter)
-    table = read(path, format=fmt, **kwargs) if kwargs else read(path, format=fmt, **kwargs)
+    table = read(path, format=fmt, **kwargs)
     # If table is huge, this still materializes; the true streaming path requires adapter support.
     if batch_size is None:
         yield from table.to_batches()
