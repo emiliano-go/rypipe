@@ -66,7 +66,12 @@ impl ParallelExecutor {
         let t_split = Instant::now();
         let split_points = splitter.find_split_points(bytes, num_chunks);
         SPLIT_SCAN_NS.store(t_split.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let ranges = split_points_to_ranges(&split_points, bytes.len());
+        let mut ranges = split_points_to_ranges(&split_points, bytes.len());
+
+        // Guard against degenerate splitter output that produces no ranges.
+        if ranges.is_empty() {
+            ranges.push(0..bytes.len());
+        }
 
         let est_row = splitter
             .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])

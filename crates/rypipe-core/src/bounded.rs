@@ -103,7 +103,12 @@ impl BoundedExecutor {
             return Ok(());
         }
 
-        let (chunks, rows_per_batch, bytes_per_row) = self.plan_chunks(bytes, splitter);
+        let (mut chunks, rows_per_batch, bytes_per_row) = self.plan_chunks(bytes, splitter);
+
+        // Guard against degenerate splitter output that produces no ranges.
+        if chunks.is_empty() {
+            chunks.push(0..bytes.len());
+        }
 
         let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
         let mut rows_in_batch = 0usize;
@@ -268,7 +273,13 @@ impl BoundedExecutor {
             return Ok(());
         }
 
-        let (chunks, rows_per_batch, bytes_per_row) = self.plan_chunks(bytes, splitter);
+        let (mut chunks, rows_per_batch, bytes_per_row) = self.plan_chunks(bytes, splitter);
+
+        // Guard against degenerate splitter output that produces no ranges.
+        if chunks.is_empty() {
+            chunks.push(0..bytes.len());
+        }
+
         drop(input);
 
         let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
