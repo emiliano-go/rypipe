@@ -1326,7 +1326,9 @@ impl ColumnBuilder {
             ColumnBuilder::Boolean(_) => DataType::Boolean,
             ColumnBuilder::Date32(_) => DataType::Date32,
             ColumnBuilder::Timestamp(unit, _, _) => DataType::Timestamp(*unit, None),
-            ColumnBuilder::Decimal128(scale, _) => DataType::Decimal128(38, *scale as i8),
+            ColumnBuilder::Decimal128(scale, _) => {
+                DataType::Decimal128(38, (*scale).min(38) as i8)
+            }
             ColumnBuilder::Dictionary { .. } => {
                 DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
             }
@@ -1411,7 +1413,7 @@ impl ColumnBuilder {
             ColumnBuilder::Decimal128(scale, v) => {
                 let values: Vec<Option<i128>> = (0..v.len()).map(|i| v.get(i)).collect();
                 let arr: Decimal128Array = values.into_iter().collect();
-                Arc::new(arr.with_precision_and_scale(38, *scale as i8)?)
+                Arc::new(arr.with_precision_and_scale(38, (*scale).min(38) as i8)?)
             }
             ColumnBuilder::Dictionary {
                 codes,
