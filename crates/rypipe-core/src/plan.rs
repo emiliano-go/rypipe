@@ -648,7 +648,12 @@ impl FilterPredicate {
                     let field_f64 = match &a {
                         crate::columnar::TypedValue::Int64(v) => *v as f64,
                         crate::columnar::TypedValue::Float64(v) => *v,
-                        crate::columnar::TypedValue::Str(s) => s.parse::<f64>().unwrap_or(0.0),
+                        crate::columnar::TypedValue::Str(s) => {
+                            match s.parse::<f64>() {
+                                Ok(v) => v,
+                                Err(_) => return false,
+                            }
+                        }
                         _ => return false,
                     };
                     let result = match arith_op {
@@ -662,7 +667,10 @@ impl FilterPredicate {
                             field_f64 / arith_value
                         }
                     };
-                    let cmp_f64 = cmp_value.parse::<f64>().unwrap_or(0.0);
+                    let cmp_f64 = match cmp_value.parse::<f64>() {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
                     return apply_op(*cmp_op, result.partial_cmp(&cmp_f64));
                 }
                 false
@@ -718,7 +726,10 @@ impl FilterPredicate {
                 match actual {
                     Some(s) => {
                         let len = s.len() as f64;
-                        let cmp_val = value.parse::<f64>().unwrap_or(0.0);
+                        let cmp_val = match value.parse::<f64>() {
+                            Ok(v) => v,
+                            Err(_) => return false,
+                        };
                         apply_op(*op, len.partial_cmp(&cmp_val))
                     }
                     None => false,
