@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use std::io::Read;
 use std::path::Path;
 
@@ -25,6 +23,8 @@ pub struct MmapHandle {
 #[cfg(feature = "mmap")]
 impl MmapHandle {
     fn new(file: std::fs::File, prefault: bool) -> Result<Self> {
+        // SAFETY: memmap2::Mmap::map requires the file to be valid and not
+        // concurrently modified via unsafe means. Normal File usage satisfies this.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         #[cfg(unix)]
         {
