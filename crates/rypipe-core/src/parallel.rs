@@ -158,7 +158,7 @@ impl ParallelExecutor {
             if schemas_consistent(&engines) {
                 // Find first dict column that needs unification across chunks.
                 let mut unify_col: Option<String> = None;
-                for col_name in &engines[0].column_order.clone() {
+                for col_name in &engines[0].column_order {
                     let first_idx = engines[0].field_index.get(col_name).copied();
                     if let Some(idx) = first_idx {
                         if engines[0].columns[idx].variant_key() == "dictionary" {
