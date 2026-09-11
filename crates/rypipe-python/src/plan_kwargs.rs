@@ -109,8 +109,21 @@ pub fn execution_plan_from_kwargs(
     Ok(plan)
 }
 
+/// Maximum nesting depth for filter specs to prevent stack overflow.
+const MAX_PREDICATE_DEPTH: usize = 128;
+
 /// Parse one filter spec (leaf or compound) into a [`FilterPredicate`].
 fn parse_filter_spec(spec: &Bound<'_, PyAny>) -> PyResult<FilterPredicate> {
+    parse_filter_spec_depth(spec, 0)
+}
+
+fn parse_filter_spec_depth(spec: &Bound<'_, PyAny>, depth: usize) -> PyResult<FilterPredicate> {
+    if depth >= MAX_PREDICATE_DEPTH {
+        return Err(PlanError::new_err(format!(
+            "filter spec nesting exceeds maximum depth of {MAX_PREDICATE_DEPTH}"
+        )));
+    }
+
     let dict = spec.cast::<PyDict>().map_err(|_| {
         let ty = spec
             .get_type()
@@ -122,13 +135,13 @@ fn parse_filter_spec(spec: &Bound<'_, PyAny>) -> PyResult<FilterPredicate> {
 
     // Compound forms take precedence over leaves.
     if let Some(item) = dict.get_item("and")? {
-        return combine_list(&item, FilterPredicate::all, "'and'");
+        return combine_list(&item, FilterPredicate::all, "'and'", depth);
     }
     if let Some(item) = dict.get_item("or")? {
-        return combine_list(&item, FilterPredicate::any, "'or'");
+        return combine_list(&item, FilterPredicate::any, "'or'", depth);
     }
     if let Some(item) = dict.get_item("not")? {
-        let inner = parse_filter_spec(&item)?;
+        let inner = parse_filter_spec_depth(&item, depth + 1)?;
         return Ok(FilterPredicate::not(inner));
     }
 
@@ -140,6 +153,7 @@ fn combine_list(
     item: &Bound<'_, PyAny>,
     combiner: fn(FilterPredicate, FilterPredicate) -> FilterPredicate,
     label: &str,
+    depth: usize,
 ) -> PyResult<FilterPredicate> {
     let specs: Vec<Bound<'_, PyAny>> = item.extract().map_err(|_| {
         PlanError::new_err(format!("{label} filter expects a list of filter specs"))
@@ -150,9 +164,9 @@ fn combine_list(
             "{label} filter requires at least one sub-filter"
         )));
     };
-    let mut acc = parse_filter_spec(&first)?;
+    let mut acc = parse_filter_spec_depth(&first, depth + 1)?;
     for spec in iter {
-        acc = combiner(acc, parse_filter_spec(&spec)?);
+        acc = combiner(acc, parse_filter_spec_depth(&spec, depth + 1)?);
     }
     Ok(acc)
 }
@@ -253,6 +267,12 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             .get_item("values")?
             .ok_or_else(|| PlanError::new_err("filter 'values' key missing"))?;
         let values: Vec<String> = values_py.extract()?;
+        if values.len() > 100_000 {
+            return Err(PlanError::new_err(format!(
+                "values list too large ({} elements, max 100,000)",
+                values.len()
+            )));
+        }
         return Ok(match op.as_str() {
             "in" => FilterPredicate::In { field, values },
             "not_in" => FilterPredicate::NotIn { field, values },
