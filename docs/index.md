@@ -1,10 +1,8 @@
 <div align="center">
+  <img src="overrides/badge.png" alt="rypipe badge" width="128"/>
+</div>
 
 # rypipe documentation { #rypipe-documentation }
-
-<img src="overrides/badge.png" alt="rypipe badge" width="400"/>
-
-</div>
 
 `rypipe` is a format- and source-agnostic ingestion framework that provides a common
 execution runtime for turning arbitrary record-oriented data sources into typed
@@ -133,5 +131,5 @@ rypipe/
 ```
 
 <div align="center">
-  <img src="overrides/banner.png" alt="rypipe banner" width="600"/>
+  <img src="overrides/banner.png" alt="rypipe banner" style="max-width: 100%; height: auto;"/>
 </div>
