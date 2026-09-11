@@ -11,4 +11,4 @@ authors = ["Emiliano Gandini <emiliano.gandini@protonmail.com>"]
 rypipe-core = { path = "../rypipe-core" }
 proptest = "1"
 memchr = "2"
-arrow = { version = "55.2", default-features = false }
+arrow = { version = "59.3", default-features = false }
