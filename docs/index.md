@@ -2,7 +2,9 @@
   <img src="overrides/badge.png" alt="rypipe badge" width="128"/>
 </div>
 
-# rypipe documentation { #rypipe-documentation }
+<div align="center">
+  <h1 id="rypipe-documentation">rypipe documentation</h1>
+</div>
 
 `rypipe` is a format- and source-agnostic ingestion framework that provides a common
 execution runtime for turning arbitrary record-oriented data sources into typed
