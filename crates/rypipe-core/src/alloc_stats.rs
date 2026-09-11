@@ -101,6 +101,10 @@ pub fn reset() {
 pub struct Counting<A>(pub A);
 
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
+    /// # Safety
+    ///
+    /// Delegates to the inner allocator. The atomic counter increments are
+    /// safe and do not affect the allocation contract.
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Relaxed);
@@ -114,6 +118,10 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         self.0.alloc(layout)
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must have been returned by a previous call to `alloc` or `realloc`
+    /// on this allocator. Delegates to the inner allocator.
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         FREES.fetch_add(1, Relaxed);
@@ -121,6 +129,10 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         self.0.dealloc(ptr, layout)
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must have been returned by a previous call to `alloc` or `realloc`
+    /// on this allocator. Delegates to the inner allocator.
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         REALLOCS.fetch_add(1, Relaxed);
