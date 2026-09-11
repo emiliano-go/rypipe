@@ -1,5 +1,8 @@
 <p align="center">
-  <h1 align="center">rypipe</h1>
+  <img src="https://raw.githubusercontent.com/emiliano-go/rypipe/refs/heads/master/docs/overrides/icon.png" alt="rypipe" width="128"/>
+</p>
+<p align="center">
+  <strong style="font-size: 2.5em;">rypipe</strong>
 </p>
 
 <p align="center">
@@ -177,3 +180,9 @@ pytest crates/rypipe-python/tests/
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/emiliano-go/rypipe/refs/heads/master/docs/overrides/badge.png" alt="rypipe badge" width="400"/>
+</p>
