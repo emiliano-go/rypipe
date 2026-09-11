@@ -159,9 +159,8 @@ pub fn apply_remap(codes: &mut [Option<i32>], remap: &RemapTable) {
         return;
     }
     for v in codes.iter_mut().flatten() {
-        debug_assert!((*v as usize) < remap.map.len(), "code out of bounds");
-        unsafe {
-            *v = *remap.map.get_unchecked(*v as usize);
+        if let Some(&remapped) = remap.map.get(*v as usize) {
+            *v = remapped;
         }
     }
 }
