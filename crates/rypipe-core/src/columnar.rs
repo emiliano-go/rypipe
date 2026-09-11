@@ -1017,10 +1017,11 @@ impl ColumnBuilder {
                 data,
                 offsets,
                 ..
-            } => codes.get(index).map(|code| {
-                let start = offsets[*code as usize] as usize;
-                let end = offsets[*code as usize + 1] as usize;
-                std::str::from_utf8(&data[start..end]).unwrap_or("")
+            } => codes.get(index).and_then(|code| {
+                let ci = *code as usize;
+                let start = *offsets.get(ci)? as usize;
+                let end = *offsets.get(ci + 1)? as usize;
+                Some(std::str::from_utf8(&data[start..end]).unwrap_or(""))
             }),
             _ => None,
         }
@@ -1045,10 +1046,11 @@ impl ColumnBuilder {
                 data,
                 offsets,
                 ..
-            } => codes.get(index).map(|code| {
-                let start = offsets[*code as usize] as usize;
-                let end = offsets[*code as usize + 1] as usize;
-                String::from_utf8_lossy(&data[start..end]).into_owned()
+            } => codes.get(index).and_then(|code| {
+                let ci = *code as usize;
+                let start = *offsets.get(ci)? as usize;
+                let end = *offsets.get(ci + 1)? as usize;
+                Some(String::from_utf8_lossy(&data[start..end]).into_owned())
             }),
         }
     }
@@ -1069,10 +1071,11 @@ impl ColumnBuilder {
                 data,
                 offsets,
                 ..
-            } => codes.get(index).map(|&idx| {
-                let start = offsets[idx as usize] as usize;
-                let end = offsets[idx as usize + 1] as usize;
-                TypedValue::Str(std::str::from_utf8(&data[start..end]).unwrap_or(""))
+            } => codes.get(index).and_then(|&idx| {
+                let i = idx as usize;
+                let start = *offsets.get(i)? as usize;
+                let end = *offsets.get(i + 1)? as usize;
+                Some(TypedValue::Str(std::str::from_utf8(&data[start..end]).unwrap_or("")))
             }),
         }
     }
