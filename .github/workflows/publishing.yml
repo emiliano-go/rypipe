@@ -17,21 +17,21 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@544eadc6bf3d226fd7a7a9f0dc5b5bf7ca0675b9 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: Test workspace
         run: cargo test --workspace --all-features
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@0f07f7f756721ebd886c2462646a35f78a8bc4de # v5
         with:
           python-version: "3.13"
 
@@ -75,10 +75,10 @@ jobs:
             platform: musllinux
             manylinux: musllinux_1_2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@544eadc6bf3d226fd7a7a9f0dc5b5bf7ca0675b9 # v4
 
       - name: Build wheel
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
@@ -86,7 +86,7 @@ jobs:
           sccache: "true"
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@34622df80861c3ed63eb2bff892de2f1fbf4c9da # v7
         with:
           name: wheels-${{ matrix.platform }}-${{ matrix.target }}
           path: dist/
@@ -100,21 +100,21 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@544eadc6bf3d226fd7a7a9f0dc5b5bf7ca0675b9 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0f07f7f756721ebd886c2462646a35f78a8bc4de # v5
         with:
           python-version: "3.13"
 
       - name: Build wheel
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist
           sccache: "true"
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@34622df80861c3ed63eb2bff892de2f1fbf4c9da # v7
         with:
           name: wheels-macos-${{ matrix.target }}
           path: dist/
@@ -128,22 +128,22 @@ jobs:
       matrix:
         target: [x64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@544eadc6bf3d226fd7a7a9f0dc5b5bf7ca0675b9 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0f07f7f756721ebd886c2462646a35f78a8bc4de # v5
         with:
           python-version: "3.13"
           architecture: ${{ matrix.target }}
 
       - name: Build wheel
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist
           sccache: "true"
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@34622df80861c3ed63eb2bff892de2f1fbf4c9da # v7
         with:
           name: wheels-windows-${{ matrix.target }}
           path: dist/
@@ -153,16 +153,16 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@544eadc6bf3d226fd7a7a9f0dc5b5bf7ca0675b9 # v4
 
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           command: sdist
           args: --out dist
 
       - name: Upload sdist
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@34622df80861c3ed63eb2bff892de2f1fbf4c9da # v7
         with:
           name: wheels-sdist
           path: dist/
@@ -178,7 +178,7 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@fdafc3f9f2e2a522dc1d230e6a03de57a1e71c95 # v8
         with:
           pattern: wheels-*
           merge-multiple: true
@@ -188,7 +188,7 @@ jobs:
         run: ls -l dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           # Wheel filenames for an already-published version are burned on
           # PyPI; retries (e.g. after fixing a rejected sdist) must skip them.
