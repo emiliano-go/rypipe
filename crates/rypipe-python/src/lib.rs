@@ -116,6 +116,12 @@ fn resolve_engine<'py>(
 fn parse_memory_string(s: &str) -> PyResult<u64> {
     let s = s.trim();
 
+    if s.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "empty memory string",
+        ));
+    }
+
     // Find where the numeric part ends.
     // Walk from the start, past digits and at most one decimal point.
     let mut num_end = 0;
@@ -141,6 +147,12 @@ fn parse_memory_string(s: &str) -> PyResult<u64> {
     let num: f64 = num_str.parse().map_err(|_| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid memory value: {s:?}"))
     })?;
+
+    if !num.is_finite() || num <= 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "memory value must be a positive finite number, got {num}"
+        )));
+    }
 
     let unit_upper = unit_str.to_uppercase();
     let multiplier: u64 = match unit_upper.as_str() {
