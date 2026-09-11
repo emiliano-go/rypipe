@@ -217,6 +217,8 @@ pub(crate) struct StrColumn {
 
 impl StrColumn {
     fn with_capacity(cap: usize) -> Self {
+        // Cap to prevent multi-gigabyte allocations from bad estimates.
+        let cap = cap.min(1_000_000);
         let mut offsets = Vec::with_capacity(cap + 1);
         offsets.push(0);
         StrColumn {
