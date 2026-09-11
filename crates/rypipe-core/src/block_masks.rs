@@ -196,6 +196,9 @@ unsafe fn mask64(p: *const u8, needle: u8) -> u64 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// `p` must point to at least 64 readable bytes.
 unsafe fn mask64_avx2(p: *const u8, needle: u8) -> u64 {
     use std::arch::x86_64::*;
     let n = _mm256_set1_epi8(needle as i8);
@@ -210,6 +213,9 @@ unsafe fn mask64_avx2(p: *const u8, needle: u8) -> u64 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
+/// # Safety
+///
+/// `p` must point to at least 64 readable bytes.
 unsafe fn mask64_sse2(p: *const u8, needle: u8) -> u64 {
     use std::arch::x86_64::*;
     let n = _mm_set1_epi8(needle as i8);
@@ -224,6 +230,9 @@ unsafe fn mask64_sse2(p: *const u8, needle: u8) -> u64 {
 }
 
 #[expect(dead_code, reason = "fallback for non-x86_64 targets")]
+/// # Safety
+///
+/// `p` must point to at least 64 readable bytes.
 unsafe fn mask64_scalar(p: *const u8, needle: u8) -> u64 {
     let mut mask = 0u64;
     for i in 0..64 {
