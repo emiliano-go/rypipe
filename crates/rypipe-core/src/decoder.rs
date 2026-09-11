@@ -119,6 +119,12 @@ pub trait Splitter: Send + Sync {
 
     /// Find split points.  **Do not override** without a measured reason.
     ///
+    /// Returns a sorted list of byte offsets where it is safe to split the
+    /// input into independent chunks. The return value must satisfy:
+    /// - Sorted ascending, no duplicates.
+    /// - First element is `0`, last element is `bytes.len()`.
+    /// - All values are `<= bytes.len()`.
+    ///
     /// Default implementation:
     /// 1. Nominal offsets at `bytes.len() * i / n` for `i in 1..n`.
     /// 2. `par_iter` over nominals (rayon), each calling `next_record_start`.
