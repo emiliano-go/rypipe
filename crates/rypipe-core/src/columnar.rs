@@ -1021,7 +1021,7 @@ impl ColumnBuilder {
                 let ci = *code as usize;
                 let start = *offsets.get(ci)? as usize;
                 let end = *offsets.get(ci + 1)? as usize;
-                Some(std::str::from_utf8(&data[start..end]).unwrap_or(""))
+                std::str::from_utf8(&data[start..end]).ok()
             }),
             _ => None,
         }
@@ -1075,7 +1075,8 @@ impl ColumnBuilder {
                 let i = idx as usize;
                 let start = *offsets.get(i)? as usize;
                 let end = *offsets.get(i + 1)? as usize;
-                Some(TypedValue::Str(std::str::from_utf8(&data[start..end]).unwrap_or("")))
+                let s = std::str::from_utf8(&data[start..end]).ok()?;
+                Some(TypedValue::Str(s))
             }),
         }
     }
@@ -1215,7 +1216,10 @@ impl ColumnBuilder {
                 for i in 0..(b_offsets.len() - 1) {
                     let start = b_offsets[i] as usize;
                     let end = b_offsets[i + 1] as usize;
-                    let val = std::str::from_utf8(&b_data[start..end]).unwrap_or("");
+                    let val = match std::str::from_utf8(&b_data[start..end]) {
+                        Ok(s) => s,
+                        Err(_) => "",
+                    };
                     remap.push(dict_code(a_data, a_offsets, a_index, val));
                 }
                 for c in b_codes.iter() {
