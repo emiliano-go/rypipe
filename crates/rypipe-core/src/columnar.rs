@@ -1374,7 +1374,11 @@ impl ColumnBuilder {
                 },
                 ColumnBuilder::Decimal128(scale, _) => {
                     let arr: Decimal128Array = PrimitiveArray::from(vec![None::<i128>; 0]);
-                    Arc::new(arr.with_precision_and_scale(38, *scale as i8).unwrap())
+                    Arc::new(arr.with_precision_and_scale(38, *scale as i8).map_err(|e| {
+                        crate::Error::Arrow(arrow::error::ArrowError::InvalidArgumentError(
+                            e.to_string(),
+                        ))
+                    })?)
                 }
                 ColumnBuilder::Dictionary { .. } => {
                     let keys: Int32Array = vec![None::<i32>; 0].into_iter().collect();
