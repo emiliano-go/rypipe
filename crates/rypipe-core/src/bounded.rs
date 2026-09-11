@@ -274,7 +274,11 @@ impl BoundedExecutor {
         let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
         let mut rows_in_batch = 0usize;
 
-        let mut file = File::open(path)?;
+        // Reopen the file for streaming reads. Canonicalize first to mitigate
+        // TOCTOU if the path is a symlink that could be swapped between the
+        // mmap planning pass and this reopen.
+        let real_path = std::fs::canonicalize(path)?;
+        let mut file = File::open(&real_path)?;
         // Reusable buffer sized to the largest chunk to avoid per-chunk alloc.
         let max_chunk = chunks.iter().map(|r| r.len()).max().unwrap_or(0);
         let mut chunk_buf = Vec::with_capacity(max_chunk);
