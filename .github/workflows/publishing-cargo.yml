@@ -15,8 +15,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
   publish:
     name: Publish rypipe-core
+    needs: test
     runs-on: ubuntu-latest
     environment:
       name: cargo
