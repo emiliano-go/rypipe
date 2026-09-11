@@ -233,6 +233,11 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             .get_item("new")?
             .ok_or_else(|| PlanError::new_err("replace filter 'new' key missing"))?
             .extract()?;
+        if old.is_empty() {
+            return Err(PlanError::new_err(
+                "replace filter 'old' must not be empty (would insert before every character)",
+            ));
+        }
         let value = f
             .get_item("value")?
             .ok_or_else(|| PlanError::new_err("replace filter must include 'value' key"))?
