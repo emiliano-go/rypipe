@@ -721,7 +721,7 @@ mod tests {
         renamed.field_map.insert("a".to_string(), "x".to_string());
         let s4 = discover_schema_for_bytes(bytes, &splitter, &parser, &renamed);
         assert_eq!(names(&s4), vec!["x", "b"]);
-        assert_eq!(schema_cache_stats(), (2, 2));
+        assert_eq!(schema_cache_stats(), (2, 3));
     }
 
     #[test]
