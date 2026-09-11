@@ -196,6 +196,7 @@ pub trait RecordParser: Send + Sync {
 /// Implementations must be `Send + Sync` when used with the parallel or
 /// parallel_streaming executors. `TableBuilder` satisfies this.
 pub trait ColumnarSink {
+    /// Begin a new row. Must be paired with exactly one `end_row` per row.
     fn begin_row(&mut self);
     fn put_field(&mut self, name: &str, value: Value<'_>);
 
@@ -227,6 +228,7 @@ pub trait ColumnarSink {
         }
     }
 
+    /// End the current row. Must be paired with exactly one `begin_row` per row.
     fn end_row(&mut self);
 
     /// Return `false` to signal that the engine will drop this field.
