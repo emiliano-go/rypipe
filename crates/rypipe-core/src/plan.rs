@@ -502,9 +502,16 @@ pub struct RegexSpec {
 }
 
 impl RegexSpec {
+    /// Maximum compiled regex size in bytes (256 KiB). Patterns that compile
+    /// to larger automata are rejected to limit memory use and reduce ReDoS
+    /// risk.
+    const SIZE_LIMIT: usize = 256 * 1024;
+
     pub fn new(pattern: impl Into<String>) -> std::result::Result<Self, regex::Error> {
         let pattern = pattern.into();
-        let compiled = regex::Regex::new(&pattern)?;
+        let compiled = regex::RegexBuilder::new(&pattern)
+            .size_limit(Self::SIZE_LIMIT)
+            .build()?;
         Ok(Self { pattern, compiled })
     }
 }
@@ -649,7 +656,7 @@ impl FilterPredicate {
                         ArithOp::Sub => field_f64 - arith_value,
                         ArithOp::Mul => field_f64 * arith_value,
                         ArithOp::Div => {
-                            if arith_value == 0.0 {
+                            if *arith_value == 0.0 {
                                 return false;
                             }
                             field_f64 / arith_value
