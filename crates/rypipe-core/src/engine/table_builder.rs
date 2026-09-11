@@ -1286,7 +1286,12 @@ impl TableBuilder {
                         crate::plan::ArithOp::Add => field_f64 + arith_value,
                         crate::plan::ArithOp::Sub => field_f64 - arith_value,
                         crate::plan::ArithOp::Mul => field_f64 * arith_value,
-                        crate::plan::ArithOp::Div => field_f64 / arith_value,
+                        crate::plan::ArithOp::Div => {
+                            if arith_value == 0.0 {
+                                return PredicateState::Fail;
+                            }
+                            field_f64 / arith_value
+                        }
                     };
                     let cmp_f64 = cmp_value.parse::<f64>().unwrap_or(0.0);
                     match result.partial_cmp(&cmp_f64) {
