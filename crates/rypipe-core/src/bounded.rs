@@ -120,7 +120,21 @@ impl BoundedExecutor {
                 Arc::clone(&plan),
             );
             parser.validate(chunk_bytes)?;
-            parser.parse_chunk_generic(chunk_bytes, &mut chunk_engine)?;
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parser.parse_chunk_generic(chunk_bytes, &mut chunk_engine)
+            }))
+            .unwrap_or_else(|payload| {
+                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                Err(crate::Error::Parser(format!(
+                    "worker panicked during bounded parse: {msg}"
+                )))
+            })?;
 
             let chunk_rows = chunk_engine.num_rows();
             batch_engine.extend(chunk_engine)?;
