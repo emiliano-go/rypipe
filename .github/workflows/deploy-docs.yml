@@ -22,7 +22,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@544eadc6bf3d226fd7a7a9f0dc5b5bf7ca0675b9 # v4
+      - uses: actions/checkout@50fbc622fc4ef5163becd7fab6573eac35f8462e # v4
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
       - uses: actions/setup-python@0f07f7f756721ebd886c2462646a35f78a8bc4de # v5
         with:
