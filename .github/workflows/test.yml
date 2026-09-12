@@ -122,7 +122,7 @@ jobs:
           key: ${{ matrix.python-version }}
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@0f07f7f756721ebd886c2462646a35f78a8bc4de # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v5
         with:
           python-version: ${{ matrix.python-version }}
 
