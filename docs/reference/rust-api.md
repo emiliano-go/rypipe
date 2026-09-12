@@ -276,14 +276,16 @@ pub enum FieldType {
     Boolean,
     Dictionary,
     Date32,
-    Timestamp(TimeUnit),
+    Timestamp(TimeUnit, Option<Box<str>>),
+    Decimal128(u8),
 }
 
 impl std::str::FromStr for FieldType {
-    type Err = ();
+    type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err>;
     // Recognized: "string", "int64", "float64", "bool", "boolean",
-    // "dictionary", "date32", "timestamp", "timestamp[s]", etc.
+    // "dictionary", "date32", "timestamp", "timestamp[s]", "decimal128",
+    // "decimal128(scale)", etc.
 }
 ```
 
@@ -497,7 +499,7 @@ Callback trait for streaming reads without batch collection.
 
 ```rust
 pub trait BatchConsumer {
-    fn accept(&mut self, batch: RecordBatch) -> Result<()>;
+    fn consume(&mut self, batch: RecordBatch) -> Result<()>;
 }
 ```
 
