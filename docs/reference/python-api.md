@@ -494,7 +494,7 @@ accept `memory=` for bounded-memory streaming when the pipeline supports
 |----------|---------|-------------|
 | `rypipe.collect(pipeline, memory=None)` | `list[dict]` | Collect all rows. |
 | `rypipe.to_arrow(pipeline)` | `pyarrow.Table` | Materialize to table. |
-| `rypipe.to_pandas(pipeline, memory=None, dtype_backend="pyarrow")` | `pd.DataFrame` | Materialize to pandas. |
+| `rypipe.to_pandas(pipeline, memory=None, dtype_backend="pyarrow", chunksize=None)` | `pd.DataFrame` | Materialize to pandas. `chunksize` controls rows per intermediate DataFrame chunk. |
 | `rypipe.to_polars(pipeline, memory=None)` | `pl.DataFrame` | Materialize to Polars. |
 | `rypipe.to_csv(pipeline, path, ...)` | `None` | Write to CSV. |
 | `rypipe.to_parquet(pipeline, path, memory=None, ...)` | `None` | Write to Parquet. |
