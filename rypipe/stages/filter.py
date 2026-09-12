@@ -350,6 +350,14 @@ class FilterRows:
             self._predicate = _IsTypePredicate(field, is_type)
         elif field is not None and op is not None and value is not None:
             self._filter_spec = {"field": field, "op": op, "value": value}
+            _EXPRESSION_ONLY_OPS = frozenset({
+                "strip", "lstrip", "rstrip", "lower", "upper", "length",
+            })
+            if op in _EXPRESSION_ONLY_OPS:
+                raise ValueError(
+                    f"FilterRows keyword args do not support op={op!r}; "
+                    f"use the expression API instead: col({field!r}).{op}(...)"
+                )
             if op == "regex":
                 self._predicate = _RegexPredicate(field, value)
             else:
