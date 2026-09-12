@@ -52,6 +52,11 @@ on sources it builds pipelines, on predicates it means OR; context decides.)
 | `col("x").is_null()` | `{"op": "is_null"}` |
 | `col("x").is_not_null()` | `{"not": {"op": "is_null"}}` |
 | `col("x").is_type("int64")` | `{"op": "is_type", "value": "int64"}` |
+| `col("s").strip("==", "foo")` | `{"op": "strip", "value": "foo", "cmp_op": "=="}` |
+| `col("s").lower("==", "foo")` | `{"op": "lower", "value": "foo", "cmp_op": "=="}` |
+| `col("s").upper("==", "foo")` | `{"op": "upper", "value": "foo", "cmp_op": "=="}` |
+| `col("s").replace("old", "new")` | `{"old": "old", "new": "new", ...}` |
+| `col("s").length(">", 5)` | `{"op": "length", "value": "5", "cmp_op": ">"}` |
 | `p & q`, `p \| q`, `~p` | `{"and": ...}`, `{"or": ...}`, `{"not": ...}` |
 
 Literals may be `int`, `float`, `str`, or `bool`; they are coerced to the

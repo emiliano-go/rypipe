@@ -140,6 +140,49 @@ class Expr:
             {"field": self._field, "op": "is_type", "value": type_name}
         )
 
+    # -- string transforms ------------------------------------------------
+    def strip(self, cmp_op: str = "==", value: str = "") -> "Predicate":
+        """Compare str.strip() of the field against value."""
+        return Predicate(
+            {"field": self._field, "op": "strip", "value": value, "cmp_op": cmp_op}
+        )
+
+    def lstrip(self, cmp_op: str = "==", value: str = "") -> "Predicate":
+        """Compare str.lstrip() of the field against value."""
+        return Predicate(
+            {"field": self._field, "op": "lstrip", "value": value, "cmp_op": cmp_op}
+        )
+
+    def rstrip(self, cmp_op: str = "==", value: str = "") -> "Predicate":
+        """Compare str.rstrip() of the field against value."""
+        return Predicate(
+            {"field": self._field, "op": "rstrip", "value": value, "cmp_op": cmp_op}
+        )
+
+    def lower(self, cmp_op: str = "==", value: str = "") -> "Predicate":
+        """Compare str.lower() of the field against value."""
+        return Predicate(
+            {"field": self._field, "op": "lower", "value": value, "cmp_op": cmp_op}
+        )
+
+    def upper(self, cmp_op: str = "==", value: str = "") -> "Predicate":
+        """Compare str.upper() of the field against value."""
+        return Predicate(
+            {"field": self._field, "op": "upper", "value": value, "cmp_op": cmp_op}
+        )
+
+    def replace(self, old: str, new: str) -> "Predicate":
+        """Replace old with new in the field, then compare against value."""
+        return Predicate(
+            {"field": self._field, "old": old, "new": new, "op": "==", "value": ""}
+        )
+
+    def length(self, cmp_op: str = ">", value: float = 0) -> "Predicate":
+        """Compare len(str(field)) against value."""
+        return Predicate(
+            {"field": self._field, "op": "length", "value": str(value), "cmp_op": cmp_op}
+        )
+
     def __repr__(self) -> str:
         return f"col({self._field!r})"
 

@@ -383,11 +383,11 @@ FilterRows(
 )
 ```
 
-**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `regex`,
-`starts_with`, `ends_with`, `contains`, `in`, `not_in`, `replace`,
-`strip`, `lstrip`, `rstrip`, `lower`, `upper`, `length`
-(the value is a regular expression for `regex`, searched against the string
-form of the field; invalid patterns raise at construction time)
+**Constant filter operators (keyword args):** `==`, `!=`, `>`, `<`, `>=`, `<=`, `regex`
+
+**Expression-only operators:** `starts_with`, `ends_with`, `contains`, `isin`, `not_in`,
+`strip`, `lstrip`, `rstrip`, `lower`, `upper`, `replace`, `length`.
+These are only available via the `col()` expression API, not via keyword args.
 
 !!! note "Limits"
     - `in`/`not_in` values lists are capped at **100,000 elements**.
@@ -424,6 +424,10 @@ Adapters re-export `col` (crxml does), so users never import `rypipe.expr`.
 | `between(lo, hi)` | Inclusive range, `lo <= x <= hi` |
 | `is_null()` / `is_not_null()` | Null presence checks |
 | `is_type(t)` | Type check (same values as `is_type=`) |
+| `strip(cmp_op, value)` / `lstrip(...)` / `rstrip(...)` | Trim and compare |
+| `lower(cmp_op, value)` / `upper(...)` | Case conversion and compare |
+| `replace(old, new)` | String replacement and compare |
+| `length(cmp_op, value)` | String length comparison |
 
 Predicates compose with `&` (and), `|` (or), `~` (not) into arbitrarily
 nested trees. Everything an expression builds is fusable; anything the spec
