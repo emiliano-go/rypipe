@@ -136,7 +136,10 @@ pub fn insert_schema_cache(sig: (u64, u64), order: Arc<Vec<String>>) {
 
 /// Clear the discovery cache and reset its hit/miss counters.
 pub fn clear_schema_cache() {
-    SCHEMA_CACHE.write().unwrap_or_else(|e| e.into_inner()).clear();
+    SCHEMA_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     SCHEMA_CACHE_HITS.store(0, Ordering::Relaxed);
     SCHEMA_CACHE_MISSES.store(0, Ordering::Relaxed);
 }

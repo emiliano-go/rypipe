@@ -212,7 +212,9 @@ pub fn discover_schema_for_bytes<P: crate::decoder::RecordParser>(
     let opts = DiscoveryOpts::default();
     let sig = crate::schema::layout_signature(bytes, &opts);
     {
-        let cache = crate::schema::SCHEMA_CACHE.read().unwrap_or_else(|e| e.into_inner());
+        let cache = crate::schema::SCHEMA_CACHE
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(order) = cache.get(&sig) {
             crate::schema::SCHEMA_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             return FrozenSchema::from_discovered(order, plan);

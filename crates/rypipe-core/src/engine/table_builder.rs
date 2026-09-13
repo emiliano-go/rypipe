@@ -1030,7 +1030,8 @@ impl TableBuilder {
                                         Some(crate::plan::FieldType::Int64),
                                         Some(crate::plan::FieldType::Int64),
                                     ) => {
-                                        let Some(ai) = lexical::parse::<i64, _>(a.as_bytes()).ok() else {
+                                        let Some(ai) = lexical::parse::<i64, _>(a.as_bytes()).ok()
+                                        else {
                                             return PredicateState::Fail;
                                         };
                                         let Some(bi) = lexical::parse(b.as_bytes()).ok() else {
@@ -1042,10 +1043,12 @@ impl TableBuilder {
                                         Some(crate::plan::FieldType::Float64),
                                         Some(crate::plan::FieldType::Float64),
                                     ) => {
-                                        let Some(af) = lexical::parse::<f64, _>(a.as_bytes()).ok() else {
+                                        let Some(af) = lexical::parse::<f64, _>(a.as_bytes()).ok()
+                                        else {
                                             return PredicateState::Fail;
                                         };
-                                        let Some(bf) = lexical::parse::<f64, _>(b.as_bytes()).ok() else {
+                                        let Some(bf) = lexical::parse::<f64, _>(b.as_bytes()).ok()
+                                        else {
                                             return PredicateState::Fail;
                                         };
                                         af.partial_cmp(&bf)
@@ -1054,10 +1057,12 @@ impl TableBuilder {
                                         Some(crate::plan::FieldType::Int64),
                                         Some(crate::plan::FieldType::Float64),
                                     ) => {
-                                        let Some(ai) = lexical::parse::<i64, _>(a.as_bytes()).ok() else {
+                                        let Some(ai) = lexical::parse::<i64, _>(a.as_bytes()).ok()
+                                        else {
                                             return PredicateState::Fail;
                                         };
-                                        let Some(bf) = lexical::parse::<f64, _>(b.as_bytes()).ok() else {
+                                        let Some(bf) = lexical::parse::<f64, _>(b.as_bytes()).ok()
+                                        else {
                                             return PredicateState::Fail;
                                         };
                                         (ai as f64).partial_cmp(&bf)
@@ -1066,10 +1071,12 @@ impl TableBuilder {
                                         Some(crate::plan::FieldType::Float64),
                                         Some(crate::plan::FieldType::Int64),
                                     ) => {
-                                        let Some(af) = lexical::parse::<f64, _>(a.as_bytes()).ok() else {
+                                        let Some(af) = lexical::parse::<f64, _>(a.as_bytes()).ok()
+                                        else {
                                             return PredicateState::Fail;
                                         };
-                                        let Some(bi) = lexical::parse::<i64, _>(b.as_bytes()).ok() else {
+                                        let Some(bi) = lexical::parse::<i64, _>(b.as_bytes()).ok()
+                                        else {
                                             return PredicateState::Fail;
                                         };
                                         af.partial_cmp(&(bi as f64))

@@ -125,8 +125,7 @@ fn decompress(path: &Path, codec: Compression) -> Result<Vec<u8>> {
             let mut out = Vec::new();
             let mut reader = std::fs::File::open(path)?;
             let decoder = flate2::read::GzDecoder::new(&mut reader);
-            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES)
-                .read_to_end(&mut out)?;
+            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES).read_to_end(&mut out)?;
             Ok(out)
         }
         #[cfg(feature = "zstd")]
@@ -134,8 +133,7 @@ fn decompress(path: &Path, codec: Compression) -> Result<Vec<u8>> {
             let mut out = Vec::new();
             let mut reader = std::fs::File::open(path)?;
             let decoder = zstd::stream::read::Decoder::new(&mut reader)?;
-            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES)
-                .read_to_end(&mut out)?;
+            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES).read_to_end(&mut out)?;
             Ok(out)
         }
         #[cfg(feature = "lz4")]
@@ -143,8 +141,7 @@ fn decompress(path: &Path, codec: Compression) -> Result<Vec<u8>> {
             let mut out = Vec::new();
             let mut reader = std::fs::File::open(path)?;
             let decoder = lz4_flex::frame::FrameDecoder::new(&mut reader);
-            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES)
-                .read_to_end(&mut out)?;
+            LimitReader::new(decoder, MAX_DECOMPRESSED_BYTES).read_to_end(&mut out)?;
             Ok(out)
         }
         // Only reachable when a codec's cargo feature is disabled; detection
