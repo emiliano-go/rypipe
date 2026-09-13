@@ -1218,10 +1218,7 @@ impl ColumnBuilder {
                 for i in 0..(b_offsets.len() - 1) {
                     let start = b_offsets[i] as usize;
                     let end = b_offsets[i + 1] as usize;
-                    let val = match std::str::from_utf8(&b_data[start..end]) {
-                        Ok(s) => s,
-                        Err(_) => "",
-                    };
+                    let val = std::str::from_utf8(&b_data[start..end]).unwrap_or_default();
                     remap.push(dict_code(a_data, a_offsets, a_index, val));
                 }
                 for c in b_codes.iter() {
