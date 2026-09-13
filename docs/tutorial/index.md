@@ -19,7 +19,16 @@ provides a Source class and re-exports rypipe's pipeline API so users need
 only one import.
 
 ```text
-your file  ->  adapter (parsing)  ->  rypipe engine (everything else)  ->  Arrow / pandas / Polars
+your file
+    |
+    v
+adapter (parsing)
+    |
+    v
+rypipe engine
+    |
+    v
+Arrow / pandas / Polars
 ```
 
 This tutorial uses [**crxml**](../crxml-adapter.md), the published adapter
