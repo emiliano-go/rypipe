@@ -6,7 +6,7 @@
 - [rypipe](https://rypipe.emiliano-go.com/): Format-agnostic columnar engine that turns byte streams into Arrow record batches
 
 ## Tutorial
-- [Tutorial index](https://rypipe.emiliano-go.com/tutorial/): Install rypipe + an adapter, read your first file
+- [Tutorial index](https://rypipe.emiliano-go.com/tutorial/): Engine vs adapter model; install an adapter, read your first file
 - [First Steps](https://rypipe.emiliano-go.com/tutorial/first-steps/): Create a Source, get a DataFrame, chain your first stage
 - [Pipeline](https://rypipe.emiliano-go.com/tutorial/pipeline/): Chain stages with the | operator; plans and fusion
 - [Stages](https://rypipe.emiliano-go.com/tutorial/stages/): CastTypes, FilterRows, RenameFields, DropFields, combinators

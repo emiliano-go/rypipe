@@ -1,7 +1,7 @@
 # rypipe Documentation
 > Full documentation for rypipe: format-agnostic columnar ingestion engine with Rust core and Python bindings
 > Source: https://rypipe.emiliano-go.com
-> Pages: 55
+> Pages: 56
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/advanced/adapter-design/
@@ -202,7 +202,7 @@ Common error types:
 - `rypipe_core::Error::Plan`: invalid plan or configuration
 - `rypipe_core::Error::Io`: I/O error
 
-**Do not panic** in `parse_chunk`. Panics are caught by `catch_unwind` in the parallel executor, but they abort the entire parse and produce a hard-to-debug `MergeError`.
+**Do not panic** in `parse_chunk`. Panics are caught by `catch_unwind` in the parallel executor, but they abort the entire parse and produce a hard-to-debug `Error::Parser`.
 
 ### Partial trailing rows { #partial-trailing-rows }
 
@@ -384,6 +384,140 @@ FilterRows(field="amount", op=">", value="100.0")
 
 Without `field_types={"amount": "float64"}`, the engine stores `amount` as a string and the compare runs with string ordering (`"9" > "100"` is true for strings). Declare the type so the filter compares numbers.
 
+## Adapter anti-patterns { #adapter-anti-patterns }
+
+### Overriding `apply()` on fusable stages { #overriding-apply-on-fusable-stages }
+
+```python
+class LoggingFilter(FilterRows):
+    def apply(self, record):
+        result = super().apply(record)
+        if result is None:
+            logger.debug("dropped: %s", record)
+        return result  # ← this never runs when fusion succeeds
+```
+
+When fusion succeeds, the stage is pushed into the Rust parse loop and `apply()` is never called. Your override is silently dropped. Put side effects in observer hooks instead:
+
+```python
+class LoggingFilter(FilterRows):
+    def _plan_kwargs(self):
+        kwargs = super()._plan_kwargs() or {}
+        kwargs["observer"] = {"on_row_rejected": self._log_rejected}
+        return kwargs
+
+    def _log_rejected(self, row_index):
+        logger.debug("dropped row %d", row_index)
+```
+
+### Overriding `find_split_points` without measurement { #overriding-find_split_points }
+
+```rust
+fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
+    // "simpler" custom implementation
+    ...
+}
+```
+
+The default `find_split_points` handles nominal offsets, parallel search via rayon, skip-region rejection, dedup, sort, and the 2 MiB chunk floor that prevents sub-MB collapse. Override only with a measured reason; most adapters benefit from the default.
+
+### Emitting `Value::Null` for missing fields { #emitting-value-null-for-missing-fields }
+
+```rust
+sink.begin_row();
+for col in &self.columns {
+    let value = extract_field(col, record);
+    sink.put_field(col, value);  // value is Value::Null when missing
+}
+sink.end_row();
+```
+
+Do not emit `Value::Null` for every missing field. The engine null-fills missing columns at `end_row()` via the dirty bitmask; emitting explicit nulls wastes a push per missing field per row. Just skip the field:
+
+```rust
+if let Some(value) = extract_field(col, record) {
+    sink.put_field(col, value);
+}
+```
+
+### Not checking `wants()` before expensive extraction { #not-checking-wants-before-expensive-extraction }
+
+```rust
+let id = deep_xml_path(bytes, "/Record/Header/Id");  // expensive
+sink.put_field("id", Value::Str(id));
+```
+
+If `id` is dropped or projected out, the extraction runs for nothing. Always check first:
+
+```rust
+if sink.wants("id") {
+    let id = deep_xml_path(bytes, "/Record/Header/Id");
+    sink.put_field("id", Value::Str(id));
+}
+```
+
+For expensive extractions (deep XML paths, regex captures), this is a major win.
+
+### Panicking in `parse_chunk` { #panicking-in-parse_chunk }
+
+```rust
+fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+    let value = extract_value(bytes).unwrap();  // ← panics on malformed input
+    ...
+}
+```
+
+Panics are caught by `catch_unwind` in the parallel executor, but they abort the entire parse and produce a hard-to-debug `Error::Parser`. Return `Err` instead:
+
+```rust
+let value = extract_value(bytes)
+    .ok_or_else(|| rypipe_core::Error::Plan("malformed record".into()))?;
+```
+
+## Configuration anti-patterns { #configuration-anti-patterns }
+
+### Not declaring `schema` when columns are known { #not-declaring-schema }
+
+```python
+source = MyAdapter("data.log")  # no schema: triggers discovery pass
+```
+
+When the columns are known, always provide `schema`:
+
+```python
+source = MyAdapter("data.log", schema=["id", "ts", "amount", "status"])
+```
+
+Without `schema`, the engine runs a discovery pass that doubles I/O and delays the first row. With a declared schema, the engine skips discovery, stabilizes column order, and enables the `row_satisfied` byte-jump. In the crxml reference adapter, declaring `schema` lifts throughput from 4.2 GB/s to 7.6 GB/s (+80%).
+
+### Memory budget too small { #memory-budget-too-small }
+
+```python
+source = MyAdapter("huge.log", memory="1KB")  # extremely tight budget
+```
+
+The budget is a target, not a hard limit. A budget much smaller than the data causes:
+
+- Many tiny batches with high per-chunk setup overhead.
+- Repeated `TableBuilder` allocation and finish cycles.
+- RSS may still overshoot when a batch contains an unusually wide row.
+
+Start with 500 MiB for workstations or 128 MiB for embedded workloads. Lower the budget only when you need to constrain RSS, and measure the throughput trade-off.
+
+### Not using `schema_order` for stable column order { #not-using-schema_order }
+
+```python
+source = MyAdapter("data.log")  # no schema_order
+df1 = source.to_arrow()  # columns in discovery order
+df2 = source.to_arrow()  # may differ if file layout changed
+```
+
+Without `schema_order`, column order depends on discovery order, which can vary across files or chunks. Declare `schema` to fix the output order:
+
+```python
+source = MyAdapter("data.log", schema=["id", "ts", "amount", "status"])
+```
+
 ## Summary { #summary }
 
 - Cache tables; do not re-run pipelines.
@@ -391,6 +525,9 @@ Without `field_types={"amount": "float64"}`, the engine stores `amount` as a str
 - Keep Python callables out of the hot path.
 - Match the engine mode to the file size and workload.
 - Declare types for numeric filters.
+- Override `apply()` only on non-fusable stages; use observer hooks for side effects.
+- Always check `wants()` before expensive field extraction.
+- Never panic in `parse_chunk`; return `Err` instead.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/advanced/case-study-crxml/
@@ -547,7 +684,7 @@ let plan = ExecutionPlan::new()
 
 ## `auto_dict` heuristics { #auto_dict-heuristics }
 
-`auto_dict=True` asks the engine to guess which string columns should be dictionary-encoded. The heuristic has a small runtime cost: it tracks the number of distinct values and the total row count for each string column. When the ratio of distinct values to rows falls below a threshold, the column is upgraded to dictionary encoding at finish time.
+`auto_dict=True` asks the engine to guess which string columns should be dictionary-encoded. The heuristic has a small runtime cost: it tracks the number of distinct values and the total row count for each string column. When the ratio of distinct values to rows falls below a threshold and the column has at least 512 rows, the column is upgraded to dictionary encoding at finish time. Columns with fewer than 512 rows are never upgraded, regardless of cardinality.
 
 Two knobs tune the upgrade:
 
@@ -649,7 +786,12 @@ Stream mode uses `BoundedExecutor`. It keeps a memory budget and parses the file
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates or iterates.
 
-Because the input buffer is dropped before the parse phase begins for bounded mode, mmap-backed pages are released before downstream work starts. This keeps peak memory close to the budget even for files much larger than RAM.
+On the mmap path, the mapping is dropped after planning and before the parse
+loop begins (reopened per-chunk via seek+read), so mmap-backed pages are
+released before downstream work starts. This keeps peak memory close to the
+budget even for files much larger than RAM. On the in-memory path
+(`run_bytes_stream`), the input slice is borrowed from the caller for the
+duration of the parse.
 
 Use stream mode when:
 
@@ -667,7 +809,8 @@ Use columnar mode when:
 - the file fits comfortably in RAM;
 - the parser is fast enough that parallel overhead would not pay off;
 - you need one contiguous `RecordBatch` without a merge step;
-- `auto_dict` uses the incremental dictionary path, so chunks still export independently.
+- `auto_dict` upgrades the single builder's string columns to dictionaries at
+  finish time (no per-chunk path needed).
 
 Columnar mode is often fastest for small files because there is no per-chunk setup and no rayon scheduling.
 
@@ -854,7 +997,7 @@ Pushdown fusion is the process by which the Python `Pipeline` rewrites a chain o
 ```python
 # Stages are imported from the adapter package; they are the same
 # classes the framework's stage protocol defines.
-from crxml import CrystalXMLSource, RenameFields, DropFields, FilterRows, CastTypes, to_pandas
+from crxml import CrystalXMLSource, RenameFields, DropFields, FilterRows, CastTypes, to_pandas, col
 
 source = CrystalXMLSource("report.xml", row_tag="Details")
 
@@ -866,9 +1009,7 @@ df = to_pandas(
     | CastTypes({"amount": float})
 )
 
-# Expression predicates (rypipe.expr) are fusable too:
-from rypipe import col
-
+# Expression predicates are fusable too:
 df = to_pandas(
     source
     | FilterRows((col("amount") > 100) & (col("status") == "active"))
@@ -935,6 +1076,9 @@ pub struct ExecutionPlan {
     pub auto_dict: bool,                          // auto-dict upgrade
     pub dict_threshold: Option<f64>,              // auto-dict ratio (default 0.05)
     pub dict_max_size: Option<usize>,             // auto-dict max entries (default 256)
+    pub strict_types: bool,                       // abort on non-null parse failures
+    pub max_split_chunks: Option<usize>,          // bounded-streaming chunk cap
+    pub observer: Option<Arc<dyn RowObserver>>,   // per-row observer hooks
 }
 ```
 
@@ -947,9 +1091,16 @@ Inside `TableBuilder`, every emitted field goes through this pipeline:
 1. `field_map` renames the raw field name.
 2. `drop_fields` checks the resolved name; if dropped, the field is ignored.
 3. `field_types` / `dictionary_columns` chooses the storage type.
-4. `filter` rejects rows during `end_row`.
+4. `strict_types` validates the value parses as the declared type (records
+   violation for `finish` to report).
+5. `observer` fires `on_put_field` (if `plan.observer` is set).
+6. Value is pushed into the column; dirty bit is set.
 
-This order matters. A filter runs on the resolved name, so it must be written in post-rename terms. A cast type is attached to the resolved name as well.
+The per-row `filter` is evaluated later, in `finish_row`, after all fields
+are pushed and missing columns are null-filled.
+
+This order matters. A filter runs on the resolved name, so it must be written
+in post-rename terms. A cast type is attached to the resolved name as well.
 
 ## What is fusable { #what-is-fusable }
 
@@ -960,13 +1111,13 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 | `RenameFields` | `field_map` | Multiple renames merge into one map. |
 | `DropFields` | `drop_fields` | Merges as a set union. |
 | `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
-| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`, including `op="regex"`), `is_null`, `is_type`, or an expression predicate from `rypipe.expr` (comparisons, `startswith`, `endswith`, `contains`, `matches`, `between`, `isin`, `not_in`, compound `&`/`|`/`~`); all are evaluated per-row during parse. |
+| `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`, including `op="regex"`), `is_null`, `is_type`, or an expression predicate built with the adapter's re-exported `col` (comparisons, `startswith`, `endswith`, `contains`, `matches`, `between`, `isin`, `not_in`, compound `&`/`|`/`~`); all are evaluated per-row during parse. |
 | `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` | `filter` | `And`, `Or`, `Not` trees built from the same leaf shapes; evaluated per-row with short circuiting; fully fusable. |
 | `ObservedStage` (or any stage returning observer hooks) | `observer` | Hook dicts merge per-hook; callables for the same hook chain in stage order. |
 
 `FilterRows` is fusable when it uses a keyword-form predicate (`field`,
 `op`, `value` or `field_a`, `op`, `field_b`), or an expression predicate
-built with `rypipe.expr.col` (see [expression filters](../architecture/expressions.md)).
+built with the adapter's re-exported `col` (see [expression filters](../architecture/expressions.md)).
 `FilterRowsAny`, `FilterRowsAll`, and `FilterRowsNot` are also fusable;
 they build `And`, `Or`, `Not` trees from the same leaves. All are evaluated per-row during parsing with native-typed comparison and numeric promotion; mismatched types or nulls fail the row, with `Not` flipping the result. Chaining `FilterRows` stages is an implicit `And` (see `plan_split`).
 
@@ -1034,18 +1185,25 @@ drop check (drop_fields)
 type selection (field_types / dictionary_columns)
     |
     v
-per-row filter (Equal / NotEqual / Compare / Regex / And / Or / Not)
+strict_types validation (records parse violations)
     |
     v
-builder append (Vec plus map, single hash, dirty bitmask)
+observer notification (on_put_field)
+    |
+    v
+push value + set dirty bit
+    |
+    v
+[end_row: null-fill missing columns, then per-row filter]
     |
     v
 finish: sort by schema_order, auto-dict, Arrow export
 ```
 
 Because drop happens before type selection, you cannot cast a dropped field.
-Because every filter, including column-to-column comparisons, runs before the
-row is committed, rejected rows consume no Arrow storage.
+Because the filter runs after all fields are pushed (in `finish_row`),
+rejected rows consume no Arrow storage but their column values are
+temporarily allocated then popped.
 
 ## When fusion does not help { #when-fusion-does-not-help }
 
@@ -1075,7 +1233,7 @@ Each page takes one optimization topic and explains the mechanism, the tuning kn
 | Page | What you will learn |
 |------|---------------------|
 | [Fusion](./fusion.md) | How `RenameFields`, `DropFields`, `CastTypes`, and `FilterRows` (keyword form or `col()` expression) are rewritten into a single `ExecutionPlan`; what is fusable and what falls back to Python. |
-| [Stage protocol](./stage-protocol.md) | The three methods every stage implements; why re-exporting works; when to re-implement. |
+| [Stage protocol](./stage-protocol.md) | The three methods every stage implements; why re-exporting works; when to re-implement; custom `_to_spec()` producers for fusable filters. |
 | [Execution modes](./execution-modes.md) | `columnar`, `parallel`, `stream`, and `parallel_streaming`; the `resolve_engine` heuristic; when each mode wins. |
 | [Streaming](./streaming.md) | Constant-memory batch streaming with `iter_record_batches`, `BatchConsumer`, and Arrow-ecosystem writers; when streaming falls back to materialization. |
 | [Memory and chunking](./memory-and-chunking.md) | How `BoundedExecutor` enforces a memory budget; sizing chunks for files larger or smaller than RAM. |
@@ -1124,13 +1282,13 @@ For files that fit in RAM, mmap is usually fastest because it avoids an explicit
 
 The page cache is the biggest factor for repeated reads. If a file has been read recently, it is probably in cache, and mmap or buffered reads will be fast regardless of the underlying storage.
 
-For one-off reads of large files, storage bandwidth is the limit. A modern NVMe SSD can sustain 3-7 GB/s sequential reads; a SATA SSD is closer to 500 MB/s; network storage varies widely.
+For one-off reads of large files, storage bandwidth is the limit. A modern NVMe SSD can sustain 3-7 GB/s sequential reads (PCIe Gen3/Gen4; Gen5 drives reach ~14 GB/s); a SATA SSD is closer to 500 MB/s; network storage varies widely.
 
 ## SSD vs NVMe vs network storage { #ssd-vs-nvme-vs-network-storage }
 
 | Storage | Typical sequential read | Implications |
 |---------|------------------------|--------------|
-| NVMe SSD | 3-7 GB/s | Parser can be the bottleneck; parallel mode helps. |
+| NVMe SSD | 3-7 GB/s (PCIe Gen3/4); up to ~14 GB/s (Gen5) | Parser can be the bottleneck; parallel mode helps. |
 | SATA SSD | 400-600 MB/s | May be I/O-bound for simple formats; still fast enough for most XML/JSON. |
 | Network (NFS/S3) | 50-500 MB/s | Latency and throughput vary; streaming may be safer than mmap. |
 | Cold object storage | <100 MB/s | Consider downloading first or using buffered reads. |
@@ -1151,14 +1309,27 @@ In bounded stream mode, the input buffer is dropped before the parse phase begin
 | zstd | `28 b5 2f fd` | `zstd` |
 | lz4 (frame) | `04 22 4d 18` | `lz4` |
 
+These features are **off by default** in `rypipe-core`, but `rypipe-python`
+enables `compress-all`, so the Python wheels ship with all three codecs and
+detection works out of the box. An adapter embedding `rypipe-core` directly
+must opt in the same way: `features = ["gzip"]` (or `zstd`, `lz4`,
+`compress-all`). With the features disabled, a compressed file opens as raw
+bytes and the parser fails on the magic bytes.
+
 Detection is by content, not by file extension. Because decompression produces an owned `Vec<u8>`, `use_mmap` and `prefault` have no effect on compressed inputs, and peak memory includes the full decompressed size. For very large compressed files, plan the memory budget accordingly.
+
+!!! warning "Decompression bomb protection"
+    Decompressed output is capped at **1 GiB**. Compressed inputs that would
+    exceed this limit are rejected mid-stream (via `LimitReader`) to prevent
+    OOM kills. The error message includes the actual byte count. If you need
+    to process files larger than 1 GiB, use uncompressed input or mmap.
 
 ## Summary { #summary }
 
 - Use `mmap` + `prefault=True` for cached or RAM-resident files.
 - Use `mmap` + `prefault=False` for large streaming files.
 - Use buffered reads for network or portable deployments.
-- Compressed inputs (gzip, zstd, lz4) decompress transparently into memory.
+- Compressed inputs (gzip, zstd, lz4) decompress transparently into memory (enabled by default via `rypipe-python`; adapters embedding `rypipe-core` opt in with the codec features).
 - Match the parser throughput to storage bandwidth; do not over-parallelize an I/O-bound workload.
 
 ========================================================================
@@ -1546,7 +1717,7 @@ source = MyAdapter(
 
 The engine builds the correct Arrow array from the first row. It does not store intermediate strings and recast later. This saves memory and CPU.
 
-Supported type strings (as accepted by `FieldType::from_str`):
+Supported type strings (as accepted by `FieldType`'s `std::str::FromStr` implementation, so `type_str.parse::<FieldType>()`):
 
 | Type string | Rust `FieldType` | Notes |
 |-------------|------------------|-------|
@@ -1779,7 +1950,7 @@ from rypipe import Adapter, resolve_engine
 
 class CrystalXMLSource(Adapter):
     def __init__(self, path, *, row_tag="Row", engine="auto",
-                 threads=0, memory=None, **kwargs):
+                 threads=None, memory=None, **kwargs):
         self._row_tag = row_tag
         self._engine = engine
         self._threads = threads
@@ -1857,7 +2028,7 @@ class MyStage:
 
     def __call__(self, stream):
         """Transform an iterable of records (unfused path)."""
-        return map(self.apply, stream)
+        return (r for r in map(self.apply, stream) if r is not None)
 
     def _plan_kwargs(self) -> dict | None:
         """Return pushdown kwargs for the Rust engine, or None if not fusable."""
@@ -1984,6 +2155,23 @@ class LoggingFilterRows(FilterRows):
         logger.debug("dropped row %d", row_index)
 ```
 
+How the call reaches your method: the engine runs in Rust, so `_log_rejected`
+is not called directly by Python code. The dict you pass is stored in the plan
+and wrapped by a Rust `RowObserver` (`PyObserver`) that holds a reference to
+the Python callable. When the Rust filter drops a row, it fires
+`on_row_rejected`, the wrapper acquires the GIL and invokes your bound method:
+
+```text
+Rust engine (fused parse+filter loop)
+    row fails predicate ──► PyObserver::on_row_rejected(row_index)
+                               │  (acquires GIL)
+                               ▼
+Python: LoggingFilterRows._log_rejected(row_index)  →  logger.debug(...)
+```
+
+Yes: `_log_rejected` is effectively called from Rust, once per rejected row,
+re-entrant into Python.
+
 The `_plan_kwargs()` method is inherited and extended, so the filter still
 fuses into the parse loop, and the `on_row_rejected` hook fires from inside
 the engine for every rejected row.
@@ -1993,6 +2181,78 @@ The naive alternative (overriding `apply()` to log and delegating to
 runs in Python, so `apply()` is never called and nothing is logged. Rule of
 thumb: overriding `apply()` on a fusable stage drops your override whenever
 fusion succeeds; put side effects in observer hooks instead.
+
+## Custom spec producers { #custom-spec-producers }
+
+`FilterRows(predicate=obj)` fuses any object that carries a `_to_spec()`
+method: the dict it returns becomes the filter spec, so a custom predicate
+runs in the Rust parse loop exactly like the built-in forms. Minimal custom
+producer:
+
+```python
+from rypipe.stages import FilterRows
+
+class Weekday:
+    """Keep Mon-Fri rows; fusable like any other spec."""
+
+    def __init__(self, field: str):
+        self._field = field
+
+    def _to_spec(self) -> dict:
+        return {"field": self._field, "op": "not_in", "values": ["Sat", "Sun"]}
+
+src | FilterRows(Weekday("day"))
+```
+
+Here `_to_spec()` is the whole implementation: `FilterRows` duck-types on
+it (no arguments, returns a spec dict in the shapes from
+[Supported operations](../architecture/expressions.md#supported-operations)
+or nested `and`/`or`/`not`), so a plain class works with no `rypipe.expr`
+import. What a plain class does not get is composition (no `&`/`|`/`~`).
+For that, use the built-in `Predicate`, which provides `_to_spec()` for
+you.
+
+With `Predicate`, `_to_spec()` is an accessor, not a hook you implement:
+`Predicate.__init__(spec)` stores the dict as `self._spec` (that is the
+whole constructor), and the inherited `_to_spec()` returns it to the plan
+builder. So the subclass pattern below, calling `super().__init__(spec)`,
+sets everything up; there is no `_to_spec()` to write. Only override
+`_to_spec()` for lazily computed specs, and even then keep `self._spec`
+populated, because the `&`/`|`/`~` operators read the attribute directly
+rather than calling the method.
+
+If your producer subclasses `Predicate` (or returns an instance of it),
+composition comes for free. `Predicate` overloads the bitwise operators `&`
+(and), `|` (or), and `~` (not) via `__and__` / `__or__` / `__invert__`, and
+subclasses inherit `_to_spec()`. These are predicate composition, not
+pipeline syntax:
+
+```python
+from rypipe.expr import Predicate   # framework base class (adapter code)
+from crxml import col               # users get col from the adapter
+
+class Rating(Predicate):
+    def __init__(self, field: str):
+        super().__init__({"field": field, "op": ">=", "value": "4"})
+
+# & / | / ~ here combine predicates; | on the source builds the pipeline
+src | FilterRows(Rating("stars") & ~col("hidden").is_null())
+```
+
+(Composing two `Predicate`s returns a base `Predicate`, so combinations lose
+the subclass type; only the spec matters downstream, so this is cosmetic.)
+
+Two caveats:
+
+- The spec must be expressible in the spec language. There is no fallback:
+  an unknown operator fails when the plan is built, not at row time.
+- Adding a genuinely new operator is a Rust change: a new `FilterPredicate`
+  variant in `rypipe-core` plus a parsing arm in
+  `rypipe-python/src/plan_kwargs.rs` (`parse_filter_spec`). See the
+  [Rust API](../reference/rust-api.md#filterpredicate).
+
+Libraries and adapters can ship their own expression helpers on top of this
+protocol without touching rypipe.
 
 ## Observer hooks { #observer-hooks }
 
@@ -2010,16 +2270,25 @@ parse threads, on every engine (serial, parallel, bounded, streaming):
 
 Notes:
 
-- `row_index` counts accepted rows so far, so rejected rows reuse the next
-  free index.
+- `row_index` is the count of rows committed so far (incremented only when a
+  row is accepted). `on_begin_row` and `on_row_rejected` receive the
+  pre-increment count; `on_row_accepted` receives the post-increment count
+  minus 1.
 - When a filter buffers values before the predicate resolves, `on_put_field`
-  fires only for accepted rows (hooks fire on drain, not on buffer).
+  fires only for accepted rows (hooks fire on drain, not on buffer). One
+  exception: when the predicate column arrives late, values are pushed
+  directly and popped on reject, so `on_put_field` may fire for a row that
+  is later rejected.
 - Hooks run on parse threads (several at once on parallel engines): they
   must be thread-safe. Exceptions raised by a hook are printed and
   swallowed; a hook can never abort a parse.
 - `on_put_field` takes the GIL per call from Python (roughly 50ns, about
   0.5s for 1M rows with 10 fields). Prefer row-level hooks in Python; keep
   field-level hooks in Rust.
+- Adapter authors can attach a pure-Rust `RowObserver` via
+  `ExecutionPlan::with_observer` instead: no Python bindings, no GIL, a few
+  nanoseconds per event, fully parallel across parse threads. See the
+  [Rust API](../reference/rust-api.md#rowobserver).
 - When several stages provide the same hook, the pipeline chains the
   callables in stage order instead of overwriting.
 
@@ -2082,7 +2351,7 @@ These keys are merged into the `ExecutionPlan` passed to the Rust parser:
 | `field_mapping` | `dict[str, str]` | Rename mapping: raw name → output name |
 | `drop_fields` | `list[str]` | Fields to skip entirely |
 | `field_types` | `dict[str, str]` | Type overrides (e.g., `"int64"`, `"float64"`) |
-| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}` (with `op="regex"` for regex search), `{"field_a", "op", "field_b"}`, `{"is_null": true}`, or `{"is_type": "int64"}` |
+| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}` (with `op="regex"` for regex search), `{"field_a", "op", "field_b"}`, `{"field", "op": "is_null"}`, or `{"field", "op": "is_type", "value": "int64"}` |
 | `observer` | `dict[str, callable]` | Row observer hooks (`on_row_rejected`, ...); merged per-hook, chained across stages |
 
 See [Execution Plan](../architecture/plan.md) for the full plan structure.
@@ -2103,11 +2372,6 @@ PAGE: https://rypipe.emiliano-go.com/advanced/streaming/
 | `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | `budget + one batch`: constant | `for batch in src.iter_record_batches(memory="64KB"):` + `ParquetWriter` |
 
 The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)` in `bounded.rs`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine/table_builder.rs`) to keep RSS at `budget + batch`.
-
-## Memory guarantee { #memory-guarantee }
-
-* **Rust-only:** `budget + batch + export buffer`. With `batch_size=1` and `memory="64KB"` and small rows (~1 KB for `crxml` `Details`), peak is a few tens of KB plus the `mmap` mapping (dropped after `plan_chunks`). This is the **64 KB** target in the spec.
-* **Python:** `pyarrow.RecordBatch` + interpreter overhead make true 64 KB impossible, but `iter_record_batches` is still bounded: peak stays at `budget + one batch + export buffer` no matter how large the input file is. Measure it yourself with `resource.getrusage` on a large file; throughput of the bounded path is within a few percent of the full-RAM columnar path in `crxml`'s `benchmarks/bench_extended.py` matrix.
 
 ## Rust API { #rust-api }
 
@@ -2182,7 +2446,10 @@ df = pd.concat(b.to_pandas() for b in pipe.iter_record_batches(memory="256MB"))
 
 Note that `crxml`'s `CrystalXMLSource` sink methods (`to_pandas` / `to_polars` / `to_parquet`) take **no** `memory=` argument; `iter_record_batches` is the bounded-memory entry point. The framework also ships generic sink helpers (`rypipe.to_pandas(src, memory=...)` and friends) that stream through `iter_record_batches` internally; those exist for adapter authors whose sources do not override the sinks, and end users do not need them.
 
-Unit note: `crxml` accepts `B` / `KB` / `MB` / `GB` / `TB` (1024-based, case-insensitive, no space before the unit) in memory strings, while the framework's own memory parser additionally accepts the `KiB` / `MiB` / `GiB` / `TiB` forms. `memory="64MiB"` raises `invalid memory` in crxml; use `"64MB"`. See [Memory and chunking](memory-and-chunking.md).
+Unit note: Both `crxml` and the framework accept `B` / `KB` / `MB` / `GB` / `TB`
+and `KiB` / `MiB` / `GiB` / `TiB` (1024-based, case-insensitive, no space
+before the unit). The `iB` and non-`iB` forms are equivalent. See
+[Memory and chunking](memory-and-chunking.md).
 
 ### Advanced (batch-level control) { #advanced }
 
@@ -2203,7 +2470,11 @@ for batch in pipe.iter_record_batches(memory="256MB"):
     writer.write_batch(batch)
 ```
 
-`batch_size` overrides the budget-derived `rows_per_batch = budget / estimate_bytes_per_row` (`crates/rypipe-core/src/decoder.rs`). Default derives from `memory`; pass `batch_size=1` for minimal per-batch memory. `crxml`'s `iter_record_batches` deprecates `batch_size` (it warns and ignores it) and always derives the batch size from the budget.
+`batch_size` is a Python-only convenience parameter (the Rust executor always
+derives `rows_per_batch` from the budget in `bounded.rs`). `crxml`'s
+`iter_record_batches` deprecates `batch_size` (it warns and ignores it) and
+always derives the batch size from the budget. Set `memory` to control batch
+size: smaller budgets produce smaller batches.
 
 ## When streaming falls back { #when-streaming-falls-back }
 
@@ -2375,7 +2646,7 @@ dictionaries. The incremental path:
 2. Find first divergent dictionary across chunks
 3. Build `SeedDict` from first chunk
 4. `unify_dictionaries`: global dict + per-chunk remap tables (O(dict_size))
-5. `remap_codes`: in-place code remap via `get_unchecked` (serial loop over
+5. `remap_codes`: in-place code remap via bounds-checked `get` (serial loop over
    chunk engines; only step 1 runs under rayon)
 6. `replace_dict`: swap local dict for unified dict
 
@@ -2503,14 +2774,18 @@ input came from `read_path`. `ExecutionPlan` applied per row in `finish_row`
 ```
 Pipeline::read_bytes_par(bytes, num_chunks)
   → splitter.find_split_points(bytes, num_chunks)
+
   → split_points_to_ranges → Vec<Range>
+
   → rayon::into_par_iter
     each range:
       TableBuilder::with_plan(est, plan.clone())
       parser.validate(&bytes[range])
       parser.parse_chunk_generic(&bytes[range], &mut sink)
       Ok(sink)
+      
   → collect::<Result<Vec<TableBuilder>>>()
+
   → if !auto_dict && schemas_consistent:
       engines_to_record_batches (fast path)
     else if auto_dict:
@@ -2520,6 +2795,7 @@ Pipeline::read_bytes_par(bytes, num_chunks)
     else (schemas inconsistent):
       merged.extend(each engine) → merged.finish() (merge path)
       apply_compare_filter if plan.filter set
+
   → Vec<RecordBatch>
 ```
 
@@ -2542,7 +2818,9 @@ Pipeline::read_bytes_stream(bytes, budget)
       capped at split_cap (default MAX_SPLIT_CHUNKS = 100_000,
       overridable via plan.max_split_chunks)
     chunks = splitter.find_split_points(bytes, num_batches)
+
   → batch_engine = TableBuilder::with_plan(...)
+
   → for chunk in chunks:
       chunk_engine = TableBuilder::with_plan(...)
       parser.validate(chunk_bytes)
@@ -2556,7 +2834,9 @@ Pipeline::read_bytes_stream(bytes, budget)
         batch = to_consume.finish()
         apply_compare_filter(batch, filter) if plan.filter set
         batches.push(batch)
+        
   → flush remainder (same finish + apply_compare_filter)
+
   → Vec<RecordBatch>
 ```
 
@@ -2578,7 +2858,8 @@ Bounded mode also has consumer variants (`read_bytes_stream_consumer`,
 
 ```
 begin_row
-  no filter: no op (row tracked by row_count + row_dirty)
+  always: fire on_begin_row, reset current_ordinal to 0
+  no filter: (row tracked by row_count + row_dirty)
   with plan.filter: reset current_ordinal, clear the RowBuffer, and run the
     adaptive late-predicate check (if predicate_ordinal >= ncols * 4 / 5,
     buffering is deemed not worthwhile and rows fall back to direct push)
@@ -2808,8 +3089,9 @@ See [Skip regions](../building-adapters/skip-regions.md) for the full interface.
 The default implementation handles everything:
 
 1. Early return `vec![0, bytes.len()]` when `max_chunks <= 1` or input is empty
-2. `plan_chunk_count` determines chunk count (2 MiB floor, thread caps)
-3. Nominal offsets at `bytes.len() * i / n`
+2. `plan_chunk_count` computes target chunk count from `max_chunks` (2 MiB floor,
+   `16 × threads` cap, 1024 hard max)
+3. Nominal offsets at `bytes.len() * i / n` where `n` is the result of step 2
 4. `par_iter` over nominals calling `next_record_start`
 5. Skip-region rejection via `in_skip_region`
 6. Dedup, sort, prepend 0, append `bytes.len()`
@@ -3564,7 +3846,8 @@ Estimates chunk sizes from budget:
    budget is the trigger
 6. Apply `apply_compare_filter` to each flushed batch if `plan.filter` is set
 7. After the loop, surface deferred strict-types and unknown-field errors
-   (unknown-field as `Error::Merge`) accumulated across chunks
+   (unknown-field as `Error::Merge`) accumulated across chunks; if any
+   error exists, the final remaining batch is not consumed
 
 ### run (file-based) { #run }
 
@@ -3683,15 +3966,15 @@ PAGE: https://rypipe.emiliano-go.com/architecture/expressions/
 
 # Expression filters { #expression-filters }
 
-`FilterRows` accepts an expression predicate built with `rypipe.expr.col`.
+`FilterRows` accepts an expression predicate built with `col`.
 Expressions construct the same filter spec dicts the Rust engine fuses,
 declaratively and without any bytecode analysis:
 
 ```python
-from rypipe import col, FilterRows
+import crxml
 
-source | FilterRows(col("amount") > 100)
-source | FilterRows((col("age") >= 18) & col("name").startswith("A"))
+source | crxml.FilterRows(crxml.col("amount") > 100)
+source | crxml.FilterRows((crxml.col("age") >= 18) & crxml.col("name").startswith("A"))
 ```
 
 Anything the spec language cannot express raises at construction time, so
@@ -3714,8 +3997,10 @@ ExecutionPlan.filter = CompareLiteral { field: "amount", op: CompareOp::Gt, valu
 
 An expression compares to a literal or another column; the result is a
 `Predicate` whose `_to_spec()` produces the plan spec. `Predicate` objects
-compose with `&` (and), `|` (or), and `~` (not), producing nested
-`{"and": [...]}`, `{"or": [...]}`, `{"not": ...}` specs.
+compose with `&` (and), `|` (or), and `~` (not): operator overloads via
+`__and__`/`__or__`/`__invert__`, producing nested `{"and": [...]}`,
+`{"or": [...]}`, `{"not": ...}` specs. (`|` is overloaded twice in rypipe:
+on sources it builds pipelines, on predicates it means OR; context decides.)
 
 ## Supported operations { #supported-operations }
 
@@ -3733,6 +4018,11 @@ compose with `&` (and), `|` (or), and `~` (not), producing nested
 | `col("x").is_null()` | `{"op": "is_null"}` |
 | `col("x").is_not_null()` | `{"not": {"op": "is_null"}}` |
 | `col("x").is_type("int64")` | `{"op": "is_type", "value": "int64"}` |
+| `col("s").strip("==", "foo")` | `{"op": "strip", "value": "foo", "cmp_op": "=="}` |
+| `col("s").lower("==", "foo")` | `{"op": "lower", "value": "foo", "cmp_op": "=="}` |
+| `col("s").upper("==", "foo")` | `{"op": "upper", "value": "foo", "cmp_op": "=="}` |
+| `col("s").replace("old", "new")` | `{"old": "old", "new": "new", ...}` |
+| `col("s").length(">", 5)` | `{"op": "length", "value": "5", "cmp_op": ">"}` |
 | `p & q`, `p \| q`, `~p` | `{"and": ...}`, `{"or": ...}`, `{"not": ...}` |
 
 Literals may be `int`, `float`, `str`, or `bool`; they are coerced to the
@@ -3740,6 +4030,15 @@ string form specs carry, and the engine compares with native-typed numeric
 promotion. `matches()` validates the pattern with `re.compile` at
 construction time and the engine applies it as a regex search against the
 string form of the value.
+
+## Custom spec producers { #custom-spec-producers }
+
+Any object with a callable `_to_spec()` method can be passed as the
+`FilterRows` predicate: the returned dict is used as the filter spec, so it
+fuses exactly like the built-in forms. Adapters and libraries can ship their
+own expression helpers on this protocol; see
+[Custom spec producers](../advanced/stage-protocol.md#custom-spec-producers)
+for the contract and an example.
 
 ## Plain callables fall back to Python { #python-fallback }
 
@@ -3893,8 +4192,6 @@ typing, and Arrow logic in one place.
 | `scan` | Portable byte-search primitives (find, find2, find_literal) |
 | `bench` | Tier ladder, alloc_baseline, ParProfile (behind bench feature) |
 | `schema` | FrozenSchema, DiscoveryOpts, layout_signature caching |
-
-See [Schema](./schema.md) for the detailed architecture of schema handling.
 | `dict` | SeedDict, unify_dictionaries, apply_remap |
 | `block_masks` | SIMD 64-byte block delimiter scanning |
 | `parallel_stream` | ParallelStreamingExecutor, discovery, ordered/unordered delivery |
@@ -4004,9 +4301,9 @@ push/pop cycles for selective filters.
 ### Why not override find_split_points? { #why-not-override-find_split_points }
 
 The default implementation applies the measured 2 MiB chunk floor that
-prevents sub-MB chunk collapse. Two adapters got this wrong: TSV collected
-first K newlines (negative scaling), crxml scanned entire file for `<!`
-(25% overhead). The default eliminates this bug class.
+prevents sub-MB chunk collapse. Custom overrides are a recurring source of
+performance bugs (sampling too little data, or scanning far more of the file
+than needed), so the default eliminates this bug class.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/architecture/optimizations/
@@ -4030,6 +4327,19 @@ one hash, a frozen-schema check, a strict-types check, an observer
 notification, first-row ordinal tracking, one bit set, one conditional
 pop, and one push_value.
 
+**Example:** the adapter-visible hot path, one hash probe per field:
+
+```rust
+use rypipe_core::{ColumnarSink, TableBuilder, Value};
+
+fn feed_row(sink: &mut TableBuilder) {
+    sink.begin_row();
+    sink.put_field("id", Value::Int64(7));          // 1 hash: field_index
+    sink.put_field("name", Value::Str("acme".into()));
+    sink.end_row();                                 // finish_row: dirty-bitmask pass
+}
+```
+
 **Impact:** Eliminates the second hash probe for every field. For 10 fields
 per row at ~10 ns per hash, this saves ~100 ns per row. On a 533 MB file
 with ~480K rows, that is ~48 ms saved.
@@ -4047,7 +4357,9 @@ present. For 10 columns where 8 are present, 2 null pushes per row.
 
 **After:** `row_dirty: Vec<u64>` bitmask. In `finish_row`, a dense-row
 `is_full` check (every dirty bit set) skips the per-column loop entirely;
-otherwise only missing columns get null-filled:
+otherwise only missing columns get null-filled.
+**Example:**
+
 ```rust
 if is_full {
     self.row_dirty.fill(0);  // Dense row: no loop at all
@@ -4076,6 +4388,16 @@ pop all columns (expensive for wide tables with many fields).
 predicate as soon as the predicate column arrives. On Fail, discard buffer
 (no pops). On Pass, switch to direct mode and drain buffer to columns.
 
+**Example:** selective filter via crxml (rejected rows are discarded before
+any column push):
+
+```python
+import crxml
+
+src = crxml.CrystalXMLSource("report.xml", row_tag="Row", engine="parallel")
+df = src | crxml.FilterRows(field="status", op="==", value="active") | crxml.to_pandas()
+```
+
 **Impact:** For selective filters (e.g., 10% selectivity), eliminates 90%
 of column push/pop cycles. The adaptive strategy disables buffering when
 the predicate column's slot is at or beyond 4/5 of the column count
@@ -4091,6 +4413,16 @@ in `wants` via `resolve_field`, one in `put_field` via `ensure_column_idx`).
 probe. `resolve` does the rename/drop lookup; `put_field_resolved` does
 the column lookup with the already-resolved name.
 
+**Example:** adapter call pattern (one hash probe instead of two):
+
+```rust
+// Instead of: if sink.wants(name) { sink.put_field(name, value); }
+if let Some(resolved) = sink.resolve(name) {
+    let owned = resolved.to_owned(); // end the borrow on sink
+    sink.put_field_resolved(&owned, value);
+}
+```
+
 **Impact:** Saves one HashMap lookup per field. For 10 fields per row,
 saves ~100 ns per row.
 
@@ -4102,6 +4434,18 @@ saves ~100 ns per row.
 **After:** After first row, `expect_slot(ordinal)` returns `(slot,
 raw_name_bytes)`. Adapter does memcmp (8-16 bytes, single SIMD compare),
 then `put_field_at(slot, value)`.
+
+**Example:** per-field fast path after row 1:
+
+```rust
+if let Some((slot, expected_name)) = sink.expect_slot(ordinal) {
+    if raw_name_bytes == expected_name { // one memcmp, no scan/decode/hash
+        sink.put_field_at(slot, value);
+        continue;
+    }
+}
+// memcmp miss: fall back to the generic attribute-scan path
+```
 
 **Impact:** Skips attribute scan, UTF-8 decode, hash lookup. ~25 ns → ~8 ns
 per field. ~17% on the hot path. Works for formats with stable field order
@@ -4115,6 +4459,16 @@ per field. ~17% on the hot path. Works for formats with stable field order
 values. Scanner byte-jumps to row close via `find_close_after` with the
 precomputed close finder (see section 9).
 
+**Example:** projection via crxml (scanner byte-jumps to the row close once
+all wanted fields arrived):
+
+```python
+import crxml
+
+src = crxml.CrystalXMLSource("report.xml", row_tag="Row", engine="parallel")
+df = src | crxml.DropFields(["notes", "audit_trail", "meta_json"]) | crxml.to_pandas()
+```
+
 **Impact:** For projections, skips scanning 60-80% of fields. Measured:
 +123% on drop_half parallel (533 MB: 3,394 → 7,571 MB/s).
 
@@ -4123,6 +4477,15 @@ precomputed close finder (see section 9).
 **Before:** `sink.wants(name)` virtual call per field (vtable dispatch).
 
 **After:** `(wanted_mask >> slot) & 1`: single bit test, no vtable dispatch.
+
+**Example:** per-field membership test in the parse loop:
+
+```rust
+let mask = sink.wanted_mask(); // precomputed once, 0 when no projection
+if mask != 0 && (mask >> slot) & 1 == 0 {
+    continue; // not wanted: skip extraction entirely
+}
+```
 
 **Impact:** Eliminates virtual dispatch overhead in the hot inner loop.
 Combined with row_satisfied, enables full projection optimization.
@@ -4134,6 +4497,23 @@ Combined with row_satisfied, enables full projection optimization.
 **After:** Ordinal counter threads through `parse_row` → `scan_child` →
 `field_element`. Enables `expect_slot` (layout prediction) and
 `row_satisfied` (projection short-circuit).
+
+**Example:** the counter threads through the parse recursion:
+
+```rust
+// the caller advances `ordinal` per field; it threads parse_row ->
+// scan_child -> field_element so each field knows its position
+fn field_element<S: ColumnarSink>(sink: &mut S, ordinal: u32,
+                                  raw_name: &[u8], value: Value<'_>) {
+    if let Some((slot, expected)) = sink.expect_slot(ordinal) {
+        if raw_name == expected {
+            sink.put_field_at(slot, value); // layout fast path
+            return;
+        }
+    }
+    // generic path: scan + decode + resolve + put_field
+}
+```
 
 **Impact:** Enables optimizations 5 and 6. ~3% overhead for the counter
 increment, but the savings from 5 and 6 far outweigh it.
@@ -4147,6 +4527,18 @@ in projection workloads.
 **After:** Precomputed once in `scan_chunk`, passed to `parse_row` as a
 reference. Zero allocation per row.
 
+**Example:** precomputed once in scan_chunk, reused per row:
+
+```rust
+use rypipe_core::scan::find_literal;
+
+let close_finder = memchr::memmem::Finder::new(b"</Row>"); // once per chunk
+// per satisfied or rejected row: zero allocation
+if let Some(close) = find_literal(bytes, pos, &close_finder) {
+    pos = close + b"</Row>".len();
+}
+```
+
 **Impact:** Eliminates per-row allocation. For 480K rows, saves 480K
 Vec allocations + Finder constructions. Measured: +10% single-thread,
 +9% parallel.
@@ -4159,17 +4551,48 @@ Vec allocations + Finder constructions. Measured: +10% single-thread,
 then delegates to memchr. `scan::find2` for dual-byte searches with the
 same fast path.
 
+**Example:** the `next_lt` hot path:
+
+```rust
+use rypipe_core::scan::{find, find2};
+
+if let Some(lt) = find(bytes, pos, b'<') {
+    // bytes[pos] == b'<': O(1) hit, AVX2 prologue skipped
+}
+let (i, hit) = find2(bytes, pos, b'<', b'"')?; // dual-byte, same fast path
+```
+
 **Impact:** 15% on the `next_lt` hot path (byte-at-position check avoids
 AVX2 prologue on 2/3 of calls).
 
 ## 11. Engine-provided Splitter default (S1) { #11-engine-provided-splitter-default }
 
-**Before:** Adapters implement `find_split_points` from scratch. Two adapters
-got it wrong: TSV collected first K newlines (negative scaling), crxml
-scanned entire file for `<!` (25% overhead).
+**Before:** Adapters implement `find_split_points` from scratch, which is a
+recurring source of performance bugs: sampling too little data causes
+sub-MB chunk collapse, sampling too much scans far more of the file than
+needed.
 
 **After:** Default `find_split_points` uses `next_record_start` + rayon +
 skip-region rejection + dedup + chunk floor (2 MiB minimum).
+
+**Example:** a minimal Splitter gets the tuned default for free:
+
+```rust
+use rypipe_core::Splitter;
+
+struct RowTagSplitter;
+
+impl Splitter for RowTagSplitter {
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        memchr::memmem::find(&bytes[from..], b"<Row>").map(|p| from + p)
+    }
+    fn estimate_bytes_per_row(&self, _sample: &[u8]) -> usize {
+        2048 // coarse hint, only used for chunk sizing
+    }
+}
+// find_split_points comes free: rayon + skip-region rejection + 2 MiB floor.
+let points = RowTagSplitter.find_split_points(bytes, 16);
+```
 
 **Impact:** Eliminates the bug class: +13-32% on projection workloads.
 
@@ -4180,6 +4603,17 @@ All chunks must be merged before dict upgrade.
 
 **After:** Per-chunk upgrade in parallel, then `unify_dictionaries` +
 `remap_codes` (O(dict_size), not O(rows)).
+
+**Example:** the user-facing trigger:
+
+```python
+import crxml
+
+src = crxml.CrystalXMLSource(
+    "report.xml", row_tag="Row", engine="parallel", auto_dict=True
+)
+df = src.to_pandas()  # low-cardinality strings become dictionary columns
+```
 
 **Impact:** auto_dict parallel gap: 45% to 16%.
 
@@ -4275,7 +4709,7 @@ pub fn resolve_field<'a>(&'a self, raw: &'a str) -> Option<&'a str> {
     // 3. Schema projection: when schema_order is non-empty, drop resolved
     //    names not listed there unless the filter references them
     if !self.schema_order.is_empty()
-        && !self.schema_order.contains(resolved)
+        && !self.schema_order.iter().any(|n| n == resolved)
         && !self.filter_references(resolved)
     {
         return None;
@@ -4325,7 +4759,7 @@ pub enum FieldType {
 
 `Timestamp` carries an optional chrono format string, parsed from specs like
 `timestamp[ms,format=%Y%m%d]` (unit defaults to `us`). `Decimal128(u8)` takes
-a scale (default 18 via the `decimal128` spec).
+a scale (default 18 via the `decimal128` spec, capped at 38 for Arrow compatibility).
 
 ## FilterPredicate { #filterpredicate }
 
@@ -4377,7 +4811,8 @@ pub enum FilterPredicate {
 ```
 
 `RegexSpec` pairs the pattern string with its compiled `regex::Regex`; the
-Python filter spec op `"regex"` builds one.
+Python filter spec op `"regex"` builds one. Compiled patterns are capped at
+**1 MiB** to limit memory use and reduce ReDoS risk.
 
 ### Check method { #check-method }
 
@@ -4455,23 +4890,56 @@ pub(crate) fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<Stri
             actual.as_deref() == Some(value.as_str())
         }
         Compare { field_a, op, field_b } => {
-            let va = get_typed_value(columns, field_index, plan, field_a, row_index);
-            let vb = get_typed_value(columns, field_index, plan, field_b, row_index);
-            compare_typed(va, *op, vb)
+            let va = get_column(columns, field_index, resolve(field_a, plan))
+                .and_then(|b| b.get_typed_value(row_index));
+            let vb = get_column(columns, field_index, resolve(field_b, plan))
+                .and_then(|b| b.get_typed_value(row_index));
+            match (va, vb) {
+                (Some(a), Some(b)) => compare_typed(&a, *op, &b),
+                _ => false,
+            }
         }
-        StartsWith { field, value } => actual.starts_with(value),
-        EndsWith { field, value } => actual.ends_with(value),
-        Contains { field, value } => actual.contains(value),
-        In { field, values } => values.contains(actual),
+        StartsWith { field, value } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => s.starts_with(value.as_str()), None => false }
+        }
+        EndsWith { field, value } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => s.ends_with(value.as_str()), None => false }
+        }
+        Contains { field, value } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => s.contains(value.as_str()), None => false }
+        }
+        In { field, values } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => values.contains(&s), None => false }
+        }
+        NotIn { field, values } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => !values.contains(&s), None => true }
+        }
         IsNull { field } => get_value(columns, field_index, field, plan, row_index).is_none(),
-        IsType { field, field_type } => column.is_type_at(row_index, field_type),
-        Regex { field, re } => re.compiled.is_match(actual),
-        NotField { field } => actual.is_none_or(|v| v.is_empty()),
+        IsType { field, field_type } => {
+            let resolved = resolve(field, plan);
+            let col = get_column(columns, field_index, resolved);
+            match col {
+                None => false,
+                Some(c) => c.is_type_at(row_index, field_type),
+            }
+        }
+        Regex { field, re } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => re.compiled.is_match(s.as_ref()), None => false }
+        }
+        NotField { field } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => s.is_empty(), None => true }
+        }
         Always(b) => *b,
         And(a, b) => a.check(...) && b.check(...),
         Or(a, b) => a.check(...) || b.check(...),
         Not(a) => !a.check(...),
-        // ... other variants follow same pattern
     }
 }
 ```
@@ -4489,11 +4957,11 @@ first. This enables earlier short-circuit in both combinators.
 ## Plan construction from Python { #plan-construction-from-python }
 
 ```python
-from rypipe import RenameFields, DropFields, FilterRows, CastTypes
+import crxml
 
-src | RenameFields({"old": "new"}) | DropFields(["id"]) | \
-    FilterRows(field="status", op="==", value="active") | \
-    CastTypes({"amount": float})
+src | crxml.RenameFields({"old": "new"}) | crxml.DropFields(["id"]) | \
+    crxml.FilterRows(field="status", op="==", value="active") | \
+    crxml.CastTypes({"amount": float})
 ```
 
 Each stage has `_plan_kwargs()` that returns a dict. `plan_split` merges
@@ -4502,8 +4970,9 @@ combined with an implicit `and`, and `observer` hook dicts merge per-hook
 (chaining callables when several stages provide the same hook). Non-fusable
 stages (custom callables) run over the returned table.
 
-Filters can also be built with the expression API (`rypipe.expr.col(...)`);
-such predicates expose `_to_spec()` and are fusable like plain spec dicts.
+Filters can also be built with the expression API (the adapter's
+re-exported `col(...)`); such predicates expose `_to_spec()` and are fusable
+like plain spec dicts.
 `FilterRows(field=..., is_null=False)` becomes
 `{"not": {"field": ..., "op": "is_null"}}`.
 
@@ -4839,7 +5308,7 @@ Properties:
 
 ```rust
 pub fn insert_schema_cache(sig: (u64, u64), order: Arc<Vec<String>>) {
-    let mut cache = SCHEMA_CACHE.write().unwrap();
+    let mut cache = SCHEMA_CACHE.write().unwrap_or_else(|e| e.into_inner());
     if cache.len() >= SCHEMA_CACHE_CAP {
         if let Some(oldest) = cache.keys().next().copied() {
             cache.remove(&oldest);
@@ -5312,7 +5781,7 @@ the finish path below) instead of becoming `None`.
 
 ```
 data:    [h][e][l][l][o][w][o][r][l][d]     ← two strings
-offsets: [0,     5,          10]             ← byte boundaries
+offsets: [0,          5,            10]     ← byte boundaries
 ```
 
 ### push { #push }
@@ -6175,15 +6644,28 @@ The engine provides `TableBuilder` as the production
 |-----------|---------|
 | **`LogSource(Source)`** | Pipeline-capable source with `_read_arrow()` and plan forwarding |
 | **`rypipe_log.stages/`** | Re-exports of `CastTypes`, `FilterRows`, `RenameFields`, `DropFields` from `rypipe.stages` |
+| **`rypipe_log` expression helpers** | Re-export of `col` (and optionally `Predicate`) from `rypipe.expr` so users can build fusable filters without importing **rypipe** |
 | **Registration** | Adapter registered at import time via side-effect import |
+
+!!! note
+
+    The Python layer is **optional**. `rypipe-core` has zero Python
+    dependency: to ship a Rust-only adapter (a library or binary with no
+    Python runtime), implement the two Rust traits below, drive them with
+    [`Pipeline`](../reference/rust-api.md#pipeline), and simply skip the
+    PyO3 section in [Rust adapter creation](./rust-creation.md#pyo3-bindings)
+    and everything after it in the [walkthrough](./walkthrough.md). See
+    [Rust API](../reference/rust-api.md) and
+    [why Python?](../why-python.md#6-when-rust-only-does-make-sense-and-rypipe-still-supports-it).
 
 !!! note
 
     Adapters **re-export the API**: they re-export pipeline stage classes
     (`CastTypes`, `FilterRows`, `RenameFields`, `DropFields`) from
-    `rypipe.stages` and sink functions (`collect`, `to_arrow`, `to_pandas`,
-    `to_polars`, `to_parquet`, `to_csv`) so users never import from
-    **rypipe** directly. This makes the adapter self-contained.
+    `rypipe.stages`, sink functions (`collect`, `to_arrow`, `to_pandas`,
+    `to_polars`, `to_parquet`, `to_csv`), and the expression entry points
+    (`col`, optionally `Predicate`) from `rypipe.expr`, so users never import
+    from **rypipe** directly. This makes the adapter self-contained.
 
 
 ## Adapter API contract { #adapter-api-contract }
@@ -7648,6 +8130,14 @@ let pos = bytes.iter().position(|&b| b == b'<');  // Bad: 5-10x slower
 
 ## PyO3 bindings { #pyo3-bindings }
 
+!!! note
+
+    This section is **optional**: it is only needed if the adapter must be
+    callable from Python. `rypipe-core` has no Python dependency, so a
+    Rust-only adapter stops here: `Pipeline::read_path` gives you a
+    `RecordBatch` directly, and everything above (traits, plan, tests)
+    already works without PyO3.
+
 The walkthrough crate exposes a single `read_log` function instead of
 Python classes. It receives the merged pushdown plan from the Python side,
 builds an `ExecutionPlan`, runs the `Pipeline`, and exports the batch as a
@@ -7692,7 +8182,7 @@ fn read_log(
             // Type names arrive as strings ("int64", "float64", ...);
             // reject unknown ones with a Python ValueError naming both
             // the type and the field.
-            let ft = FieldType::from_str(&type_str).ok_or_else(|| {
+            let ft = type_str.parse::<FieldType>().map_err(|_| {
                 PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
             })?;
             plan.field_types.insert(name, ft);
@@ -8154,7 +8644,7 @@ pub fn read_file(path: &str, schema: Option<Vec<String>>, field_types: Option<Ha
     // Apply field_types if provided
     if let Some(types) = field_types {
         for (name, type_str) in &types {
-            if let Some(ft) = FieldType::from_str(type_str) {
+            if let Ok(ft) = type_str.parse::<FieldType>() {
                 plan.field_types.insert(name.clone(), ft);
             }
         }
@@ -9434,10 +9924,14 @@ let plan = ExecutionPlan::new().with_observer(counter.clone());
 ```
 
 Hooks fire from parse threads on every engine (serial, parallel, bounded,
-streaming), so keep them cheap and thread-safe. Buffered filter rows report
-`on_put_field` only when the row is accepted. From Python, pass
-`observer={"on_row_rejected": fn}` to the source instead; see the
-[stage protocol](../advanced/stage-protocol.md#observer-hooks).
+streaming), so keep them cheap and thread-safe. A Rust hook is a plain
+function call (a few nanoseconds, parallel across chunks). The Python
+equivalent (`observer={"on_row_rejected": fn}` on the source, see the
+[stage protocol](../advanced/stage-protocol.md#observer-hooks)) pays a GIL
+acquisition plus a Python call per event (~50 ns), serialized against other
+Python threads. Prefer the Rust `RowObserver` for hot paths; use the Python
+dict for debugging and prototyping. Buffered filter rows report
+`on_put_field` only when the row is accepted.
 
 ## Benchmarking { #benchmarking }
 
@@ -9609,7 +10103,7 @@ name = "_rypipe_log"
 crate-type = ["cdylib"]
 
 [dependencies]
-rypipe-core = "2"
+rypipe-core = "0.3"
 # arrow must match rypipe-core's pinned version for the PyArrow export
 arrow = { version = "=55.2.0", default-features = false, features = ["pyarrow", "ffi"] }
 # pyo3 0.24 matches the pyo3 version arrow 55's "pyarrow" feature uses
@@ -9802,7 +10296,7 @@ fn read_log(
     plan.auto_dict = auto_dict;
     if let Some(ft) = field_types {
         for (name, type_str) in ft {
-            let ft = FieldType::from_str(&type_str).ok_or_else(|| {
+            let ft = type_str.parse::<FieldType>().map_err(|_| {
                 PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
             })?;
             plan.field_types.insert(name, ft);
@@ -10100,6 +10594,190 @@ both stages ran inside the Rust parse, not in Python afterward.
 * `rypipe.read("file.log")` works via the registered adapter.
 * `LogSource("file.log") | CastTypes(...) | FilterRows(...)` works via the
   Source pipeline.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/changelog/
+========================================================================
+
+# Changelog
+
+All notable changes to rypipe, newest first. Versions follow semantic versioning and are tagged in the repository.
+
+## [0.3.2] - 2026-09-11
+
+### Added
+
+- **Expression API string transforms.** Added `strip`, `lstrip`, `rstrip`, `lower`, `upper`, `replace`, and `length` methods to the `col()` expression API. These produce fusable filter spec dicts that run in the Rust parse loop.
+
+### Security
+
+- **Decompression bomb protection.** Added 1 GiB limit on decompressed output via `LimitReader`. Compressed inputs (gzip, zstd, lz4) that would decompress beyond 1 GiB are rejected mid-stream to prevent OOM kills.
+- **Regex size limit.** Compiled regex patterns are capped at 1 MiB to reduce ReDoS risk and memory consumption.
+- **Supply chain audit.** Added `cargo-deny` advisory/license/ban checks to CI. Pinned all GitHub Actions to full commit SHAs.
+- **Predicate nesting depth limit.** Filter specs are limited to 128 levels of nesting to prevent stack overflow from adversarial input.
+- **In/NotIn values list cap.** Values lists are capped at 100,000 elements to prevent excessive memory allocation and O(n) per-row scan amplification.
+- **Replace filter empty-old rejection.** `Replace` filter with empty `old` string is rejected to prevent per-row memory amplification (`old=""` inserts `new` before every character).
+- **Decimal128 scale cap.** Scale values are capped at 38 (Arrow maximum) to prevent i8 overflow in the Arrow schema.
+
+### Fixed
+
+- **Filter comparisons on unparseable values.** Typed filter comparisons (`Int64`, `Float64`) now fail when values cannot be parsed, instead of silently comparing as 0/0.0. Division by zero in `ArithOp::Div` now returns false instead of producing infinity/NaN.
+- **Dictionary UTF-8 corruption.** Dictionary merge paths use `from_utf8_lossy` instead of `unwrap_or("")` to preserve corrupt data with replacement characters instead of silently creating empty-string entries.
+- **HashMap unwrap panics in dictionary unification.** `dict.rs` and `parallel.rs` HashMap lookups now use graceful fallback instead of panicking on missing keys from corrupted input.
+- **Dictionary code bounds checks.** Dictionary code indexing in `columnar.rs` now returns `None` for out-of-bounds codes instead of panicking.
+- **Bounds checks on `find_literal` and `in_skip_region`.** Prevent panics when `at > hay.len()` or when opener extends past the target position.
+- **Empty ranges from degenerate splitter.** `bounded.rs` and `parallel.rs` now guard against empty chunk ranges, matching the existing guard in `parallel_stream.rs`.
+- **RowObserver panic safety in bounded path.** Observer hooks in the bounded parse path are now wrapped in `catch_unwind`, matching the parallel path behavior.
+- **`FieldType::FromStr` error type.** Changed from `()` to `String` for actionable error messages that include the bad input.
+- **LimitReader error message.** Decompression bomb error now includes the actual byte count.
+- **`threads=0` rejected.** `resolve_engine` now rejects `threads=0` with a clear error.
+- **`parse_memory_string` validation.** Empty, negative, and non-finite memory strings are now rejected.
+- **Plan parameter validation.** `auto_dict_threshold` (must be 0.0-1.0), `auto_dict_max_size` (must be >= 1), and `max_split_chunks` (must be >= 1) are now validated.
+- **`StrColumn::with_capacity` cap.** Allocation is capped at 1M rows to prevent multi-gigabyte allocations from bad row-size estimates.
+- **Overflow-safe chunk splitting.** `bytes.len() * i / n` replaced with `bytes.len() / n * i` to prevent integer overflow on large files.
+- **TOCTOU mitigation.** Path is canonicalized before file reopen in bounded stream to prevent symlink swap between mmap planning and reading.
+
+### Changed
+
+- **Poisoned lock recovery.** Schema cache and parallel stream locks now recover from poisoned state via `unwrap_or_else(|e| e.into_inner())` instead of panicking.
+- **Unsafe `get_unchecked` removed.** Dictionary code remapping in `columnar.rs` and `dict.rs` uses bounds-checked `get()` instead of `unsafe get_unchecked`.
+- **`warn(unsafe_code)` lint.** Added to `rypipe-core` crate root. Removed blanket `#![allow(unsafe_code)]` from `input.rs`.
+- **Regex size limit raised.** From 256 KiB to 1 MiB to reduce false positives on legitimate patterns.
+- **Dead code removed.** Legacy `run_mapped` and `apply_plan_filter` functions deleted from `bounded.rs`.
+- **Dictionary unification performance.** Removed unnecessary `clone` of `column_order` during per-chunk dictionary unification in `parallel.rs`.
+
+## [0.3.1] - 2026-09-11
+
+### Fixed
+
+- **Flaky schema cache test.** Removed global counter assertions from `schema_cache_hits_misses_and_plan_changes` that were affected by parallel test interference.
+
+### Changed
+
+- **Publishing CI: test blocker.** Both PyPI and crates.io publishing workflows now run tests as a required gate before publishing.
+
+## [0.3.0] - 2026-09-11
+
+### Added
+
+- **Expression API with `col()` for fusable filter predicates.** `col("amount") > 100` builds a predicate that fuses into the Rust parse loop, just like keyword-form filters. Supports `&` (and), `|` (or), `~` (not) composition, and methods: `isin`, `not_in`, `startswith`, `endswith`, `contains`, `matches`, `between`, `is_null`, `is_not_null`, `is_type`.
+- **`FilterRowsAny`, `FilterRowsAll`, `FilterRowsNot` combinators.** Build OR, AND, and NOT logic over keyword-form filters. Combinators are fusable and nestable: `FilterRowsAny(A, FilterRowsAll(B, FilterRowsNot(C)))` expresses `A or (B and not C)`.
+- **`RowObserver` trait and Python `observer` hooks.** Per-row instrumentation fired during parsing. The Rust `RowObserver` trait has methods `on_begin_row`, `on_put_field`, `on_row_accepted`, `on_row_rejected`, `on_chunk_finished`. Python passes `observer={"on_row_rejected": fn, ...}` in plan kwargs, wrapping callables in a `PyObserver`.
+- **`strict_types` mode.** `strict_types=True` on `Source.__init__` or `ExecutionPlan` aborts the read when a non-null value fails to parse into its declared type, instead of silently nulling. Genuine nulls remain null.
+- **`max_split_chunks` parameter.** Caps the number of bounded-streaming chunks. Defaults to 100,000. Exposed as `max_split_chunks` on `Source.__init__` and `ExecutionPlan`.
+- **`MemoryBudget` struct and `BatchConsumer` trait.** `MemoryBudget::new(bytes)` sets a streaming budget. `BatchConsumer` is a callback trait for streaming reads without batch collection: `Pipeline::read_bytes_stream_consumer(bytes, budget, consumer)`.
+- **`parse_decimal128` support.** `FieldType::Decimal128` and `CastTypes` now parse decimal values.
+- **`rypipe-test` crate.** Property-based testing helpers for adapter development: proptest strategies (`arb_field_name`, `arb_field_value`, `arb_record`, `arb_records`, `arb_malformed_utf8`, `arb_nested_quotes`), fixtures (`MALFORMED_UTF8`, `NESTED_QUOTES`, `EMPTY_VALUES`), and test helpers (`parse_test_bytes`, `assert_batches_equal`, `KeyValueParser`, `NewlineSplitter`).
+- **cargo-generate template for adapter scaffolding.** `cargo generate emiliano-go/rypipe template` creates a ready-to-build adapter package.
+- **`chunks=` kwarg on `CrystalXMLSource`.** Passes through to `max_split_chunks` for parallel reads.
+- **`memory=` kwarg on all sink functions.** `collect(pipeline, memory="64MiB")`, `to_pandas(pipeline, memory=...)`, `to_polars(pipeline, memory=...)`, `to_parquet(pipeline, path, memory=...)` all support bounded-memory streaming.
+- **`discover_schema()` function.** Scans a file once and returns column names after applying `field_mapping`, `drop_fields`, etc. Avoids per-file discovery overhead.
+- **`Pipeline.to_pandas()`, `to_polars()`, `to_parquet()` methods.** Materialize pipeline results directly without importing sink functions.
+- **Binary memory units.** `iter_record_batches` and `Source.to_pandas`/`to_polars`/`to_parquet` accept `KiB`, `MiB`, `GiB`, `TiB` in addition to `KB`, `MB`, `GB`, `TB`.
+- **`starts_with`, `ends_with`, `contains` filter operators.** Fusable keyword-form operators for string prefix, suffix, and substring matching.
+- **`schema()` respects projection.** When `schema=["Name", "Amount"]` is passed, `Source.schema()` returns `["Name", "Amount"]` instead of the full column list.
+- **`Splitter::find_split_points` default method.** Finds safe split points via nominal offsets, `next_record_start`, skip-region rejection, dedup, and sort. Adapters rarely need to override.
+- **`FrozenSchema::from_partial_plan` and `is_exact`.** `from_partial_plan` builds a schema from a partial column list. `is_exact` reports whether the schema matches exactly.
+- **Schema cache functions.** `insert_schema_cache`, `clear_schema_cache`, `schema_cache_stats`, `dynamic_window_count`, `dynamic_window_size`, `layout_signature` for schema discovery optimization.
+- **Timestamp format variants.** `FieldType::Timestamp(TimeUnit)` supports `Second`, `Millisecond`, `Microsecond`, `Nanosecond`, plus custom chrono formats: `timestamp[ms,format=%Y%m%d %H:%M]`.
+- **`Predicate` composable trait.** Python objects with `_to_spec()` returning a spec dict can be passed as `FilterRows(predicate=obj)`.
+
+### Fixed
+
+- **`ArithmeticCompare.cmp_value` type.** Was documented as `f64`, corrected to `String`.
+- **`Length.value` type.** Was documented as `i64`, corrected to `String`.
+- **Compound filter specs fall back to Python with full plan override.** `FilterRowsAny`/`All`/`Not` and unsupported ops (`is_null`, `is_type`, `regex`, comparisons) now correctly apply rename, drop, and cast transformations in the Python fallback path.
+- **`iter_record_batches` memory passthrough.** Memory strings are parsed to bytes before passing to the Rust extension, which only accepts integer byte counts.
+- **`schema()` projection.** `Source.schema()` now returns `self._schema` when set, respecting the projection.
+
+### Changed
+
+- **`to_dataframe()` removed.** Use `to_pandas()` instead. The alias existed for backward compatibility with crxml 2.1.
+- **Lambda compiler sunset.** The in-tree lambda bytecode compiler is removed. Use `col()` expressions or keyword-form filters instead; for arbitrary logic, use plain callables (Python fallback, not fusable).
+- **`ColumnarSink` trait expanded.** 10 new methods: `put_row`, `resolve_raw`, `resolve_and_put_raw`, `put_field_resolved`, `put_field_at`, `resolve_and_put`, `needs_value`, `needs_resolve`, `wanted_mask`, `expect_slot`.
+- **`Pipeline` expanded.** 3 new methods: `read_bytes_stream_consumer`, `read_path_stream_consumer`, `read_path_stream_par`.
+- **`ExecutionPlan` gained fields.** `strict_types: bool`, `max_split_chunks: Option<usize>`, `observer: Option<Arc<dyn RowObserver>>`.
+
+## [0.2.2] - 2026-09-04
+
+### Added
+
+- **Contiguous dictionary storage.** Dictionary-encoded columns now use contiguous storage for better cache locality and compression.
+
+### Fixed
+
+- **Pipeline examples use `CrystalXMLSource`** instead of `rypipe.read` in documentation.
+- **Hello World adapter example** tested and working.
+- **Prose text cleanup.** Replaced ` : ` with `, ` across 4 files.
+- **Documentation fixes.** Removed redundant Pages table, fixed missing blank lines before numbered lists, updated performance numbers in why-python.
+
+## [0.2.1] - 2026-09-03
+
+### Fixed
+
+- **`wanted_mask` projection short-circuit.** Projection short-circuit fired incorrectly when `field_map` or `drop_fields` were active.
+- **Cross-platform `is_x86_feature_detected!` guard.** Added `cfg` guard for non-x86 platforms.
+- **Dead code on `RowBuffer::new`.** Allowed `dead_code` to fix clippy error.
+- **`bench_tier` return type.** Corrected from `(f64, usize)` to `(f64, f64, usize)`.
+- **`_headers` file for correct Content-Type** on `sitemap.xml`.
+- **Writing Adapters nav** points to directory, not missing `.md` file.
+
+### Changed
+
+- **Documentation expanded.** Added tagline, "Why rypipe", "What rypipe is not" sections. Fixed 6 audit findings.
+
+## [0.2.0] - 2026-09-02
+
+### Added
+
+- **SIMD scan module with runtime dispatch.** `scan/` module with AVX2/SSE NEON detection; the engine picks the fastest path at runtime.
+- **Tier ladder in core.** Performance tiers (`S5` through `S10`) behind `bench` feature for benchmarking individual optimizations.
+- **`Splitter` default method + `SkipRegionFinder` + chunk floor.** `find_split_points` has a complete default implementation. `SkipRegionFinder` defines byte ranges that must not be split on. `plan_chunk_count` enforces a minimum chunk size.
+- **`dict.rs` incremental dictionary unification.** Builds dictionary-encoded columns incrementally across chunks.
+- **Parallel streaming + `BatchConsumer` + `StreamingBatchIterator`.** True parallel bounded-memory streaming via `read_path_stream_par`.
+- **`put_field_at` + `expect_slot`/`record_slot`/`layout_broken` on `ColumnarSink`.** Slot-based fast path for adapters that verify field identity via `expect_slot` + memcmp.
+- **`PrimColumn<T>` + validity bitmap.** Replaces `Vec<Option<T>>` with packed storage and a bitpack validity array.
+- **`BlockMasks` engine asset.** Precomputed bitmasks for fast column membership testing.
+- **Frozen schema + parallel discovery.** `FrozenSchema` resolves column order and types once; parallel discovery scans multiple windows concurrently.
+- **64KB streaming via `BatchConsumer` + `StreamingBatchIterator`.** True streaming at 64KB memory budget with dynamic `bytes_used` and `split_off`.
+- **`Cow`-based `Value::Str`.** `Value::Str(Cow<'a, str>)` borrows from input bytes, closing filtered-path use-after-free.
+- **Advanced docs section.** 2000+ lines covering architecture, fusion, streaming, profiling, parallelism, memory, I/O tuning, schema, stage protocol, source patterns, adapter design, case studies.
+
+### Fixed
+
+- **`plan_chunk_count` hardcoded chunks.** Was hardcoded to 1; now uses `max_chunks`.
+- **`in_skip_region` overhead.** Uses `memchr::memmem::find` directly instead of `Finder::new`.
+- **Clippy warnings.** Resolved all `clippy -D warnings` for CI.
+- **`starts_with` out-of-bounds panic.** Fixed bounds check.
+- **Parallel stream channel types.** Corrected channel type parameters.
+- **Reorder buffer overflow fallback.** Falls back to unordered delivery when the buffer overflows.
+- **`reset_child_ordinal`** syncs adapter/engine ordinal counters.
+
+### Changed
+
+- **`engine.rs` (2392 lines) split into `engine/` module.** Modular structure for maintainability.
+- **Arrow bumped to 59.2.0**, pyo3 to 0.29.
+- **Documentation rewritten.** Architecture (2000 lines) and writing-adapters (7 pages) fully rewritten.
+
+## [0.1.1] - 2026-08-23
+
+### Fixed
+
+- **crates.io metadata and trusted publishing.** Added `LICENSE`, `README`, and `description` to `Cargo.toml` for crates.io publishing.
+
+## [0.1.0] - 2026-08-23
+
+### Added
+
+- **Format-agnostic columnar engine.** Core `rypipe-core` crate with `Splitter`, `RecordParser`, `ColumnarSink` traits, `Pipeline` high-level API, `ExecutionPlan` builder, and Arrow export.
+- **Crystal Reports XML adapter (crxml).** Reference adapter demonstrating the full trait implementation.
+- **PyO3 bindings (`rypipe-python`).** `execution_plan_from_kwargs`, `record_batches_to_pyarrow_table`, `record_batch_to_pyarrow`, exception types (`ParseError`, `XmlError`, `PlanError`, `MergeError`).
+- **Public `rypipe` package.** `Source`, `Pipeline`, stages (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows`), sinks (`collect`, `to_arrow`, `to_pandas`, `to_polars`, `to_parquet`, `to_csv`), `read()`, `read_par()`, `read_stream()`, `read_batches()`, `iter_record_batches()`, `register_adapter()`, `resolve_engine()`.
+- **`Adapter` base class.** One-method source creation: subclass `Adapter`, implement `read()`, get caching and pipelines for free.
+- **abi3 wheel builds.** Stable ABI wheels for Python 3.10+.
+- **aarch64 manylinux cross-compilation** with zig.
+- **Zensical docs site.** Tutorial, building-adapters guide, architecture, advanced topics, reference pages.
+- **Benchmark harness.** Throughput benchmarks for the columnar engine.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/contributing/
@@ -10657,7 +11335,13 @@ See [Writing adapters](building-adapters/index.md) for the full trait reference.
 PAGE: https://rypipe.emiliano-go.com/
 ========================================================================
 
-# rypipe documentation { #rypipe-documentation }
+<div align="center">
+  <img src="overrides/badge.png" alt="rypipe badge" width="128"/>
+</div>
+
+<div align="center">
+  <h1 id="rypipe-documentation">rypipe documentation</h1>
+</div>
 
 `rypipe` is a format- and source-agnostic ingestion framework that provides a common
 execution runtime for turning arbitrary record-oriented data sources into typed
@@ -10751,9 +11435,9 @@ print(df)
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-use crxml_core::{CrystalXmlSplitter, CrystalXmlParser}; // adapter crate
+use crxml_core::{CrystalXmlSplitter, CrystalXmlDecoder}; // adapter crate
 
-let batch = Pipeline::new(CrystalXmlSplitter, CrystalXmlParser)
+let batch = Pipeline::new(CrystalXmlSplitter, CrystalXmlDecoder)
     .with_plan(
         ExecutionPlan::new()
             .type_as("Amount", FieldType::Float64)
@@ -10785,6 +11469,10 @@ rypipe/
     └── (this directory)
 ```
 
+<div align="center">
+  <img src="overrides/banner.png" alt="rypipe banner" style="max-width: 100%; height: auto;"/>
+</div>
+
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/performance/
 ========================================================================
@@ -10809,7 +11497,7 @@ Run it yourself:
 cargo run --release -p rypipe-core --example bench_throughput
 ```
 
-Hardware: Linux workstation, AMD Ryzen 9 5900X, DDR4-3200, release build.
+Hardware: Linux workstation, AMD Ryzen 7 5800X, DDR4-3200, release build.
 
 | Path | Rows | Time | Rows/s | MB/s | RSS |
 |------|------|------|--------|------|-----|
@@ -11004,12 +11692,17 @@ rypipe.resolve_engine(
     file_size,                # int: file size in bytes (required)
     *,                        # keyword-only from here
     memory=None,              # int | str | None: memory budget (e.g. "64MiB")
-    threads=None,             # int | None: number of threads
+    threads=None,             # int | None: number of threads (must be >= 1 if provided)
     schema=None,              # list[str] | None: projected column names, in order
     has_parallel=True,        # bool: adapter has parallel support
     has_columnar=True,        # bool: adapter has columnar support
 ) -> str
 ```
+
+!!! note "Validation"
+    `threads` must be >= 1 if provided. Passing `threads=0` raises `ValueError`.
+    `memory` must be a positive finite number or a valid memory string (e.g. `"64MiB"`).
+    Empty or negative memory strings raise `ValueError`.
 
 Returns one of: `"columnar"`, `"parallel"`, `"stream"`, `"parallel_streaming"`.
 
@@ -11050,6 +11743,7 @@ class Source(ABC):
         dictionary_columns=None,       # list[str]
         schema=None,                   # list[str]: project exactly these columns, in this order
         auto_dict=False,               # bool
+        strict_types=False,            # bool: reject malformed data instead of nulling
         observer=None,                 # dict[str, callable] | None: row observer hooks
         use_mmap=True,                 # bool
         batch_size=1024,               # int
@@ -11069,14 +11763,14 @@ def _read_arrow(self, plan_overrides: dict | None = None) -> pyarrow.Table:
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `.to_arrow()` | `pyarrow.Table` | Parse and cache the table. |
-| `.to_pandas(memory=None, dtype_backend="pyarrow")` | `pd.DataFrame` | Convert to pandas. Pass `memory=` for streaming. |
-| `.to_polars(memory=None)` | `pl.DataFrame` | Convert to Polars. Pass `memory=` for streaming. |
-| `.to_parquet(path, memory=None, **kwargs)` | `None` | Write to Parquet. Pass `memory=` for streaming. |
+| `.to_pandas(memory=None, dtype_backend="pyarrow", **kwargs)` | `pd.DataFrame` | Convert to pandas. Pass `memory=` for streaming, `threads` in `**kwargs`. |
+| `.to_polars(memory=None, **kwargs)` | `pl.DataFrame` | Convert to Polars. Pass `memory=` for streaming, `threads` in `**kwargs`. |
+| `.to_parquet(path, memory=None, **kwargs)` | `None` | Write to Parquet. Pass `memory=` for streaming, Parquet options in `**kwargs`. |
 | `.schema()` | `list[str]` | Column names from first row. |
 | `.clear_cache()` | `None` | Drop cached table. |
 | `.iter_arrow_batches(batch_size=None)` | `Iterator[RecordBatch]` | Yield batches. |
 | `.iter_record_batches(memory="64MiB", batch_size=None)` | `Iterator[RecordBatch]` | Stream batches. |
-| `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts. |
+| `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts. All values are strings; use `CastTypes` or `field_types` for real types. |
 | `.__or__(stage)` | `Pipeline` | Pipe operator for stages. |
 
 ### to_pandas() details { #to-pandas-details }
@@ -11121,6 +11815,57 @@ Common options:
 | `use_dictionary` | `bool \| list` | `True` | Enable/disable dictionary encoding |
 | `write_statistics` | `bool` | `True` | Write column statistics |
 
+## discover_schema() { #discover-schema }
+
+Discover column names for a file without a full parse. Scans the file once
+and returns the column names after applying `field_mapping`, `drop_fields`,
+etc.
+
+```python
+crxml.discover_schema(
+    source,                     # str | Path: file path
+    *,
+    row_tag="Details",          # str: row element name
+    field_mapping=None,         # dict[str, str] | None
+    drop_fields=None,           # list[str] | None
+    filter=None,                # dict | None
+    field_types=None,           # dict[str, str] | None
+    dictionary_columns=None,    # list[str] | None
+    schema=None,                # list[str] | None
+    auto_dict=False,            # bool
+) -> list[str]
+```
+
+**Returns:** `list[str]`: column names in output order.
+
+## CrystalXMLSource { #crystalxmlsource }
+
+Concrete `Source` subclass for Crystal Reports XML files (provided by the
+`crxml` adapter). Extends `Source.__init__` with adapter-specific params:
+
+```python
+class CrystalXMLSource(Source):
+    def __init__(
+        self,
+        source,                          # str | Path
+        *,
+        row_tag="Row",                   # str: XML element name for one row
+        engine="auto",                   # "auto" | "stream" | "columnar" | "parallel"
+        threads=0,                       # int: parser threads (0 = all cores)
+        memory=None,                     # str | int | None: memory bound
+        chunks=None,                     # int | None: number of parallel chunks
+        max_split_chunks=None,           # int | None: max split chunks
+        # ... plus all Source.__init__ kwargs ...
+    )
+```
+
+Additional methods beyond `Source`:
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `.to_arrow(combine=False)` | `pyarrow.Table` | Parse and cache. `combine=True` merges chunked columns. |
+| `.iter_record_batches(memory="64MiB", batch_size=None, threads=None)` | `Iterator[RecordBatch]` | Stream batches with parallel support. |
+
 ## Adapter { #adapter }
 
 Convenience base class. Subclasses implement `read()` instead of
@@ -11138,6 +11883,9 @@ A chain of stages applied to a Source.
 
 ```python
 class Pipeline:
+    def __init__(self, source, stages=None, *, batch_size=1024):
+        """Create a pipeline. Usually built via source | stage, not directly."""
+
     def __or__(self, stage) -> Pipeline:
         """Append a stage and return a new Pipeline."""
 
@@ -11204,9 +11952,16 @@ FilterRows(
 )
 ```
 
-**Constant filter operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, and `regex`
-(the value is a regular expression, searched against the string form of the
-field; invalid patterns raise at construction time)
+**Constant filter operators (keyword args):** `==`, `!=`, `>`, `<`, `>=`, `<=`, `regex`
+
+**Expression-only operators:** `starts_with`, `ends_with`, `contains`, `isin`, `not_in`,
+`strip`, `lstrip`, `rstrip`, `lower`, `upper`, `replace`, `length`.
+These are only available via the `col()` expression API, not via keyword args.
+
+!!! note "Limits"
+    - `in`/`not_in` values lists are capped at **100,000 elements**.
+    - `replace` with empty `old` string is rejected (would insert before every character).
+    - Nested filter specs (via `and`/`or`/`not`) are limited to **128 levels** of nesting.
 
 **Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
 
@@ -11220,12 +11975,13 @@ fallback and is not fusable.
 ### Expression API { #expression-api }
 
 ```python
-from rypipe import col
+import crxml
 
-FilterRows(col("amount") > 100)
-FilterRows((col("age") >= 18) & col("name").startswith("A"))
+crxml.FilterRows(crxml.col("amount") > 100)
+crxml.FilterRows((crxml.col("age") >= 18) & crxml.col("name").startswith("A"))
 ```
 
+Adapters re-export `col` (crxml does), so users never import `rypipe.expr`.
 `col(name)` references a column. Comparisons (`==`, `!=`, `>`, `<`, `>=`,
 `<=`) accept a literal or another `col(...)`. Methods:
 
@@ -11237,6 +11993,10 @@ FilterRows((col("age") >= 18) & col("name").startswith("A"))
 | `between(lo, hi)` | Inclusive range, `lo <= x <= hi` |
 | `is_null()` / `is_not_null()` | Null presence checks |
 | `is_type(t)` | Type check (same values as `is_type=`) |
+| `strip(cmp_op, value)` / `lstrip(...)` / `rstrip(...)` | Trim and compare |
+| `lower(cmp_op, value)` / `upper(...)` | Case conversion and compare |
+| `replace(old, new)` | String replacement and compare |
+| `length(cmp_op, value)` | String length comparison |
 
 Predicates compose with `&` (and), `|` (or), `~` (not) into arbitrarily
 nested trees. Everything an expression builds is fusable; anything the spec
@@ -11295,16 +12055,18 @@ Negate a filter.
 
 ## Sinks { #sinks }
 
-Standalone functions for materializing pipeline results.
+Standalone functions for materializing pipeline results. All functions
+accept `memory=` for bounded-memory streaming when the pipeline supports
+`iter_record_batches()`.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `rypipe.collect(pipeline)` | `list[dict]` | Collect all rows. |
+| `rypipe.collect(pipeline, memory=None)` | `list[dict]` | Collect all rows. |
 | `rypipe.to_arrow(pipeline)` | `pyarrow.Table` | Materialize to table. |
-| `rypipe.to_pandas(pipeline)` | `pd.DataFrame` | Materialize to pandas. |
-| `rypipe.to_polars(pipeline)` | `pl.DataFrame` | Materialize to Polars. |
+| `rypipe.to_pandas(pipeline, memory=None, dtype_backend="pyarrow", chunksize=None)` | `pd.DataFrame` | Materialize to pandas. `chunksize` controls rows per intermediate DataFrame chunk. |
+| `rypipe.to_polars(pipeline, memory=None)` | `pl.DataFrame` | Materialize to Polars. |
 | `rypipe.to_csv(pipeline, path, ...)` | `None` | Write to CSV. |
-| `rypipe.to_parquet(pipeline, path, ...)` | `None` | Write to Parquet. |
+| `rypipe.to_parquet(pipeline, path, memory=None, ...)` | `None` | Write to Parquet. |
 
 ### to_csv() { #to-csv }
 
@@ -11327,7 +12089,6 @@ rypipe.to_csv(
 | `rypipe.XmlError` | `ParseError` | XML-specific parse error. |
 | `rypipe.PlanError` | `Exception` | Invalid plan kwargs. |
 | `rypipe.MergeError` | `Exception` | Schema mismatch between chunks. |
-| `rypipe.ParserError` | `Exception` | Parser misbehavior (adapter bug). |
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/reference/rust-api/
@@ -11365,6 +12126,12 @@ pub trait Splitter: Send + Sync {
     fn skip_regions(&self) -> Option<&dyn SkipRegionFinder> {
         None  // default: no skip regions
     }
+
+    /// Find safe split points. Default: nominal offsets → next_record_start
+    /// → skip-region rejection → dedup → sort. Override only with measured reason.
+    fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
+        // default 5-step algorithm
+    }
 }
 ```
 
@@ -11400,12 +12167,25 @@ pub trait ColumnarSink {
     fn end_row(&mut self);
     fn finish(&mut self) -> Result<RecordBatch>;
 
-    // With defaults
+    // Name resolution and field pushing
     fn wants(&self, _name: &str) -> bool { true }
     fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> { Some(name) }
+    fn resolve_raw<'a>(&'a self, raw_name: &'a [u8]) -> Option<&'a str> { ... }
+    fn put_field_resolved(&mut self, resolved_name: &str, value: Value<'_>) { ... }
+    fn put_field_at(&mut self, _slot: u32, value: Value<'_>) { ... }
+    fn resolve_and_put(&mut self, name: &str, value: Value<'_>) { ... }
+    fn resolve_and_put_raw(&mut self, raw_name: &[u8], value: Value<'_>) { ... }
+    fn put_row(&mut self, fields: &[(&str, Value<'_>)]) { ... }
+
+    // Row state
     fn row_rejected(&self) -> bool { false }
     fn row_satisfied(&self) -> bool { false }
-    // ... more methods with defaults
+
+    // Engine hints
+    fn needs_value(&self) -> bool { true }
+    fn needs_resolve(&self) -> bool { true }
+    fn wanted_mask(&self) -> u64 { 0 }
+    fn expect_slot(&self, _ordinal: u32) -> Option<(u32, &[u8])> { None }
 }
 ```
 
@@ -11420,6 +12200,60 @@ pub trait SkipRegionFinder: Send + Sync {
     fn window(&self) -> usize { 64 * 1024 }
 }
 ```
+
+!!! note "From the Python side"
+
+    Python never implements these traits. End users import the adapter, not
+    **rypipe**; here with the reference adapter [crxml](../crxml-adapter.md):
+
+    ```python
+    import crxml
+
+    # engine="auto" picks columnar/parallel/stream from the file size
+    table = crxml.CrystalXMLSource("data.xml", row_tag="Details").to_arrow()
+    table = crxml.CrystalXMLSource(
+        "big.xml", row_tag="Details", engine="parallel"
+    ).to_arrow()                                       # Pipeline::read_path_par
+    ```
+
+    Everything above (`Splitter`, `RecordParser`, `ColumnarSink`,
+    `SkipRegionFinder`) runs inside the adapter's Rust crate; the Python
+    call crosses the boundary exactly once, on entry.
+
+### RowObserver { #rowobserver }
+
+Per-row hooks fired by `TableBuilder` during parsing. Attach via
+[`ExecutionPlan::with_observer`](#executionplan). All methods default to
+no-ops; implement only the ones you need. Hooks fire from parse threads on
+every engine (serial, parallel, bounded, streaming), so keep them cheap and
+thread-safe.
+
+```rust
+pub trait RowObserver: Send + Sync {
+    fn on_begin_row(&self, row_index: usize) {}
+    fn on_put_field(&self, row_index: usize, resolved_name: &str,
+                    slot: usize, value: &Value<'_>) {}
+    fn on_row_accepted(&self, row_index: usize) {}
+    fn on_row_rejected(&self, row_index: usize) {}
+    fn on_chunk_finished(&self, total: usize, accepted: usize, rejected: usize) {}
+}
+```
+
+```rust
+let plan = ExecutionPlan::new().with_observer(Arc::new(MyObserver));
+```
+
+See [Observer hooks for diagnostics](../building-adapters/techniques.md#observer-hooks)
+for a complete counting example.
+
+`RowObserver` is **Rust-only**: no Python bindings are involved at any
+point, so a hook is a plain function call on the parse thread (a few
+nanoseconds, runs fully parallel across chunks). The Python equivalent is
+passing `observer={"on_row_rejected": fn, ...}` in plan kwargs, which wraps
+the callables in a `PyObserver`: every event acquires the GIL and calls
+into Python (~50 ns per call), serialized against other Python threads.
+Both paths are fine per row; the difference matters when the hook fires per
+field or at high row rates. For hot paths, prefer a Rust `RowObserver`.
 
 ## Value enum { #value }
 
@@ -11437,6 +12271,19 @@ pub enum Value<'a> {
 }
 ```
 
+The Python-side type mapping (as seen in `pyarrow` tables and in observer
+hook arguments):
+
+| `Value` | Python | `pyarrow` |
+|---------|--------|-----------|
+| `Str` | `str` | `string`/`dictionary` |
+| `Int64` | `int` | `int64` |
+| `Float64` | `float` | `float64` |
+| `Bool` | `bool` | `bool` |
+| `Date32` | `int` (days since epoch) | `date32` |
+| `Timestamp` | `int` (unit from `field_types`) | `timestamp` |
+| `Null` | `None` | null |
+
 ## ExecutionPlan { #executionplan }
 
 Configuration for the parse loop.
@@ -11452,6 +12299,9 @@ pub struct ExecutionPlan {
     pub auto_dict: bool,                          // auto-dictionary
     pub dict_threshold: Option<f64>,              // auto-dict threshold
     pub dict_max_size: Option<usize>,             // auto-dict max size
+    pub strict_types: bool,                       // reject malformed data
+    pub max_split_chunks: Option<usize>,          // cap on streaming chunks
+    pub observer: Option<Arc<dyn RowObserver>>,   // per-row hooks
 }
 ```
 
@@ -11465,10 +12315,52 @@ ExecutionPlan::new()
     .type_as("col", FieldType::Float64)
     .dictionary("col")
     .filter_eq("status", "active")
+    .filter_ne("status", "inactive")
     .filter_compare("price", CompareOp::Gt, "cost")
     .schema_order(["a", "b", "c"])
     .with_auto_dict(true)
+    .with_dict_threshold(0.05)
+    .with_dict_max_size(256)
+    .with_strict_types(true)
+    .with_max_split_chunks(1000)
 ```
+
+!!! note "From the Python side"
+
+    Each builder method corresponds to a keyword argument on
+    `Source.__init__` (or a fusable pipeline stage whose `_plan_kwargs()`
+    produces the same key). Adapters re-export the stages, so users write
+    `crxml.FilterRows`, never `rypipe.stages.FilterRows`:
+
+    | Rust | Python (crxml) |
+    |------|----------------|
+    | `.rename(old, new)` | `field_mapping={"old": "new"}` or `crxml.RenameFields` |
+    | `.drop()` / `.drop_many()` | `drop_fields=[...]` or `crxml.DropFields` |
+    | `.type_as(col, ty)` | `field_types={"col": "float64"}` or `crxml.CastTypes` |
+    | `.dictionary(col)` | `dictionary_columns=["col"]` |
+    | `.filter_eq(...)` / `.filter_ne(...)` / `.filter_compare(...)` | `filter={...}` spec dict or `crxml.FilterRows` |
+    | `.schema_order([...])` | `schema=["a", "b", "c"]` |
+    | `.with_auto_dict(true)` | `auto_dict=True` |
+    | `.with_strict_types(true)` | `strict_types=True` |
+    | `.with_max_split_chunks(n)` | `max_split_chunks=n` or `chunks=n` |
+    | `.with_observer(Arc::new(obs))` | `observer={"on_row_rejected": fn, ...}` |
+
+    ```python
+    import crxml
+
+    table = (
+        crxml.CrystalXMLSource(
+            "data.xml", row_tag="Details", field_mapping={"usr": "user"}
+        )
+        | crxml.FilterRows(field="status", op="==", value="active")
+        | crxml.RenameFields({"old": "new"})
+        | crxml.to_arrow()
+    )
+    ```
+
+    The pipeline's fusion layer merges stage `_plan_kwargs()` into these
+    source kwargs and passes them to the adapter's Rust `read_*` function
+    as plain kwargs, which builds this `ExecutionPlan`.
 
 ## FieldType { #fieldtype }
 
@@ -11480,13 +12372,16 @@ pub enum FieldType {
     Boolean,
     Dictionary,
     Date32,
-    Timestamp(TimeUnit),
+    Timestamp(TimeUnit, Option<Box<str>>),
+    Decimal128(u8),
 }
 
-impl FieldType {
-    pub fn from_str(s: &str) -> Option<Self>;
+impl std::str::FromStr for FieldType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err>;
     // Recognized: "string", "int64", "float64", "bool", "boolean",
-    // "dictionary", "date32", "timestamp", "timestamp[s]", etc.
+    // "dictionary", "date32", "timestamp", "timestamp[s]", "decimal128",
+    // "decimal128(scale)", etc.
 }
 ```
 
@@ -11495,8 +12390,9 @@ impl FieldType {
 ```rust
 pub enum CompareOp { Gt, Lt, Ge, Le, Eq, Ne }
 
-impl CompareOp {
-    pub fn from_str(s: &str) -> Option<Self>;
+impl std::str::FromStr for CompareOp {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err>;
     // Recognized: ">"|"gt", "<"|"lt", ">="|"ge", "<="|"le", "=="|"eq", "!="|"ne"
 }
 ```
@@ -11525,7 +12421,7 @@ pub enum FilterPredicate {
     Lower { field: String, op: CompareOp, value: String },
     Upper { field: String, op: CompareOp, value: String },
     Replace { field: String, old: String, new: String, op: CompareOp, value: String },
-    Length { field: String, op: CompareOp, value: i64 },
+    Length { field: String, op: CompareOp, value: String },
 
     // Membership
     In { field: String, values: Vec<String> },
@@ -11541,17 +12437,32 @@ pub enum FilterPredicate {
         arith_op: ArithOp,
         arith_value: f64,
         cmp_op: CompareOp,
-        cmp_value: f64,
+        cmp_value: String,
     },
 
     // Boolean
     NotField { field: String },
     Always(bool),
 
+    // Regex
+    Regex { field: String, re: RegexSpec },
+
     // Logical combinators
     And(Box<FilterPredicate>, Box<FilterPredicate>),
     Or(Box<FilterPredicate>, Box<FilterPredicate>),
     Not(Box<FilterPredicate>),
+}
+
+/// Compiled regex plus its pattern.
+pub struct RegexSpec {
+    pub pattern: String,
+    pub compiled: regex::Regex,
+}
+
+impl RegexSpec {
+    /// Compile a regex pattern. Returns an error if the pattern is invalid
+    /// or the compiled automaton exceeds 1 MiB.
+    pub fn new(pattern: impl Into<String>) -> Result<Self, regex::Error>;
 }
 
 impl FilterPredicate {
@@ -11560,6 +12471,44 @@ impl FilterPredicate {
     pub fn not(inner: Self) -> Self;
 }
 ```
+
+!!! note "From the Python side"
+
+    Predicates serialize to a plain dict spec (the `filter=` kwarg), so the
+    same filter reads identically from both languages. Three ways to build
+    one:
+
+    ```python
+    # 1. Keyword form (a positional arg is a plain callable, not fusable)
+    crxml.FilterRows(field="status", op="==", value="active")
+
+    # 2. Expression API (polars-style; same spec, composes with &, |, ~)
+    # (adapters re-export col; users never import rypipe.expr)
+    crxml.FilterRows((crxml.col("age") >= 18) & crxml.col("name").startswith("A"))
+
+    # 3. Logical combinators over keyword-form filters
+    crxml.FilterRowsAll(     # {"and": [spec, spec]}
+        crxml.FilterRows(field="a", op=">", value="1"),
+        crxml.FilterRows(field="b", op="==", value="x"),
+    )
+    crxml.FilterRowsNot(     # {"not": spec}
+        crxml.FilterRows(field="status", op="==", value="active")
+    )
+    ```
+
+    The spec dict is what `FilterRows._plan_kwargs()` returns and what the
+    adapter's Rust kwargs hand to `execution_plan_from_kwargs`.
+
+    **Extending expressions:** Python libraries can add new *spec producers*
+    freely: any object with a `_to_spec()` method returning a spec dict can
+    be passed as `FilterRows(predicate=obj)`, and `Predicate` composes with
+    the standard `&`/`|`/`~`. Adding a genuinely new *operator* is a Rust
+    change: a new `FilterPredicate` variant in
+    `rypipe-core` (`plan.rs`) plus a parsing arm in
+    `rypipe-python/src/plan_kwargs.rs` (`parse_filter_spec`). Until both
+    land, the spec language cannot express the operator and expression
+    construction raises instead of silently falling back to Python. See
+    [Expression filters](../architecture/expressions.md).
 
 ## Pipeline { #pipeline }
 
@@ -11591,6 +12540,62 @@ where
     // Streaming
     pub fn read_bytes_stream(&self, bytes: &[u8], budget: MemoryBudget) -> Result<Vec<RecordBatch>>;
     pub fn read_path_stream(&self, path: impl AsRef<Path>, budget: MemoryBudget, prefault: bool) -> Result<Vec<RecordBatch>>;
+
+    // Streaming with callback (constant memory, no batch collection)
+    pub fn read_bytes_stream_consumer<C>(&self, bytes: &[u8], budget: MemoryBudget, consumer: C) -> Result<()>
+    where C: BatchConsumer;
+    pub fn read_path_stream_consumer<C>(&self, path: impl AsRef<Path>, budget: MemoryBudget, prefault: bool, consumer: C) -> Result<()>
+    where C: BatchConsumer;
+
+    // Parallel streaming
+    pub fn read_path_stream_par(&self, path: impl AsRef<Path>, budget: MemoryBudget, num_chunks: usize, prefault: bool) -> Result<Vec<RecordBatch>>;
+}
+```
+
+!!! note "From the Python side"
+
+    End users import the adapter, not **rypipe**. With the reference
+    adapter [crxml](../crxml-adapter.md), the execution modes map to
+    `CrystalXMLSource` options:
+
+    | Rust | Python (crxml) |
+    |------|----------------|
+    | `read_path` | `crxml.CrystalXMLSource(path, row_tag="Row").to_arrow()` |
+    | `read_path_par` | `CrystalXMLSource(..., engine="parallel").to_arrow()` |
+    | `read_path_stream` (bounded memory) | `src.iter_record_batches(memory="64MiB", batch_size=...)` |
+    | `with_plan(plan)` | source kwargs + fused `crxml.*` stages |
+
+    ```python
+    src = crxml.CrystalXMLSource("big.xml", row_tag="Row")
+    for batch in src.iter_record_batches(memory="64MiB"):
+        writer.write_batch(batch)
+    ```
+
+    The return value crosses the boundary once as a `pyarrow.Table` /
+    `RecordBatch` via the Arrow PyO3 bridge; per-chunk Rust results become
+    per-chunk Python objects on streaming paths.
+
+## MemoryBudget { #memorybudget }
+
+Budget for bounded-memory streaming reads.
+
+```rust
+pub struct MemoryBudget {
+    bytes: usize,
+}
+
+impl MemoryBudget {
+    pub fn new(bytes: usize) -> Self;
+}
+```
+
+## BatchConsumer { #batchconsumer }
+
+Callback trait for streaming reads without batch collection.
+
+```rust
+pub trait BatchConsumer {
+    fn consume(&mut self, batch: RecordBatch) -> Result<()>;
 }
 ```
 
@@ -11603,12 +12608,22 @@ pub struct FrozenSchema { /* fields private */ }
 
 impl FrozenSchema {
     pub fn from_plan(names: &[&str], plan: &ExecutionPlan) -> Self;
+    pub fn from_partial_plan(names: &[&str], plan: &ExecutionPlan) -> Self;
     pub fn from_discovered(names_in_order: &[String], plan: &ExecutionPlan) -> Self;
     pub fn num_columns(&self) -> usize;
     pub fn column_names(&self) -> &[Arc<str>];
     pub fn column_types(&self) -> &[FieldType];
     pub fn resolve(&self, raw_name: &str) -> Option<u32>;
+    pub fn is_exact(&self) -> bool;
 }
+
+// Schema discovery helpers (public functions)
+pub fn dynamic_window_count(file_size: u64) -> usize;
+pub fn dynamic_window_size(file_size: u64) -> usize;
+pub fn layout_signature(bytes: &[u8], opts: &DiscoveryOpts) -> (u64, u64);
+pub fn insert_schema_cache(sig: (u64, u64), order: Arc<Vec<String>>);
+pub fn clear_schema_cache();
+pub fn schema_cache_stats() -> (u64, u64);
 ```
 
 ## DiscoveryOpts { #discoveryopts }
@@ -11667,7 +12682,6 @@ pub fn record_batch_to_pyarrow(
 | `XmlError` | `ParseError` | XML-specific parse error. |
 | `PlanError` | `PyException` | Invalid plan kwargs. |
 | `MergeError` | `PyException` | Schema mismatch between chunks. |
-| `ParserError` | `PyException` | Parser misbehavior (adapter bug). |
 
 ## Error enum { #error }
 
@@ -11714,6 +12728,7 @@ Proptest strategies for generating test data:
 
 ```rust
 use rypipe_test::fixtures::{MALFORMED_UTF8, NESTED_QUOTES, EMPTY_VALUES};
+use rypipe_test::fixtures::long_column_name;
 ```
 
 | Fixture | Description |
@@ -11721,6 +12736,7 @@ use rypipe_test::fixtures::{MALFORMED_UTF8, NESTED_QUOTES, EMPTY_VALUES};
 | `MALFORMED_UTF8` | 5 byte sequences that fail UTF-8 validation |
 | `NESTED_QUOTES` | 5 strings with nested single/double quotes |
 | `EMPTY_VALUES` | 5 empty/blank value variants |
+| `long_column_name(len)` | Generate a column name of the given length |
 
 ### Helpers { #helpers }
 
@@ -11731,7 +12747,7 @@ use rypipe_test::{KeyValueParser, NewlineSplitter};
 
 | Helper | Purpose |
 |--------|---------|
-| `parse_test_bytes(bytes, splitter, parser, plan)` | Parse bytes into `Vec<RecordBatch>` |
+| `parse_test_bytes(bytes)` | Parse bytes into a `TableBuilder` |
 | `assert_batches_equal(batches, expected_rows)` | Assert row count and non-empty batches |
 | `KeyValueParser` | `key=value` parser for test adapters |
 | `NewlineSplitter` | Newline splitter for test adapters |
@@ -12068,25 +13084,55 @@ need and copy-paste the examples.
 **rypipe** is a format-agnostic columnar ingestion framework. It reads
 row-oriented files (XML, CSV, JSONL, logs, etc.) and produces
 <abbr title="Apache Arrow is a cross-language columnar memory format">Apache
-Arrow</abbr> tables with near-zero Python overhead. **rypipe** itself ships
-no parsers: an *adapter* package teaches it your format. In this tutorial we
-use [**crxml**](../crxml-adapter.md), the published adapter for Crystal
-Reports XML exports.
+Arrow</abbr> tables with near-zero Python overhead.
+
+**rypipe** itself ships no parsers: an *adapter* package teaches it your
+format. The data flow looks like this:
+
+```text
+your file  ->  adapter  ->  rypipe engine  ->  Arrow / pandas / Polars
+```
+
+The **adapter** knows how to split and decode your specific format. The
+**engine** handles everything else: parallel scheduling, memory-bounded
+execution, schema discovery, type coercion, filtering, and Arrow export.
+
+## Choosing an adapter { #choosing-an-adapter }
+
+Every rypipe tutorial example needs a concrete adapter. This tutorial uses
+[**crxml**](../crxml-adapter.md), the published adapter for Crystal Reports
+XML exports.
+
+Depending on your situation, pick one path:
+
+* **Crystal Reports XML:** install **crxml** (the examples in this tutorial
+  use it).
+* **Another format with an existing adapter:** install that adapter instead
+  and swap it for **crxml** in every example.
+* **No adapter exists for your format:** follow the separate
+  [Building an Adapter](../building-adapters/index.md) track to write one.
+
+The pipeline API (`|`, stages, sinks) is the same regardless of which
+adapter you use.
 
 ## Installation { #installation }
+
+For this tutorial, install **crxml**:
 
 ```bash
 pip install crxml
 ```
 
-That is everything you need. **crxml** pulls in the engine and `pyarrow`
-automatically.
-
-If you want pandas or Polars output, install the extras:
+**crxml** pulls in the rypipe engine and `pyarrow` automatically. If you
+want pandas or Polars output, install the extras:
 
 ```bash
 pip install "crxml[pandas,polars]"
 ```
+
+If you are using a different adapter, install it here instead and adjust
+the import names in every example. The shapes of the API are the same; the
+Source class name changes (e.g. `CrystalXMLSource` is specific to **crxml**).
 
 ## A tiny taste { #quick-example }
 
@@ -12113,14 +13159,22 @@ Output:
 ```console
 $ python taste.py
              name   Department    Amount  Status        Date
-0   Alice Johnson        Sales   15000.5  Active  2026-01-05
-1       Bob Smith  Engineering    8500.0  Active  2026-01-06
-2     Carol White    Marketing  12000.75  Active  2026-01-07
+0  Alice Johnson        Sales   15000.5  Active  2026-01-05
+1      Bob Smith  Engineering    8500.0  Active  2026-01-06
+2    Carol White    Marketing  12000.75  Active  2026-01-07
 ...
 ```
 
 A few lines of code. The engine handled parsing, schema discovery, type
 coercion, filtering, and DataFrame export automatically.
+
+## Why do the imports come from **crxml**? { #why-imports-from-adapter }
+
+The tutorial imports stages (`RenameFields`, `CastTypes`, `FilterRows`)
+and sinks (`to_pandas`) from the adapter package rather than from
+`rypipe` directly. This is normal: adapters re-export the pipeline API so
+users only need one import. If you switch adapters, change the import
+source and the Source class; the pipeline API stays the same.
 
 ## How the tutorial works { #how-the-tutorial-works }
 
@@ -12152,8 +13206,8 @@ working adapter from scratch, no prior Rust experience required.
 
 ## Recap { #recap }
 
-* **rypipe** is a format-agnostic ingestion engine; adapters add formats.
-* Install with `pip install crxml` (plus optional `"crxml[pandas,polars]"`).
+* **rypipe** is the ingestion engine; adapters add format-specific parsing.
+* Install the adapter you need (for this tutorial: `pip install crxml`).
 * A Source reads a file; `|` chains stages; a sink materializes the result.
 
 **Next:** [First Steps](first-steps.md#first-steps), read `report.xml` and
@@ -13105,7 +14159,7 @@ let batch = Pipeline::new(MySplitter, MyDecoder::new())
     .read_path("data.myfmt", false, false)?;
 ```
 
-`rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python, you can publish a Rust-only adapter and depend on `rypipe-core = "2.0"` alone.
+`rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python, you can publish a Rust-only adapter and depend on `rypipe-core = "0.3"` alone.
 
 ## 7. Design principle: data-driven development { #7-design-principle-data-driven-development }
 
@@ -13132,7 +14186,7 @@ Yes. See [Rust API](./reference/rust-api.md) and [Writing a format adapter](./bu
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.
 
 **“Will you maintain both APIs?”**
-Yes. `rypipe-core` is versioned independently (`2.0.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
+Yes. `rypipe-core` is versioned independently (`0.3.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
 
 ---
 
