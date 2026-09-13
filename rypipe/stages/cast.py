@@ -48,7 +48,8 @@ class CastTypes:
             if rust_type is None:
                 if fn is str:
                     continue
-                return None
+                # Non-pushable cast; skip this field, keep the rest
+                continue
             ft[field] = rust_type
         if not ft:
             return None
