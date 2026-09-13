@@ -267,14 +267,16 @@ class Source(ABC):
             parquet_kwargs = {k: v for k, v in kwargs.items() if k in parquet_keys}
             iter_kwargs = {k: v for k, v in kwargs.items() if k not in parquet_keys}
             writer = None
-            for batch in self.iter_record_batches(memory=memory, **iter_kwargs):
-                if writer is None:
-                    writer = pq.ParquetWriter(
-                        str(path), batch.schema, **parquet_kwargs
-                    )
-                writer.write_batch(batch)
-            if writer is not None:
-                writer.close()
+            try:
+                for batch in self.iter_record_batches(memory=memory, **iter_kwargs):
+                    if writer is None:
+                        writer = pq.ParquetWriter(
+                            str(path), batch.schema, **parquet_kwargs
+                        )
+                    writer.write_batch(batch)
+            finally:
+                if writer is not None:
+                    writer.close()
             return
         pq.write_table(self.to_arrow(), str(path), **kwargs)
 
