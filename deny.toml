@@ -1,9 +1,3 @@
-[advisories]
-vulnerability = "deny"
-unmaintained = "all"
-yanked = "warn"
-notice = "warn"
-
 [licenses]
 allow = [
     "MIT",
@@ -17,6 +11,3 @@ allow = [
     "BSL-1.0",
     "Unicode-3.0",
 ]
-
-[bans]
-multiple-versions = "warn"
