@@ -86,19 +86,54 @@ def _fuse_drop(fields: frozenset):
 
 def _fuse_filter_spec(spec: dict):
     """Compile a FilterRows spec into a boolean mask ANDed into the selection."""
+    import pyarrow as pa
     import pyarrow.compute as pc
 
     if "field" in spec:
-        field, op, value = spec["field"], spec["op"], spec["value"]
-        if op == "starts_with":
+        field = spec["field"]
+        op = spec["op"]
+
+        if op == "is_null":
             def mask_of(rb):
-                m = pc.starts_with(rb.column(field), value)
+                m = pc.is_null(rb.column(field))
+                return pc.fill_null(m, False)
+        elif op == "is_type":
+            target = spec["value"]
+            _ARROW_TYPE_MAP = {
+                "string": pa.string(),
+                "int64": pa.int64(),
+                "float64": pa.float64(),
+                "bool": pa.bool_(),
+                "boolean": pa.bool_(),
+                "date32": pa.date32(),
+                "timestamp": pa.timestamp("ns"),
+                "dictionary": pa.dictionary(pa.int32(), pa.string()),
+            }
+            arrow_type = _ARROW_TYPE_MAP.get(target)
+            if arrow_type is not None:
+                def mask_of(rb):
+                    col_type = rb.schema.field(field).type
+                    match = col_type == arrow_type or (
+                        pa.types.is_dictionary(col_type) and arrow_type == pa.string()
+                    )
+                    return pa.array([match] * rb.num_rows, type=pa.bool_())
+            else:
+                def mask_of(rb):
+                    return pa.array([True] * rb.num_rows, type=pa.bool_())
+        elif op == "starts_with":
+            def mask_of(rb):
+                m = pc.starts_with(rb.column(field), spec["value"])
                 return pc.fill_null(m, False)
         elif op == "ends_with":
             def mask_of(rb):
-                m = pc.ends_with(rb.column(field), value)
+                m = pc.ends_with(rb.column(field), spec["value"])
+                return pc.fill_null(m, False)
+        elif op == "contains":
+            def mask_of(rb):
+                m = pc.match_substring(rb.column(field), spec["value"])
                 return pc.fill_null(m, False)
         else:
+            value = spec["value"]
             fn_name = {
                 ">": "greater", "gt": "greater",
                 "<": "less", "lt": "less",
