@@ -28,8 +28,9 @@ impl std::str::FromStr for FieldType {
             "bool" | "boolean" => Ok(FieldType::Boolean),
             "dictionary" => Ok(FieldType::Dictionary),
             "date32" => Ok(FieldType::Date32),
-            s if s.starts_with("timestamp") => parse_timestamp_spec(s)
-                .ok_or_else(|| format!("invalid timestamp spec: {s:?}")),
+            s if s.starts_with("timestamp") => {
+                parse_timestamp_spec(s).ok_or_else(|| format!("invalid timestamp spec: {s:?}"))
+            }
             "decimal128" => Ok(FieldType::Decimal128(18)),
             s if s.starts_with("decimal128(") => {
                 let scale = s
@@ -649,12 +650,10 @@ impl FilterPredicate {
                     let field_f64 = match &a {
                         crate::columnar::TypedValue::Int64(v) => *v as f64,
                         crate::columnar::TypedValue::Float64(v) => *v,
-                        crate::columnar::TypedValue::Str(s) => {
-                            match s.parse::<f64>() {
-                                Ok(v) => v,
-                                Err(_) => return false,
-                            }
-                        }
+                        crate::columnar::TypedValue::Str(s) => match s.parse::<f64>() {
+                            Ok(v) => v,
+                            Err(_) => return false,
+                        },
                         _ => return false,
                     };
                     let result = match arith_op {

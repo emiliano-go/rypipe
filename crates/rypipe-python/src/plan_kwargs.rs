@@ -62,9 +62,7 @@ pub fn execution_plan_from_kwargs(
 
     if let Some(m) = auto_dict_max_size {
         if m == 0 {
-            return Err(crate::PlanError::new_err(
-                "auto_dict_max_size must be >= 1",
-            ));
+            return Err(crate::PlanError::new_err("auto_dict_max_size must be >= 1"));
         }
     }
     plan.dict_max_size = auto_dict_max_size;
@@ -73,9 +71,7 @@ pub fn execution_plan_from_kwargs(
 
     if let Some(m) = max_split_chunks {
         if m == 0 {
-            return Err(crate::PlanError::new_err(
-                "max_split_chunks must be >= 1",
-            ));
+            return Err(crate::PlanError::new_err("max_split_chunks must be >= 1"));
         }
     }
     plan.max_split_chunks = max_split_chunks;
@@ -90,9 +86,7 @@ pub fn execution_plan_from_kwargs(
     if let Some(ft) = field_types {
         for (name, type_str) in ft {
             let ft = type_str.parse::<FieldType>().map_err(|e| {
-                PlanError::new_err(format!(
-                    "unknown field type '{type_str}' for '{name}'; {e}"
-                ))
+                PlanError::new_err(format!("unknown field type '{type_str}' for '{name}'; {e}"))
             })?;
             plan.field_types.insert(name, ft);
         }
