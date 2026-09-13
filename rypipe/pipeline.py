@@ -130,6 +130,9 @@ class Pipeline:
                     )
                     return
             except Exception:
+                # plan_split or iter_record_batches can raise for many reasons
+                # (unsupported stages, adapter limitations, etc.); fall through
+                # to the materialized fallback below.
                 pass
         # Fallback: materialize then split
         yield from self.iter_arrow_batches(batch_size=batch_size)
