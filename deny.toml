@@ -20,4 +20,3 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-wildcard-versions = "allow"
