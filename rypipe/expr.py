@@ -83,12 +83,22 @@ class Expr:
 
     # -- membership -------------------------------------------------------
     def isin(self, values) -> "Predicate":
+        if isinstance(values, (str, bytes)):
+            raise TypeError(
+                f"isin() expects a list/tuple of values, got a {type(values).__name__}; "
+                f"use isin([{values!r}]) to match a single string value"
+            )
         vals = [_spec_value(v) for v in values]
         if not vals:
             raise ValueError("isin() requires at least one value")
         return Predicate({"field": self._field, "op": "in", "values": vals})
 
     def not_in(self, values) -> "Predicate":
+        if isinstance(values, (str, bytes)):
+            raise TypeError(
+                f"not_in() expects a list/tuple of values, got a {type(values).__name__}; "
+                f"use not_in([{values!r}]) to match a single string value"
+            )
         vals = [_spec_value(v) for v in values]
         if not vals:
             raise ValueError("not_in() requires at least one value")
