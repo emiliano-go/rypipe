@@ -178,7 +178,7 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@fdafc3f9f2e2a522dc1d230e6a03de57a1e71c95 # v8
+        uses: actions/download-artifact@18f0f591fbc635562c815484d73b6e8e3980482e # v8
         with:
           pattern: wheels-*
           merge-multiple: true
