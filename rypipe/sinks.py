@@ -151,12 +151,14 @@ def to_parquet(
 
     if memory is not None and hasattr(pipeline, "iter_record_batches"):
         writer = None
-        for batch in pipeline.iter_record_batches(memory=memory, **iter_kwargs):
-            if writer is None:
-                writer = pq.ParquetWriter(str(path), batch.schema, **parquet_kwargs)
-            writer.write_batch(batch)
-        if writer is not None:
-            writer.close()
+        try:
+            for batch in pipeline.iter_record_batches(memory=memory, **iter_kwargs):
+                if writer is None:
+                    writer = pq.ParquetWriter(str(path), batch.schema, **parquet_kwargs)
+                writer.write_batch(batch)
+        finally:
+            if writer is not None:
+                writer.close()
         return
     pq.write_table(to_arrow(pipeline), str(path), **parquet_kwargs)
 
