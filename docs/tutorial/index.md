@@ -1,9 +1,9 @@
 # Tutorial { #tutorial }
 
 This tutorial teaches you how to use **rypipe** to read files into Arrow
-tables and DataFrames, step by step. Each page builds on the previous one,
-but every page is self-contained: you can jump straight to the topic you
-need and copy-paste the examples.
+tables and DataFrames, step by step. Each page builds on on the previous
+one, but every page is self-contained: you can jump straight to the topic
+you need and copy-paste the examples.
 
 ## What is **rypipe**? { #what-is-rypipe }
 
@@ -12,38 +12,21 @@ row-oriented files (XML, CSV, JSONL, logs, etc.) and produces
 <abbr title="Apache Arrow is a cross-language columnar memory format">Apache
 Arrow</abbr> tables with near-zero Python overhead.
 
-**rypipe** itself ships no parsers: an *adapter* package teaches it your
-format. The data flow looks like this:
+The framework handles everything except format-specific parsing: parallel
+scheduling, memory-bounded execution, schema discovery, type coercion,
+filtering, and Arrow export. *Adapters* handle the parsing. Each adapter
+provides a Source class and re-exports rypipe's pipeline API so users need
+only one import.
 
 ```text
-your file  ->  adapter  ->  rypipe engine  ->  Arrow / pandas / Polars
+your file  ->  adapter (parsing)  ->  rypipe engine (everything else)  ->  Arrow / pandas / Polars
 ```
 
-The **adapter** knows how to split and decode your specific format. The
-**engine** handles everything else: parallel scheduling, memory-bounded
-execution, schema discovery, type coercion, filtering, and Arrow export.
-
-## Choosing an adapter { #choosing-an-adapter }
-
-Every rypipe tutorial example needs a concrete adapter. This tutorial uses
-[**crxml**](../crxml-adapter.md), the published adapter for Crystal Reports
-XML exports.
-
-Depending on your situation, pick one path:
-
-* **Crystal Reports XML:** install **crxml** (the examples in this tutorial
-  use it).
-* **Another format with an existing adapter:** install that adapter instead
-  and swap it for **crxml** in every example.
-* **No adapter exists for your format:** follow the separate
-  [Building an Adapter](../building-adapters/index.md) track to write one.
-
-The pipeline API (`|`, stages, sinks) is the same regardless of which
-adapter you use.
+This tutorial uses [**crxml**](../crxml-adapter.md), the published adapter
+for Crystal Reports XML exports. Every other adapter follows the same API;
+only the Source class name changes.
 
 ## Installation { #installation }
-
-For this tutorial, install **crxml**:
 
 ```bash
 pip install crxml
@@ -55,10 +38,6 @@ want pandas or Polars output, install the extras:
 ```bash
 pip install "crxml[pandas,polars]"
 ```
-
-If you are using a different adapter, install it here instead and adjust
-the import names in every example. The shapes of the API are the same; the
-Source class name changes (e.g. `CrystalXMLSource` is specific to **crxml**).
 
 ## A tiny taste { #quick-example }
 
@@ -93,14 +72,6 @@ $ python taste.py
 
 A few lines of code. The engine handled parsing, schema discovery, type
 coercion, filtering, and DataFrame export automatically.
-
-## Why do the imports come from **crxml**? { #why-imports-from-adapter }
-
-The tutorial imports stages (`RenameFields`, `CastTypes`, `FilterRows`)
-and sinks (`to_pandas`) from the adapter package rather than from
-`rypipe` directly. This is normal: adapters re-export the pipeline API so
-users only need one import. If you switch adapters, change the import
-source and the Source class; the pipeline API stays the same.
 
 ## How the tutorial works { #how-the-tutorial-works }
 
