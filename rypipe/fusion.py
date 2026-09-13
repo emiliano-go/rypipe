@@ -5,12 +5,6 @@ from __future__ import annotations
 from typing import Callable, Iterable, Iterator, Optional
 
 
-def _arrow_iter(table) -> Iterator[dict]:
-    """Row iterator over a pyarrow Table (fallback)."""
-    for i in range(table.num_rows):
-        yield {col: table.column(col)[i].as_py() for col in table.column_names}
-
-
 def _chain_hooks(fns):
     """Compose several callables for the same observer hook into one."""
 
