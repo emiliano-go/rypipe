@@ -31,7 +31,7 @@ jobs:
         run: cargo test --workspace --all-features
 
       - name: Set up Python
-        uses: actions/setup-python@0f07f7f756721ebd886c2462646a35f78a8bc4de # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v5
         with:
           python-version: "3.13"
 
@@ -102,7 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@544eadc6bf3d226fd7a7a9f0dc5b5bf7ca0675b9 # v4
 
-      - uses: actions/setup-python@0f07f7f756721ebd886c2462646a35f78a8bc4de # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v5
         with:
           python-version: "3.13"
 
@@ -130,7 +130,7 @@ jobs:
     steps:
       - uses: actions/checkout@544eadc6bf3d226fd7a7a9f0dc5b5bf7ca0675b9 # v4
 
-      - uses: actions/setup-python@0f07f7f756721ebd886c2462646a35f78a8bc4de # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v5
         with:
           python-version: "3.13"
           architecture: ${{ matrix.target }}
