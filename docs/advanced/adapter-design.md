@@ -193,7 +193,7 @@ Common error types:
 - `rypipe_core::Error::Plan`: invalid plan or configuration
 - `rypipe_core::Error::Io`: I/O error
 
-**Do not panic** in `parse_chunk`. Panics are caught by `catch_unwind` in the parallel executor, but they abort the entire parse and produce a hard-to-debug `MergeError`.
+**Do not panic** in `parse_chunk`. Panics are caught by `catch_unwind` in the parallel executor, but they abort the entire parse and produce a hard-to-debug `Error::Parser`.
 
 ### Partial trailing rows { #partial-trailing-rows }
 

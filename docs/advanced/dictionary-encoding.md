@@ -56,7 +56,7 @@ let plan = ExecutionPlan::new()
 
 ## `auto_dict` heuristics { #auto_dict-heuristics }
 
-`auto_dict=True` asks the engine to guess which string columns should be dictionary-encoded. The heuristic has a small runtime cost: it tracks the number of distinct values and the total row count for each string column. When the ratio of distinct values to rows falls below a threshold, the column is upgraded to dictionary encoding at finish time.
+`auto_dict=True` asks the engine to guess which string columns should be dictionary-encoded. The heuristic has a small runtime cost: it tracks the number of distinct values and the total row count for each string column. When the ratio of distinct values to rows falls below a threshold and the column has at least 512 rows, the column is upgraded to dictionary encoding at finish time. Columns with fewer than 512 rows are never upgraded, regardless of cardinality.
 
 Two knobs tune the upgrade:
 

@@ -69,7 +69,7 @@ pub fn resolve_field<'a>(&'a self, raw: &'a str) -> Option<&'a str> {
     // 3. Schema projection: when schema_order is non-empty, drop resolved
     //    names not listed there unless the filter references them
     if !self.schema_order.is_empty()
-        && !self.schema_order.contains(resolved)
+        && !self.schema_order.iter().any(|n| n == resolved)
         && !self.filter_references(resolved)
     {
         return None;
@@ -250,23 +250,56 @@ pub(crate) fn check(&self, columns: &[ColumnBuilder], field_index: &HashMap<Stri
             actual.as_deref() == Some(value.as_str())
         }
         Compare { field_a, op, field_b } => {
-            let va = get_typed_value(columns, field_index, plan, field_a, row_index);
-            let vb = get_typed_value(columns, field_index, plan, field_b, row_index);
-            compare_typed(va, *op, vb)
+            let va = get_column(columns, field_index, resolve(field_a, plan))
+                .and_then(|b| b.get_typed_value(row_index));
+            let vb = get_column(columns, field_index, resolve(field_b, plan))
+                .and_then(|b| b.get_typed_value(row_index));
+            match (va, vb) {
+                (Some(a), Some(b)) => compare_typed(&a, *op, &b),
+                _ => false,
+            }
         }
-        StartsWith { field, value } => actual.starts_with(value),
-        EndsWith { field, value } => actual.ends_with(value),
-        Contains { field, value } => actual.contains(value),
-        In { field, values } => values.contains(actual),
+        StartsWith { field, value } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => s.starts_with(value.as_str()), None => false }
+        }
+        EndsWith { field, value } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => s.ends_with(value.as_str()), None => false }
+        }
+        Contains { field, value } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => s.contains(value.as_str()), None => false }
+        }
+        In { field, values } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => values.contains(&s), None => false }
+        }
+        NotIn { field, values } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => !values.contains(&s), None => true }
+        }
         IsNull { field } => get_value(columns, field_index, field, plan, row_index).is_none(),
-        IsType { field, field_type } => column.is_type_at(row_index, field_type),
-        Regex { field, re } => re.compiled.is_match(actual),
-        NotField { field } => actual.is_none_or(|v| v.is_empty()),
+        IsType { field, field_type } => {
+            let resolved = resolve(field, plan);
+            let col = get_column(columns, field_index, resolved);
+            match col {
+                None => false,
+                Some(c) => c.is_type_at(row_index, field_type),
+            }
+        }
+        Regex { field, re } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => re.compiled.is_match(s.as_ref()), None => false }
+        }
+        NotField { field } => {
+            let actual = get_value(columns, field_index, field, plan, row_index);
+            match actual { Some(s) => s.is_empty(), None => true }
+        }
         Always(b) => *b,
         And(a, b) => a.check(...) && b.check(...),
         Or(a, b) => a.check(...) || b.check(...),
         Not(a) => !a.check(...),
-        // ... other variants follow same pattern
     }
 }
 ```

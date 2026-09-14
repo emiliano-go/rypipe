@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rypipe"
-version = "0.3.1"
+version = "0.3.2"
 description = "Format-agnostic data ingestion framework: Rust core with Python bindings. Adapters for XML, JSON, CSV, etc. are separate packages."
 readme = "README.md"
 license = "MIT"
@@ -14,6 +14,9 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = ["pyarrow>=15"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+]
 
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]

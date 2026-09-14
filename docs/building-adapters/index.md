@@ -21,6 +21,14 @@ Read it in order:
 3. **Deep dives**, one page per component: Splitter, RecordParser, Sink,
    Schema, scan primitives, and more.
 
+!!! tip "Multi-line and stateful formats"
+
+    If your format has `\` continuations, `[section]` headers, or
+    blank-line-separated records, see [Splitter: Stateful
+    formats](./splitter.md#stateful-formats) for the declarative approach,
+    and [Examples: Properties Adapter](./examples.md#properties-adapter)
+    for a complete worked example.
+
 The rest of this page is the map: what you will build, the API contract,
 and how the engine works.
 
@@ -229,8 +237,8 @@ pyarrow.Table                  (Python API)
 | [Walkthrough](./walkthrough.md) | Build a complete working adapter, step by step |
 | [Python Wiring](./python-wiring.md) | Source, adapter, registration, stages, sinks, kwargs, streaming |
 | [Rust Creation](./rust-creation.md) | Splitter, RecordParser, ColumnarSink |
-| [Splitter](./splitter.md) | Finding row boundaries |
-| [Parser](./parser.md) | Extracting field values |
+| [Splitter](./splitter.md) | Finding row boundaries, stateful formats, declarative rules |
+| [Parser](./parser.md) | Extracting field values, within-chunk state |
 | [Sink](./sink.md) | The ColumnarSink contract |
 | [Schema](./schema.md) | Schema declaration for maximum performance |
 | [Scan primitives](./scan.md) | Fast byte-scanning helpers |
@@ -238,7 +246,7 @@ pyarrow.Table                  (Python API)
 | [Chunk planning](./chunk-planning.md) | How input is split into chunks |
 | [Techniques](./techniques.md) | Performance optimizations |
 | [Anti-patterns](./anti-patterns.md) | Common mistakes to avoid |
-| [Examples](./examples.md) | Worked CSV, JSONL, and TSV adapters |
+| [Examples](./examples.md) | CSV, JSONL, TSV, multi-line, and properties adapters |
 
 ## Performance model { #performance-model }
 

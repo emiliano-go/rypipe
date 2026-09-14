@@ -267,7 +267,7 @@ crxml.discover_schema(
 ) -> list[str]
 ```
 
-**Returns:** `list[str]` — column names in output order.
+**Returns:** `list[str]`: column names in output order.
 
 ## CrystalXMLSource { #crystalxmlsource }
 

@@ -91,6 +91,9 @@ pub struct ExecutionPlan {
     pub auto_dict: bool,                          // auto-dict upgrade
     pub dict_threshold: Option<f64>,              // auto-dict ratio (default 0.05)
     pub dict_max_size: Option<usize>,             // auto-dict max entries (default 256)
+    pub strict_types: bool,                       // abort on non-null parse failures
+    pub max_split_chunks: Option<usize>,          // bounded-streaming chunk cap
+    pub observer: Option<Arc<dyn RowObserver>>,   // per-row observer hooks
 }
 ```
 
@@ -103,9 +106,16 @@ Inside `TableBuilder`, every emitted field goes through this pipeline:
 1. `field_map` renames the raw field name.
 2. `drop_fields` checks the resolved name; if dropped, the field is ignored.
 3. `field_types` / `dictionary_columns` chooses the storage type.
-4. `filter` rejects rows during `end_row`.
+4. `strict_types` validates the value parses as the declared type (records
+   violation for `finish` to report).
+5. `observer` fires `on_put_field` (if `plan.observer` is set).
+6. Value is pushed into the column; dirty bit is set.
 
-This order matters. A filter runs on the resolved name, so it must be written in post-rename terms. A cast type is attached to the resolved name as well.
+The per-row `filter` is evaluated later, in `finish_row`, after all fields
+are pushed and missing columns are null-filled.
+
+This order matters. A filter runs on the resolved name, so it must be written
+in post-rename terms. A cast type is attached to the resolved name as well.
 
 ## What is fusable { #what-is-fusable }
 
@@ -190,18 +200,25 @@ drop check (drop_fields)
 type selection (field_types / dictionary_columns)
     |
     v
-per-row filter (Equal / NotEqual / Compare / Regex / And / Or / Not)
+strict_types validation (records parse violations)
     |
     v
-builder append (Vec plus map, single hash, dirty bitmask)
+observer notification (on_put_field)
+    |
+    v
+push value + set dirty bit
+    |
+    v
+[end_row: null-fill missing columns, then per-row filter]
     |
     v
 finish: sort by schema_order, auto-dict, Arrow export
 ```
 
 Because drop happens before type selection, you cannot cast a dropped field.
-Because every filter, including column-to-column comparisons, runs before the
-row is committed, rejected rows consume no Arrow storage.
+Because the filter runs after all fields are pushed (in `finish_row`),
+rejected rows consume no Arrow storage but their column values are
+temporarily allocated then popped.
 
 ## When fusion does not help { #when-fusion-does-not-help }
 

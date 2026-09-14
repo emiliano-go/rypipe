@@ -15,7 +15,7 @@ class MyStage:
 
     def __call__(self, stream):
         """Transform an iterable of records (unfused path)."""
-        return map(self.apply, stream)
+        return (r for r in map(self.apply, stream) if r is not None)
 
     def _plan_kwargs(self) -> dict | None:
         """Return pushdown kwargs for the Rust engine, or None if not fusable."""
@@ -257,10 +257,15 @@ parse threads, on every engine (serial, parallel, bounded, streaming):
 
 Notes:
 
-- `row_index` counts accepted rows so far, so rejected rows reuse the next
-  free index.
+- `row_index` is the count of rows committed so far (incremented only when a
+  row is accepted). `on_begin_row` and `on_row_rejected` receive the
+  pre-increment count; `on_row_accepted` receives the post-increment count
+  minus 1.
 - When a filter buffers values before the predicate resolves, `on_put_field`
-  fires only for accepted rows (hooks fire on drain, not on buffer).
+  fires only for accepted rows (hooks fire on drain, not on buffer). One
+  exception: when the predicate column arrives late, values are pushed
+  directly and popped on reject, so `on_put_field` may fire for a row that
+  is later rejected.
 - Hooks run on parse threads (several at once on parallel engines): they
   must be thread-safe. Exceptions raised by a hook are printed and
   swallowed; a hook can never abort a parse.
@@ -333,7 +338,7 @@ These keys are merged into the `ExecutionPlan` passed to the Rust parser:
 | `field_mapping` | `dict[str, str]` | Rename mapping: raw name → output name |
 | `drop_fields` | `list[str]` | Fields to skip entirely |
 | `field_types` | `dict[str, str]` | Type overrides (e.g., `"int64"`, `"float64"`) |
-| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}` (with `op="regex"` for regex search), `{"field_a", "op", "field_b"}`, `{"is_null": true}`, or `{"is_type": "int64"}` |
+| `filter` | `dict` | Predicate spec: `{"field", "op", "value"}` (with `op="regex"` for regex search), `{"field_a", "op", "field_b"}`, `{"field", "op": "is_null"}`, or `{"field", "op": "is_type", "value": "int64"}` |
 | `observer` | `dict[str, callable]` | Row observer hooks (`on_row_rejected`, ...); merged per-hook, chained across stages |
 
 See [Execution Plan](../architecture/plan.md) for the full plan structure.

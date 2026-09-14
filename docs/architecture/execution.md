@@ -134,7 +134,8 @@ Estimates chunk sizes from budget:
    budget is the trigger
 6. Apply `apply_compare_filter` to each flushed batch if `plan.filter` is set
 7. After the loop, surface deferred strict-types and unknown-field errors
-   (unknown-field as `Error::Merge`) accumulated across chunks
+   (unknown-field as `Error::Merge`) accumulated across chunks; if any
+   error exists, the final remaining batch is not consumed
 
 ### run (file-based) { #run }
 

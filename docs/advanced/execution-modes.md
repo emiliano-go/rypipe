@@ -23,7 +23,12 @@ Stream mode uses `BoundedExecutor`. It keeps a memory budget and parses the file
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates or iterates.
 
-Because the input buffer is dropped before the parse phase begins for bounded mode, mmap-backed pages are released before downstream work starts. This keeps peak memory close to the budget even for files much larger than RAM.
+On the mmap path, the mapping is dropped after planning and before the parse
+loop begins (reopened per-chunk via seek+read), so mmap-backed pages are
+released before downstream work starts. This keeps peak memory close to the
+budget even for files much larger than RAM. On the in-memory path
+(`run_bytes_stream`), the input slice is borrowed from the caller for the
+duration of the parse.
 
 Use stream mode when:
 
@@ -41,7 +46,8 @@ Use columnar mode when:
 - the file fits comfortably in RAM;
 - the parser is fast enough that parallel overhead would not pay off;
 - you need one contiguous `RecordBatch` without a merge step;
-- `auto_dict` uses the incremental dictionary path, so chunks still export independently.
+- `auto_dict` upgrades the single builder's string columns to dictionaries at
+  finish time (no per-chunk path needed).
 
 Columnar mode is often fastest for small files because there is no per-chunk setup and no rayon scheduling.
 

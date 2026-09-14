@@ -5,7 +5,7 @@ iterate over rows, and chain your first pipeline stage. If you have not
 installed yet:
 
 ```bash
-pip install "crxml[pandas]"
+pip install "crxml[all]"
 ```
 
 [Download report.xml](../examples/report.xml) and save it next to your

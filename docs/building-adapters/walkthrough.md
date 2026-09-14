@@ -64,10 +64,8 @@ name = "_rypipe_log"
 crate-type = ["cdylib"]
 
 [dependencies]
-rypipe-core = "2"
-# arrow must match rypipe-core's pinned version for the PyArrow export
+rypipe-core = "0.3"
 arrow = { version = "=55.2.0", default-features = false, features = ["pyarrow", "ffi"] }
-# pyo3 0.24 matches the pyo3 version arrow 55's "pyarrow" feature uses
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
 simdutf8 = "0.1"
@@ -76,6 +74,27 @@ simdutf8 = "0.1"
 The `cdylib` crate type produces a shared library that Python can import.
 The `abi3` feature enables stable ABI, so one wheel works across Python
 versions.
+
+!!! warning "Arrow and pyo3 version pinning"
+
+    `arrow` must be pinned with `=` (e.g. `=55.2.0`) to match the version
+    `rypipe-core` was built against. A mismatch produces inscrutable linker
+    errors like `undefined symbol` or `missing field`. If you see these,
+    check that your `arrow` version matches `rypipe-core`'s exactly. Do not
+    use `rypipe-python`'s versions (0.29/59.2) — it is not published to
+    crates.io and has a lib name collision.
+
+!!! note "Developing inside the rypipe workspace"
+
+    If your adapter lives inside the rypipe repo (or any Cargo workspace),
+    add `[workspace]` to your own `Cargo.toml` to avoid resolver conflicts:
+
+    ```toml
+    [workspace]
+    ```
+
+    Without this, Cargo may try to unify your adapter's dependencies with
+    the workspace root, causing version resolution errors.
 
 You also need a `pyproject.toml` so maturin can build the package. The
 `module-name` places the compiled extension inside the Python package,
@@ -91,7 +110,7 @@ build-backend = "maturin"
 [project]
 name = "rypipe-log"
 version = "0.1.0"
-dependencies = ["rypipe", "pyarrow>=15"]
+dependencies = ["rypipe", "pyarrow>=15", "pandas>=1.5"]
 
 [tool.maturin]
 module-name = "rypipe_log._rypipe_log"
@@ -212,6 +231,62 @@ The RecordParser has two methods:
     drops a column, `wants()` returns `false` and you skip all work for that
     field: no scanning, no decoding.
 
+!!! tip "Empty rows from blank lines and comment-only blocks"
+
+    Blank lines and comment-only blocks produce silent null rows if not
+    handled. Two patterns:
+
+    **Skip blank lines** (one-line-per-record formats):
+
+    ```rust
+    for line in text.lines() {
+        if line.is_empty() { continue; }
+        // ... parse and emit row ...
+    }
+    ```
+
+    **Accumulate across lines** (multi-line record formats). Call
+    `begin_row` on the first non-blank line and `end_row` on blank-line
+    boundaries:
+
+    ```rust
+    let mut in_record = false;
+    for line in text.lines() {
+        if line.is_empty() {
+            if in_record { sink.end_row(); in_record = false; }
+            continue;
+        }
+        if !in_record { sink.begin_row(); in_record = true; }
+        // ... put_field for each line ...
+    }
+    if in_record { sink.end_row(); }
+    ```
+
+    See [Multi-line Record Adapter](building-adapters/examples.md#multi-line-adapter) for a
+    complete worked example.
+
+!!! tip "Continuations and comments"
+
+    If your format uses `\` continuations or `#`/`!` comments, use the
+    declarative Splitter methods instead of scanning bytes manually:
+
+    ```rust
+    use rypipe_core::{RecordBoundary, find_next_record_boundary};
+
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        find_next_record_boundary(
+            bytes, from,
+            self.continuation_char(),    // Some(b'\\')
+            self.comment_prefixes(),     // &[b"#", b"!"]
+            self.record_boundary() == RecordBoundary::BlankLine,
+        )
+    }
+    ```
+
+    See [Splitter: Stateful formats](splitter.md#stateful-formats) and
+    [Properties Adapter](examples.md#properties-adapter) for complete
+    examples.
+
 ## Step 4: Expose to Python { #step-4-expose-to-python}
 
 Add PyO3 bindings to expose your parser to Python. The `read_log` function
@@ -314,6 +389,25 @@ full plan kwarg set: fused pipeline stages forward their pushdown options
 (rename, drop, cast, filter) as keyword arguments, and rejecting one
 breaks fusion.
 
+!!! warning "Missing kwargs = silent performance regression"
+
+    If your `read_log` signature is missing any of the9 kwargs (or you
+    forget to forward them), fused pipeline stages silently fall back to
+    Python execution. No error, no warning — just10-50x slower. The9 kwargs
+    must match exactly: `field_mapping`, `drop_fields`, `filter`,
+    `field_types`, `schema`, `auto_dict`, `use_mmap`, `prefault`, plus
+    `path`. This is the most common source of silent performance regression
+    in new adapters.
+
+!!! note "Why is this80 lines of boilerplate?"
+
+    `rypipe-python` provides an `execution_plan_from_kwargs` helper that
+    eliminates this code, but it is **not published to crates.io** and its
+    lib name (`_rypipe`) causes a module path collision. Adapters depend on
+    `rypipe-core` only, so plan building is done manually. The80 lines are
+    stable — copy them once from the walkthrough and change only the function
+    name. The cargo-generate template includes this boilerplate pre-filled.
+
 ## Step 5: Create the Python wrapper { #step-5-create-the-python-wrapper}
 
 Follow the [crxml](../crxml-adapter.md) formula: a Source subclass, a thin adapter, and repacked
@@ -336,6 +430,12 @@ __all__ = [
     "FilterRows",
     "RenameFields",
     "DropFields",
+    "collect",
+    "to_arrow",
+    "to_pandas",
+    "to_polars",
+    "to_parquet",
+    "to_csv",
 ]
 
 _modules = {
@@ -345,6 +445,12 @@ _modules = {
     "FilterRows": ".stages",
     "RenameFields": ".stages",
     "DropFields": ".stages",
+    "collect": ".sinks",
+    "to_arrow": ".sinks",
+    "to_pandas": ".sinks",
+    "to_polars": ".sinks",
+    "to_parquet": ".sinks",
+    "to_csv": ".sinks",
 }
 
 
@@ -370,6 +476,32 @@ create it. It just re-exports the standard stages from **rypipe**:
 ```python
 from rypipe.stages import CastTypes, DropFields, FilterRows, RenameFields  # noqa: F401
 ```
+
+### `rypipe_log/sinks.py` { #sinks-py }
+
+The `_modules` map also points sink names at a `.sinks` module. Re-export
+the standalone sink functions so users never import **rypipe** directly:
+
+```python
+# rypipe_log/sinks.py
+from rypipe.sinks import collect as _rypipe_collect
+from rypipe.sinks import to_arrow as _rypipe_to_arrow
+from rypipe.sinks import to_pandas as _rypipe_to_pandas
+from rypipe.sinks import to_polars as _rypipe_to_polars
+from rypipe.sinks import to_parquet as _rypipe_to_parquet
+from rypipe.sinks import to_csv as _rypipe_to_csv
+
+collect = _rypipe_collect
+to_arrow = _rypipe_to_arrow
+to_pandas = _rypipe_to_pandas
+to_polars = _rypipe_to_polars
+to_parquet = _rypipe_to_parquet
+to_csv = _rypipe_to_csv
+```
+
+Users then write `from rypipe_log import to_pandas` and never touch
+**rypipe**. This is part of the **crxml formula**: adapters repack the
+full pipeline API.
 
 ### `rypipe_log/source.py` { #source-py }
 
@@ -495,8 +627,7 @@ Pattern 2 uses the Source directly with the pipeline `|` operator; fused
 stages are pushed into the Rust parse:
 
 ```python
-from rypipe.sinks import to_pandas
-from rypipe_log import LogSource, CastTypes, FilterRows
+from rypipe_log import to_pandas, LogSource, CastTypes, FilterRows
 
 src = LogSource("test.log")
 df = to_pandas(

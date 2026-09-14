@@ -28,6 +28,18 @@ DataFrame sinks, pick the library your downstream code already uses:
 skip all of these and stream with `iter_record_batches()` (see
 [Streaming](streaming.md#streaming)).
 
+!!! warning "Pipeline vs Source: why `pipeline.to_arrow()` does not exist"
+
+    Source methods (`.to_arrow()`, `.to_pandas()`, `.to_polars()`) parse the
+    file once and cache the result. A Pipeline is a lazy chain of stages —
+    it has not parsed anything yet. Giving it `.to_arrow()` would
+    implicitly materialize the full table on every call, which defeats the
+    purpose of lazy evaluation and caching. Instead, pipeline sinks are
+    *functions*: `to_pandas(pipeline)`, `to_arrow(pipeline)`,
+    `collect(pipeline)`. They run the pipeline and return the result, but do
+    not cache it. If you call the same pipeline twice, it re-parses both
+    times. Collect first if you need the result more than once.
+
 All examples assume:
 
 ```python

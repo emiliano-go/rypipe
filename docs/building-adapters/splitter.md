@@ -135,6 +135,65 @@ The engine guarantees:
     byte iteration for single-delimiter searches.
 
 
+## Stateful formats { #stateful-formats }
+
+Multi-line formats (properties, INI, LDAP) require the Splitter to skip
+continued newlines and comment lines. Instead of scanning bytes manually,
+use the declarative methods:
+
+```rust
+use rypipe_core::{RecordBoundary, Splitter, find_next_record_boundary};
+
+struct PropertiesSplitter;
+
+impl Splitter for PropertiesSplitter {
+    fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+        find_next_record_boundary(
+            bytes, from,
+            self.continuation_char(),
+            self.comment_prefixes(),
+            self.record_boundary() == RecordBoundary::BlankLine,
+        )
+    }
+
+    fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+        let n = sample.iter().filter(|&&b| b == b'\n').count().max(1);
+        (sample.len() / n).max(1)
+    }
+
+    // Declare format rules — the engine handles the scanning
+    fn record_boundary(&self) -> RecordBoundary { RecordBoundary::Line }
+    fn continuation_char(&self) -> Option<u8> { Some(b'\\') }
+    fn comment_prefixes(&self) -> &[&[u8]] { &[b"#", b"!"] }
+}
+```
+
+`find_next_record_boundary` handles:
+
+- **Continuations**: skips `\n` preceded by the continuation character
+- **Comments**: skips lines starting with any comment prefix
+- **Blank lines**: when `record_boundary = BlankLine`, splits on `\n\n`
+
+### Within-chunk state
+
+The parser is stateless **across** chunks (each chunk is parsed on an
+independent thread). But it CAN hold state **within** a chunk: track
+`[section]` headers, accumulate fields across lines, etc. The state
+persists across `begin_row`/`end_row` calls within one `parse_chunk` call.
+
+If a state spans a chunk boundary (e.g., a `\` continuation that crosses
+from one chunk to the next), the Splitter must prevent that split — the
+declarative methods handle this automatically.
+
+### Limitations
+
+Formats where the parser's **output** affects the next chunk's parsing
+(e.g., "row N changes how row N+1 is interpreted") cannot be parallelized.
+These require sequential processing, which the engine does not currently
+offer as a first-class mode. Use `engine="columnar"` (single chunk) for
+such formats.
+
+
 ## Common mistakes { #common-mistakes }
 
 1. **Overriding `find_split_points`**: Bypasses the chunk floor and skip-region

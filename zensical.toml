@@ -125,6 +125,11 @@ name = "rypipe on PyPI"
 ]
 
 [[project.nav]]
+"Integrations" = [
+    { "DuckDB" = "integrations/duckdb.md" },
+]
+
+[[project.nav]]
 "Examples" = "examples.md"
 
 [[project.nav]]

@@ -326,7 +326,7 @@ Properties:
 
 ```rust
 pub fn insert_schema_cache(sig: (u64, u64), order: Arc<Vec<String>>) {
-    let mut cache = SCHEMA_CACHE.write().unwrap();
+    let mut cache = SCHEMA_CACHE.write().unwrap_or_else(|e| e.into_inner());
     if cache.len() >= SCHEMA_CACHE_CAP {
         if let Some(oldest) = cache.keys().next().copied() {
             cache.remove(&oldest);

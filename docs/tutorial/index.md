@@ -38,14 +38,15 @@ only the Source class name changes.
 ## Installation { #installation }
 
 ```bash
-pip install crxml
+pip install "crxml[all]"
 ```
 
-**crxml** pulls in the rypipe engine and `pyarrow` automatically. If you
-want pandas or Polars output, install the extras:
+**crxml** pulls in the rypipe engine automatically; `pyarrow`, `pandas`,
+and `polars` are optional extras bundled in `[all]`. If you only need
+Arrow output without pandas or Polars:
 
 ```bash
-pip install "crxml[pandas,polars]"
+pip install "crxml[pyarrow]"
 ```
 
 ## A tiny taste { #quick-example }

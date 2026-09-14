@@ -97,12 +97,40 @@ pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) ->
 // S1: Splitter trait with default
 // ---------------------------------------------------------------------------
 
+/// How records are separated in the input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecordBoundary {
+    /// Split on every newline (default). Each `\n` is a record boundary.
+    #[default]
+    Line,
+    /// Split on blank lines. Records span multiple lines; a blank line
+    /// (`\n\n`) separates records.
+    BlankLine,
+}
+
 /// Format-specific splitter: decides where it is safe to divide an input byte
 /// stream into independent chunks.
 ///
 /// The only required method is `next_record_start`; adapters provide the
 /// record boundary logic, and the engine handles chunk planning, skip-region
 /// rejection, and deduplication.
+///
+/// For multi-line formats, implement the declarative methods
+/// ([`record_boundary`](Self::record_boundary),
+/// [`continuation_char`](Self::continuation_char),
+/// [`comment_prefixes`](Self::comment_prefixes)) and call
+/// [`find_next_record_boundary`] from your `next_record_start`:
+///
+/// ```ignore
+/// fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+///     find_next_record_boundary(
+///         bytes, from,
+///         self.continuation_char(),
+///         self.comment_prefixes(),
+///         self.record_boundary() == RecordBoundary::BlankLine,
+///     )
+/// }
+/// ```
 pub trait Splitter: Send + Sync {
     /// Return the next record boundary at or after `from`.  Must return a
     /// position where a record starts, or `None` if no more records exist.
@@ -110,6 +138,27 @@ pub trait Splitter: Send + Sync {
 
     /// Estimate the average bytes per record from a sample of the input.
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize;
+
+    /// How records are separated. Default: [`RecordBoundary::Line`] (every
+    /// newline is a boundary). Override to [`RecordBoundary::BlankLine`] for
+    /// multi-line formats where blank lines separate records.
+    fn record_boundary(&self) -> RecordBoundary {
+        RecordBoundary::Line
+    }
+
+    /// Character that continues a record across lines (e.g. `b'\\'` for
+    /// properties files). When set, newlines preceded by this character are
+    /// NOT record boundaries. Default: `None` (no continuations).
+    fn continuation_char(&self) -> Option<u8> {
+        None
+    }
+
+    /// Line prefixes to skip (e.g. `&[b"#", b"!"]` for properties files).
+    /// Lines starting with any of these are ignored during splitting.
+    /// Default: empty (no comments).
+    fn comment_prefixes(&self) -> &[&[u8]] {
+        &[]
+    }
 
     /// Optional: byte ranges where a candidate boundary must be rejected.
     /// See `in_skip_region`.
@@ -163,6 +212,105 @@ pub trait Splitter: Send + Sync {
         }
         points
     }
+}
+
+// ---------------------------------------------------------------------------
+// Declarative splitting helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether the newline at `pos` is preceded by a continuation character.
+///
+/// Used by Splitters that need to skip continued newlines. For example, in
+/// properties files, `key = value \` continues on the next line: the `\n`
+/// after `\` is NOT a record boundary.
+///
+/// ```ignore
+/// fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+///     find_next_record_boundary(bytes, from, Some(b'\\'), &[], false)
+/// }
+/// ```
+#[inline]
+pub fn is_continued_newline(bytes: &[u8], pos: usize) -> bool {
+    pos > 0 && bytes[pos - 1] == b'\\'
+}
+
+/// Scan forward from `from` to find the next record boundary.
+///
+/// This is the declarative counterpart to manual byte scanning. It handles:
+/// - **Continuations**: skips `\n` preceded by `continuation` (e.g. `b'\\'`)
+/// - **Comments**: skips lines starting with any prefix in `comment_prefixes`
+/// - **Blank-line mode**: splits on `\n\n` instead of every `\n`
+///
+/// Returns the byte position after the boundary newline, or `None` if no
+/// more boundaries exist.
+///
+/// # Example
+///
+/// ```ignore
+/// fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+///     find_next_record_boundary(
+///         bytes, from,
+///         self.continuation_char(),
+///         self.comment_prefixes(),
+///         self.record_boundary() == RecordBoundary::BlankLine,
+///     )
+/// }
+/// ```
+pub fn find_next_record_boundary(
+    bytes: &[u8],
+    from: usize,
+    continuation: Option<u8>,
+    comment_prefixes: &[&[u8]],
+    blank_line_mode: bool,
+) -> Option<usize> {
+    let mut pos = from;
+    while pos < bytes.len() {
+        let rel = memchr::memchr(b'\n', &bytes[pos..])?;
+        let nl_pos = pos + rel;
+
+        // Skip continued newlines (preceded by continuation character)
+        if continuation.is_some() && is_continued_newline(bytes, nl_pos) {
+            pos = nl_pos + 1;
+            continue;
+        }
+
+        // Compute line start for comment check
+        let line_start = if nl_pos == 0 {
+            0
+        } else {
+            bytes[..nl_pos]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|p| p + 1)
+                .unwrap_or(0)
+        };
+
+        // Skip comment lines
+        if !comment_prefixes.is_empty() {
+            let line_bytes = &bytes[line_start..nl_pos];
+            let is_comment = comment_prefixes
+                .iter()
+                .any(|prefix| line_bytes.starts_with(prefix));
+            if is_comment {
+                pos = nl_pos + 1;
+                continue;
+            }
+        }
+
+        // Blank-line mode: split on empty lines
+        if blank_line_mode {
+            let next = nl_pos + 1;
+            if next < bytes.len() && bytes[next] == b'\n' {
+                return Some(next + 1);
+            }
+            pos = nl_pos + 1;
+            continue;
+        }
+
+        // Line mode: every newline is a boundary
+        return Some(nl_pos + 1);
+    }
+    None
 }
 
 /// Format-specific parser: turns a byte chunk into field/value events sent to

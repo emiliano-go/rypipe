@@ -1,14 +1,14 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "{{project-name}}"
 version = "0.1.0"
 description = "{{description}}"
-readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.10"
+dependencies = ["rypipe", "pyarrow>=15", "pandas>=1.5"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -16,4 +16,6 @@ classifiers = [
 ]
 
 [tool.maturin]
+module-name = "{{project-name}}._{{project-name}}"
+python-source = "."
 features = ["pyo3/extension-module"]

@@ -78,6 +78,140 @@ FilterRows(field="amount", op=">", value="100.0")
 
 Without `field_types={"amount": "float64"}`, the engine stores `amount` as a string and the compare runs with string ordering (`"9" > "100"` is true for strings). Declare the type so the filter compares numbers.
 
+## Adapter anti-patterns { #adapter-anti-patterns }
+
+### Overriding `apply()` on fusable stages { #overriding-apply-on-fusable-stages }
+
+```python
+class LoggingFilter(FilterRows):
+    def apply(self, record):
+        result = super().apply(record)
+        if result is None:
+            logger.debug("dropped: %s", record)
+        return result  # ← this never runs when fusion succeeds
+```
+
+When fusion succeeds, the stage is pushed into the Rust parse loop and `apply()` is never called. Your override is silently dropped. Put side effects in observer hooks instead:
+
+```python
+class LoggingFilter(FilterRows):
+    def _plan_kwargs(self):
+        kwargs = super()._plan_kwargs() or {}
+        kwargs["observer"] = {"on_row_rejected": self._log_rejected}
+        return kwargs
+
+    def _log_rejected(self, row_index):
+        logger.debug("dropped row %d", row_index)
+```
+
+### Overriding `find_split_points` without measurement { #overriding-find_split_points }
+
+```rust
+fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
+    // "simpler" custom implementation
+    ...
+}
+```
+
+The default `find_split_points` handles nominal offsets, parallel search via rayon, skip-region rejection, dedup, sort, and the 2 MiB chunk floor that prevents sub-MB collapse. Override only with a measured reason; most adapters benefit from the default.
+
+### Emitting `Value::Null` for missing fields { #emitting-value-null-for-missing-fields }
+
+```rust
+sink.begin_row();
+for col in &self.columns {
+    let value = extract_field(col, record);
+    sink.put_field(col, value);  // value is Value::Null when missing
+}
+sink.end_row();
+```
+
+Do not emit `Value::Null` for every missing field. The engine null-fills missing columns at `end_row()` via the dirty bitmask; emitting explicit nulls wastes a push per missing field per row. Just skip the field:
+
+```rust
+if let Some(value) = extract_field(col, record) {
+    sink.put_field(col, value);
+}
+```
+
+### Not checking `wants()` before expensive extraction { #not-checking-wants-before-expensive-extraction }
+
+```rust
+let id = deep_xml_path(bytes, "/Record/Header/Id");  // expensive
+sink.put_field("id", Value::Str(id));
+```
+
+If `id` is dropped or projected out, the extraction runs for nothing. Always check first:
+
+```rust
+if sink.wants("id") {
+    let id = deep_xml_path(bytes, "/Record/Header/Id");
+    sink.put_field("id", Value::Str(id));
+}
+```
+
+For expensive extractions (deep XML paths, regex captures), this is a major win.
+
+### Panicking in `parse_chunk` { #panicking-in-parse_chunk }
+
+```rust
+fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+    let value = extract_value(bytes).unwrap();  // ← panics on malformed input
+    ...
+}
+```
+
+Panics are caught by `catch_unwind` in the parallel executor, but they abort the entire parse and produce a hard-to-debug `Error::Parser`. Return `Err` instead:
+
+```rust
+let value = extract_value(bytes)
+    .ok_or_else(|| rypipe_core::Error::Plan("malformed record".into()))?;
+```
+
+## Configuration anti-patterns { #configuration-anti-patterns }
+
+### Not declaring `schema` when columns are known { #not-declaring-schema }
+
+```python
+source = MyAdapter("data.log")  # no schema: triggers discovery pass
+```
+
+When the columns are known, always provide `schema`:
+
+```python
+source = MyAdapter("data.log", schema=["id", "ts", "amount", "status"])
+```
+
+Without `schema`, the engine runs a discovery pass that doubles I/O and delays the first row. With a declared schema, the engine skips discovery, stabilizes column order, and enables the `row_satisfied` byte-jump. In the crxml reference adapter, declaring `schema` lifts throughput from 4.2 GB/s to 7.6 GB/s (+80%).
+
+### Memory budget too small { #memory-budget-too-small }
+
+```python
+source = MyAdapter("huge.log", memory="1KB")  # extremely tight budget
+```
+
+The budget is a target, not a hard limit. A budget much smaller than the data causes:
+
+- Many tiny batches with high per-chunk setup overhead.
+- Repeated `TableBuilder` allocation and finish cycles.
+- RSS may still overshoot when a batch contains an unusually wide row.
+
+Start with 500 MiB for workstations or 128 MiB for embedded workloads. Lower the budget only when you need to constrain RSS, and measure the throughput trade-off.
+
+### Not using `schema_order` for stable column order { #not-using-schema_order }
+
+```python
+source = MyAdapter("data.log")  # no schema_order
+df1 = source.to_arrow()  # columns in discovery order
+df2 = source.to_arrow()  # may differ if file layout changed
+```
+
+Without `schema_order`, column order depends on discovery order, which can vary across files or chunks. Declare `schema` to fix the output order:
+
+```python
+source = MyAdapter("data.log", schema=["id", "ts", "amount", "status"])
+```
+
 ## Summary { #summary }
 
 - Cache tables; do not re-run pipelines.
@@ -85,3 +219,6 @@ Without `field_types={"amount": "float64"}`, the engine stores `amount` as a str
 - Keep Python callables out of the hot path.
 - Match the engine mode to the file size and workload.
 - Declare types for numeric filters.
+- Override `apply()` only on non-fusable stages; use observer hooks for side effects.
+- Always check `wants()` before expensive field extraction.
+- Never panic in `parse_chunk`; return `Err` instead.

@@ -174,7 +174,102 @@ discards partial trailing rows automatically during `normalize()`.
     silently. Always let the engine handle incomplete records at chunk boundaries.
 
 
-### 6. Consider `parse_chunk_generic` for hot paths { #6-consider-parse_chunk_generic-for-hot-paths }
+### 6. Skip blank lines or use them as record boundaries { #skip-blank-lines }
+
+Blank lines in the input produce empty rows with all null fields if you
+don't handle them. There are two patterns:
+
+**Pattern A: Skip blank lines (one-line-per-record formats).**
+
+```rust
+for line in text.lines() {
+    if line.is_empty() { continue; }
+    sink.begin_row();
+    // ... parse fields ...
+    sink.end_row();
+}
+```
+
+**Pattern B: Blank lines as record separators (multi-line formats).**
+
+If your format puts one field per line with blank-line-separated records,
+split on `\n\n` in the Splitter and accumulate fields across lines in the
+Parser. Call `end_row()` only when you hit a blank line:
+
+```rust
+let mut in_record = false;
+for line in text.lines() {
+    if line.is_empty() {
+        if in_record { sink.end_row(); in_record = false; }
+        continue;
+    }
+    if !in_record { sink.begin_row(); in_record = true; }
+    // ... put_field for each line ...
+}
+if in_record { sink.end_row(); }
+```
+
+See [Multi-line Record Adapter](examples.md#multi-line-adapter) for a
+complete worked example.
+
+!!! warning
+
+    Blank lines produce silent null rows: no error, no crash, just rows
+    with all fields null. If your output has unexpected nulls, check
+    whether blank lines are slipping through.
+
+
+### 7. Within-chunk state { #within-chunk-state }
+
+The parser is stateless **across** chunks (each chunk is parsed on an
+independent thread). But it CAN hold state **within** a chunk — tracking
+`[section]` headers, accumulating fields across lines, or handling `\`
+continuations:
+
+```rust
+struct PropertiesParser;
+
+impl RecordParser for PropertiesParser {
+    // ... validate, etc.
+
+    fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+
+        let mut pending_key: Option<String> = None;
+        let mut pending_value = String::new();
+
+        for line in text.lines() {
+            if line.is_empty() {
+                // Flush any pending continuation
+                if let Some(key) = pending_key.take() {
+                    sink.begin_row();
+                    if sink.wants("key") {
+                        sink.put_field("key", Value::Str(Cow::Borrowed(&key)));
+                    }
+                    if sink.wants("value") {
+                        sink.put_field("value", Value::Str(Cow::Owned(pending_value.clone())));
+                    }
+                    sink.end_row();
+                    pending_value.clear();
+                }
+                continue;
+            }
+
+            // ... parse key=value, handle continuation, etc.
+        }
+        Ok(())
+    }
+}
+```
+
+The state (`pending_key`, `pending_value`) persists across lines within the
+chunk but is NOT shared between chunks. The Splitter ensures continuations
+don't span chunk boundaries (see [Splitter: Stateful
+formats](splitter.md#stateful-formats)).
+
+
+### 8. Consider `parse_chunk_generic` for hot paths { #6-consider-parse_chunk_generic-for-hot-paths }
 
 If your parser is called millions of times (e.g., small files, streaming),
 override `parse_chunk_generic` to get devirtualized sink calls:

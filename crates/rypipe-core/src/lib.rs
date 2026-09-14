@@ -41,7 +41,10 @@ pub use arrow_export::apply_compare_filter;
 pub use auto::{resolve_engine, AutoConfig, EngineMode};
 pub use bounded::{MemoryBudget, MAX_SPLIT_CHUNKS};
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
-pub use decoder::{split_points_to_ranges, ColumnarSink, RecordParser, Splitter};
+pub use decoder::{
+    find_next_record_boundary, is_continued_newline, split_points_to_ranges, ColumnarSink,
+    RecordBoundary, RecordParser, Splitter,
+};
 pub use engine::{LocateOnly, TableBuilder};
 #[cfg(feature = "profile")]
 pub use engine::{

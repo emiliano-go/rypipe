@@ -59,7 +59,7 @@ separate packages. Install the engine plus the adapters you need.
 ### From Python { #from-python }
 
 ```bash
-pip install crxml
+pip install "crxml[all]"
 ```
 
 Download a sample [report.xml](examples/report.xml) or create your own:
@@ -98,9 +98,9 @@ print(df)
 
 ```rust
 use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-use crxml_core::{CrystalXmlSplitter, CrystalXmlParser}; // adapter crate
+use crxml_core::{CrystalXmlSplitter, CrystalXmlDecoder}; // adapter crate
 
-let batch = Pipeline::new(CrystalXmlSplitter, CrystalXmlParser)
+let batch = Pipeline::new(CrystalXmlSplitter, CrystalXmlDecoder)
     .with_plan(
         ExecutionPlan::new()
             .type_as("Amount", FieldType::Float64)

@@ -9,12 +9,17 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 
 ## [0.3.2] - 2026-09-11
 
+### Added
+
+- **Expression API string transforms.** Added `strip`, `lstrip`, `rstrip`, `lower`, `upper`, `replace`, and `length` methods to the `col()` expression API. These produce fusable filter spec dicts that run in the Rust parse loop.
+- **Partial pushdown in CastTypes.** Non-pushable type casts (e.g. custom Python types) are skipped during plan fusion instead of falling back to a full Python pass over the table.
+- **Fused `is_type`, `is_null`, `contains` ops.** `_fuse_filter_spec` now handles `is_type`, `is_null`, and `contains` operators, keeping them in the Rust parse loop instead of falling back to Python.
+
 ### Security
 
 - **Decompression bomb protection.** Added 1 GiB limit on decompressed output via `LimitReader`. Compressed inputs (gzip, zstd, lz4) that would decompress beyond 1 GiB are rejected mid-stream to prevent OOM kills.
 - **Regex size limit.** Compiled regex patterns are capped at 1 MiB to reduce ReDoS risk and memory consumption.
 - **Supply chain audit.** Added `cargo-deny` advisory/license/ban checks to CI. Pinned all GitHub Actions to full commit SHAs.
-- **Predicate nesting depth limit.** Filter specs are limited to 128 levels of nesting to prevent stack overflow from adversarial input.
 - **In/NotIn values list cap.** Values lists are capped at 100,000 elements to prevent excessive memory allocation and O(n) per-row scan amplification.
 - **Replace filter empty-old rejection.** `Replace` filter with empty `old` string is rejected to prevent per-row memory amplification (`old=""` inserts `new` before every character).
 - **Decimal128 scale cap.** Scale values are capped at 38 (Arrow maximum) to prevent i8 overflow in the Arrow schema.
@@ -36,6 +41,11 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **`StrColumn::with_capacity` cap.** Allocation is capped at 1M rows to prevent multi-gigabyte allocations from bad row-size estimates.
 - **Overflow-safe chunk splitting.** `bytes.len() * i / n` replaced with `bytes.len() / n * i` to prevent integer overflow on large files.
 - **TOCTOU mitigation.** Path is canonicalized before file reopen in bounded stream to prevent symlink swap between mmap planning and reading.
+- **`RenameFields` target-name collisions.** Raises `ValueError` when multiple source fields map to the same target name, which previously caused silent data loss.
+- **`isin()`/`not_in()` bare string guard.** Passing a bare string instead of a list no longer panics; raises a clear error instead.
+- **ParquetWriter resource leak.** `to_parquet` wraps the writer in `try/finally` to ensure the file is closed on write errors.
+- **Empty range fallback in parallel stream.** `parallel_stream.rs` now uses `actual_bytes` instead of the raw range length, preventing empty chunks from degenerate input.
+- **Redundant ternary in `read_file`.** Removed dead conditional in the file-reading path.
 
 ### Changed
 
@@ -43,7 +53,9 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **Unsafe `get_unchecked` removed.** Dictionary code remapping in `columnar.rs` and `dict.rs` uses bounds-checked `get()` instead of `unsafe get_unchecked`.
 - **`warn(unsafe_code)` lint.** Added to `rypipe-core` crate root. Removed blanket `#![allow(unsafe_code)]` from `input.rs`.
 - **Regex size limit raised.** From 256 KiB to 1 MiB to reduce false positives on legitimate patterns.
-- **Dead code removed.** Legacy `run_mapped` and `apply_plan_filter` functions deleted from `bounded.rs`.
+- **Dead code removed.** Legacy `run_mapped` and `apply_plan_filter` functions deleted from `bounded.rs`. Dead `_arrow_iter` removed from `fusion.py`.
+- **Dictionary unification performance.** Removed unnecessary `clone` of `column_order` during per-chunk dictionary unification in `parallel.rs`.
+- **FFI error propagation.** `unwrap()` at the Python FFI boundary in `plan_kwargs` replaced with `PlanError` for actionable error messages.
 
 ## [0.3.1] - 2026-09-11
 

@@ -106,7 +106,7 @@ let batch = Pipeline::new(MySplitter, MyDecoder::new())
     .read_path("data.myfmt", false, false)?;
 ```
 
-`rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python, you can publish a Rust-only adapter and depend on `rypipe-core = "2.0"` alone.
+`rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python, you can publish a Rust-only adapter and depend on `rypipe-core = "0.3"` alone.
 
 ## 7. Design principle: data-driven development { #7-design-principle-data-driven-development }
 
@@ -133,7 +133,7 @@ Yes. See [Rust API](./reference/rust-api.md) and [Writing a format adapter](./bu
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.
 
 **“Will you maintain both APIs?”**
-Yes. `rypipe-core` is versioned independently (`2.0.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
+Yes. `rypipe-core` is versioned independently (`0.3.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
 
 ---
 

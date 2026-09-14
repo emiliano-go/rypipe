@@ -65,8 +65,9 @@ See [Skip regions](../building-adapters/skip-regions.md) for the full interface.
 The default implementation handles everything:
 
 1. Early return `vec![0, bytes.len()]` when `max_chunks <= 1` or input is empty
-2. `plan_chunk_count` determines chunk count (2 MiB floor, thread caps)
-3. Nominal offsets at `bytes.len() * i / n`
+2. `plan_chunk_count` computes target chunk count from `max_chunks` (2 MiB floor,
+   `16 × threads` cap, 1024 hard max)
+3. Nominal offsets at `bytes.len() * i / n` where `n` is the result of step 2
 4. `par_iter` over nominals calling `next_record_start`
 5. Skip-region rejection via `in_skip_region`
 6. Dedup, sort, prepend 0, append `bytes.len()`

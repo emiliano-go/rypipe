@@ -84,7 +84,10 @@ df = pd.concat(b.to_pandas() for b in pipe.iter_record_batches(memory="256MB"))
 
 Note that `crxml`'s `CrystalXMLSource` sink methods (`to_pandas` / `to_polars` / `to_parquet`) take **no** `memory=` argument; `iter_record_batches` is the bounded-memory entry point. The framework also ships generic sink helpers (`rypipe.to_pandas(src, memory=...)` and friends) that stream through `iter_record_batches` internally; those exist for adapter authors whose sources do not override the sinks, and end users do not need them.
 
-Unit note: `crxml` accepts `B` / `KB` / `MB` / `GB` / `TB` (1024-based, case-insensitive, no space before the unit) in memory strings, while the framework's own memory parser additionally accepts the `KiB` / `MiB` / `GiB` / `TiB` forms. `memory="64MiB"` raises `invalid memory` in crxml; use `"64MB"`. See [Memory and chunking](memory-and-chunking.md).
+Unit note: Both `crxml` and the framework accept `B` / `KB` / `MB` / `GB` / `TB`
+and `KiB` / `MiB` / `GiB` / `TiB` (1024-based, case-insensitive, no space
+before the unit). The `iB` and non-`iB` forms are equivalent. See
+[Memory and chunking](memory-and-chunking.md).
 
 ### Advanced (batch-level control) { #advanced }
 
@@ -105,7 +108,11 @@ for batch in pipe.iter_record_batches(memory="256MB"):
     writer.write_batch(batch)
 ```
 
-`batch_size` overrides the budget-derived `rows_per_batch = budget / estimate_bytes_per_row` (`crates/rypipe-core/src/decoder.rs`). Default derives from `memory`; pass `batch_size=1` for minimal per-batch memory. `crxml`'s `iter_record_batches` deprecates `batch_size` (it warns and ignores it) and always derives the batch size from the budget.
+`batch_size` is a Python-only convenience parameter (the Rust executor always
+derives `rows_per_batch` from the budget in `bounded.rs`). `crxml`'s
+`iter_record_batches` deprecates `batch_size` (it warns and ignores it) and
+always derives the batch size from the budget. Set `memory` to control batch
+size: smaller budgets produce smaller batches.
 
 ## When streaming falls back { #when-streaming-falls-back }
 

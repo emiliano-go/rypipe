@@ -113,7 +113,8 @@ Bounded mode also has consumer variants (`read_bytes_stream_consumer`,
 
 ```
 begin_row
-  no filter: no op (row tracked by row_count + row_dirty)
+  always: fire on_begin_row, reset current_ordinal to 0
+  no filter: (row tracked by row_count + row_dirty)
   with plan.filter: reset current_ordinal, clear the RowBuffer, and run the
     adaptive late-predicate check (if predicate_ordinal >= ncols * 4 / 5,
     buffering is deemed not worthwhile and rows fall back to direct push)
