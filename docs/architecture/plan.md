@@ -123,6 +123,8 @@ a scale (default 18 via the `decimal128` spec, capped at 38 for Arrow compatibil
 
 ## FilterPredicate { #filterpredicate }
 
+`TrimMode::{Both, Start, End}` controls which end of a string `Strip` trims.
+
 ```rust
 pub enum FilterPredicate {
     // Value comparison
@@ -135,7 +137,7 @@ pub enum FilterPredicate {
     StartsWith { field: String, value: String },
     EndsWith { field: String, value: String },
     Contains { field: String, value: String },
-    Strip { field: String, op: CompareOp, value: String },
+    Strip { field: String, mode: TrimMode, op: CompareOp, value: String },
     Lower { field: String, op: CompareOp, value: String },
     Upper { field: String, op: CompareOp, value: String },
     Replace { field: String, old: String, new: String, op: CompareOp, value: String },

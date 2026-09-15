@@ -59,11 +59,18 @@ on sources it builds pipelines, on predicates it means OR; context decides.)
 | `col("s").length(">", 5)` | `{"op": "length", "value": "5", "cmp_op": ">"}` |
 | `p & q`, `p \| q`, `~p` | `{"and": ...}`, `{"or": ...}`, `{"not": ...}` |
 
-Literals may be `int`, `float`, `str`, or `bool`; they are coerced to the
-string form specs carry, and the engine compares with native-typed numeric
-promotion. `matches()` validates the pattern with `re.compile` at
+Literals may be `int`, `float`, `str`, or `bool`; typed columns parse them as
+the column type. String columns use lexical ordering. Mixed integer/float
+comparisons promote to `float64`, which can lose precision for large integers.
+Comparisons reject null and numeric `NaN`; `is_null()` and `is_not_null()` test
+presence explicitly. `not_in` and negation can retain null rows.
+`matches()` validates the pattern with `re.compile` at
 construction time and the engine applies it as a regex search against the
 string form of the value.
+
+Use `&`, `|`, and `~` for composition. Python `and` and `or` raise because
+predicates do not define truth-value conversion. String `length` counts Unicode
+code points.
 
 ## Custom spec producers { #custom-spec-producers }
 

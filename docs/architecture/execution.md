@@ -246,4 +246,5 @@ The filter works by:
 
 See [Storage and export](./storage.md) for Arrow type mapping and null
 handling details. See [Engine](./engine.md) for `TableBuilder::finish`
-and the zero-copy Arrow export path.
+and Arrow export (string/dictionary buffers move without copying; primitive
+arrays are copied).
