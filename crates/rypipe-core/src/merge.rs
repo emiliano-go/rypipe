@@ -23,10 +23,15 @@ impl TableBuilder {
     /// promotions (`int64`→`float64`, `string`→`dictionary`); irreconcilable
     /// conflicts return [`crate::Error::Merge`].
     pub fn extend(&mut self, mut other: TableBuilder) -> Result<()> {
+        self.normalize();
+        other.normalize();
         // A strict-types violation recorded while building `other` must not be
         // silently dropped by the merge.
         if self.strict_error.is_none() {
             self.strict_error = other.strict_error.take();
+        }
+        if self.unknown_error.is_none() {
+            self.unknown_error = other.unknown_error.take();
         }
         // Per-row hooks already fired in the chunk's thread; only the
         // accepted/rejected totals carry over for `on_chunk_finished`.
@@ -108,15 +113,7 @@ pub fn engines_to_record_batches(
     plan: &ExecutionPlan,
 ) -> Result<Vec<RecordBatch>> {
     for e in engines.iter_mut() {
-        // `finish()` is bypassed here, so surface deferred per-chunk errors
-        // (strict-types violations, unknown-field errors) explicitly.
-        if let Some(err) = e.unknown_error.take() {
-            return Err(crate::Error::Merge(err));
-        }
-        if let Some(err) = e.strict_error.take() {
-            return Err(err);
-        }
-        e.normalize();
+        e.prepare_finish()?;
     }
     engines.retain(|e| e.row_count > 0);
 

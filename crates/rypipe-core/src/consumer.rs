@@ -4,9 +4,9 @@ use crate::Result;
 
 /// Consumer for streaming `RecordBatch` output.
 ///
-/// The engine calls `consume` once per batch and immediately drops the batch
-/// afterward. Peak memory is therefore `budget + batch` rather than
-/// `sum(all batches)`. See `BoundedExecutor::run_stream`.
+/// The engine transfers ownership of each batch to `consume`. Consumers that
+/// drop batches avoid accumulating output; input and parser buffers still
+/// contribute to peak memory. See `BoundedExecutor::run_stream`.
 pub trait BatchConsumer {
     fn consume(&mut self, batch: RecordBatch) -> Result<()>;
 }
