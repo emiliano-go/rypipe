@@ -39,6 +39,9 @@ pub fn py_err_from_rypipe(err: rypipe_core::Error) -> PyErr {
     match err {
         rypipe_core::Error::Utf8(e) => ParseError::new_err(format!("invalid UTF-8: {e}")),
         rypipe_core::Error::Plan(msg) => PlanError::new_err(msg),
+        err @ rypipe_core::Error::Memory { .. } => {
+            pyo3::exceptions::PyMemoryError::new_err(err.to_string())
+        }
         rypipe_core::Error::Merge(msg) => MergeError::new_err(msg),
         rypipe_core::Error::Parser(msg) => ParserError::new_err(msg),
         rypipe_core::Error::Lifetime(msg) => ParserError::new_err(format!("lifetime error: {msg}")),
