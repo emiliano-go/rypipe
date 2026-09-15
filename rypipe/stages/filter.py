@@ -1,10 +1,38 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
+from decimal import Decimal
+from math import isinf
+
+
+def _filter_string(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        if isinf(value):
+            return str(value)
+        return format(Decimal(str(value)), "f").removesuffix(".0")
+    if isinstance(value, datetime):
+        return str(value)
+    return str(value)
+
+
+def _literal_scalar(value, dtype):
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if pa.types.is_dictionary(dtype):
+        dtype = dtype.value_type
+    value = _filter_string(value)
+    if pa.types.is_temporal(dtype):
+        raw_type = pa.int32() if pa.types.is_date32(dtype) else pa.int64()
+        return pc.cast(pa.scalar(int(value), type=raw_type), dtype)
+    return pc.cast(pa.scalar(value), dtype)
 
 
 class _ConstantPredicate:
-    __slots__ = ("_field", "_op", "_value")
+    __slots__ = ("_field", "_op", "_value", "_literals")
 
     _VALID_OPS = frozenset({
         "==", "eq", "!=", "ne",
@@ -36,31 +64,38 @@ class _ConstantPredicate:
         self._field = field
         self._op = op
         self._value = value
+        self._literals = {}
 
     def __call__(self, record: dict) -> bool:
         actual = record.get(self._field)
         if actual is None:
             return False
-        return self._OPS[self._op](actual, self._value)
+        if isinstance(actual, str):
+            return self._OPS[self._op](actual, _filter_string(self._value))
+        import pyarrow as pa
+
+        key = (type(actual), actual.as_tuple().exponent if isinstance(actual, Decimal) else None)
+        if key not in self._literals:
+            try:
+                dtype = pa.scalar(actual).type
+                if pa.types.is_decimal(dtype):
+                    dtype = pa.decimal128(38, dtype.scale)
+                value = _literal_scalar(self._value, dtype).as_py()
+            except (ValueError, TypeError, pa.ArrowException):
+                value = None
+            self._literals[key] = value
+        value = self._literals[key]
+        if value is None:
+            return False
+        if actual != actual or value != value:
+            return False
+        return self._OPS[self._op](actual, value)
 
 
 class _ComparePredicate:
     __slots__ = ("_field_a", "_op", "_field_b")
 
-    _OPS = {
-        ">": lambda a, b: a > b,
-        "<": lambda a, b: a < b,
-        ">=": lambda a, b: a >= b,
-        "<=": lambda a, b: a <= b,
-        "==": lambda a, b: a == b,
-        "!=": lambda a, b: a != b,
-        "eq": lambda a, b: a == b,
-        "ne": lambda a, b: a != b,
-        "gt": lambda a, b: a > b,
-        "lt": lambda a, b: a < b,
-        "ge": lambda a, b: a >= b,
-        "le": lambda a, b: a <= b,
-    }
+    _OPS = _ConstantPredicate._OPS
 
     def __init__(self, field_a: str, op: str, field_b: str):
         if op not in self._OPS:
@@ -74,8 +109,21 @@ class _ComparePredicate:
         self._field_b = field_b
 
     def __call__(self, record: dict) -> bool:
-        fn = self._OPS.get(self._op)
-        return bool(fn(record.get(self._field_a), record.get(self._field_b)))
+        a, b = record.get(self._field_a), record.get(self._field_b)
+        if a is None or b is None or a != a or b != b:
+            return False
+        if type(a) is not type(b) and not (type(a) in (int, float) and type(b) in (int, float)):
+            return False
+        if type(a) is not type(b) and type(a) in (int, float) and type(b) in (int, float):
+            a, b = float(a), float(b)
+        return bool(self._OPS[self._op](a, b))
+
+
+def _comparison(op):
+    try:
+        return _ConstantPredicate._OPS[op]
+    except KeyError:
+        raise ValueError(f"unsupported comparison operator {op!r}") from None
 
 
 class _StartsWithPredicate:
@@ -90,7 +138,7 @@ class _StartsWithPredicate:
         actual = record.get(self._field)
         if actual is None:
             return False
-        return str(actual).startswith(self._value)
+        return _filter_string(actual).startswith(self._value)
 
 
 class _EndsWithPredicate:
@@ -105,7 +153,7 @@ class _EndsWithPredicate:
         actual = record.get(self._field)
         if actual is None:
             return False
-        return str(actual).endswith(self._value)
+        return _filter_string(actual).endswith(self._value)
 
 
 class _RegexPredicate:
@@ -125,7 +173,7 @@ class _RegexPredicate:
         actual = record.get(self._field)
         if actual is None:
             return False
-        return bool(self._compiled.search(str(actual)))
+        return bool(self._compiled.search(_filter_string(actual)))
 
 
 class _InPredicate:
@@ -139,7 +187,7 @@ class _InPredicate:
 
     def __call__(self, record: dict) -> bool:
         actual = record.get(self._field)
-        result = actual in self._values
+        result = actual is not None and _filter_string(actual) in self._values
         return not result if self._negate else result
 
 
@@ -163,31 +211,21 @@ def _build_predicate_from_spec(spec: dict):
                 return _EndsWithPredicate(spec["field"], spec["value"])
             if op == "contains":
                 field, value = spec["field"], spec["value"]
-                return lambda r: value in str(r.get(field, ""))
+                return lambda r: r.get(field) is not None and value in _filter_string(r[field])
             if op in ("strip", "lstrip", "rstrip", "lower", "upper"):
                 field, value, cmp_op = spec["field"], spec["value"], spec.get("cmp_op", "==")
-                cmp_fns = {
-                    "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
-                    ">": lambda a, b: a > b, "<": lambda a, b: a < b,
-                    ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
-                }
-                cmp_fn = cmp_fns.get(cmp_op, cmp_fns["=="])
+                cmp_fn = _comparison(cmp_op)
                 transforms = {
                     "strip": lambda s: s.strip(), "lstrip": lambda s: s.lstrip(),
                     "rstrip": lambda s: s.rstrip(), "lower": lambda s: s.lower(),
                     "upper": lambda s: s.upper(),
                 }
                 transform = transforms[op]
-                return lambda r: cmp_fn(transform(str(r.get(field, ""))), value)
+                return lambda r: r.get(field) is not None and cmp_fn(transform(_filter_string(r[field])), value)
             if op == "length":
                 field, value, cmp_op = spec["field"], spec["value"], spec.get("cmp_op", ">")
-                cmp_fns = {
-                    "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
-                    ">": lambda a, b: a > b, "<": lambda a, b: a < b,
-                    ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
-                }
-                cmp_fn = cmp_fns.get(cmp_op, cmp_fns[">"])
-                return lambda r: cmp_fn(float(len(str(r.get(field, "")))), float(value))
+                cmp_fn = _comparison(cmp_op)
+                return lambda r: r.get(field) is not None and cmp_fn(float(len(_filter_string(r[field]))), float(value))
             if "arith_op" in spec:
                 # Arithmetic compare: field * arith_value op cmp_value
                 arith_op = spec["arith_op"]
@@ -199,27 +237,24 @@ def _build_predicate_from_spec(spec: dict):
                     "*": lambda a, b: a * b,
                     "/": lambda a, b: a / b,
                 }
-                cmp_fns = {
-                    "==": lambda a, b: a == b,
-                    "!=": lambda a, b: a != b,
-                    ">": lambda a, b: a > b,
-                    "<": lambda a, b: a < b,
-                    ">=": lambda a, b: a >= b,
-                    "<=": lambda a, b: a <= b,
-                }
                 arith_fn = arith_fns[arith_op]
-                cmp_fn = cmp_fns[op]
+                cmp_fn = _comparison(op)
                 field = spec["field"]
-                return lambda r: cmp_fn(arith_fn(float(r.get(field, 0)), arith_val), float(cmp_val))
+                def arithmetic(r):
+                    actual = r.get(field)
+                    if not isinstance(actual, (str, int, float)) or isinstance(actual, bool):
+                        return False
+                    try:
+                        result = arith_fn(float(actual), arith_val)
+                        target = float(cmp_val)
+                    except (ValueError, TypeError, ZeroDivisionError, OverflowError):
+                        return False
+                    return result == result and target == target and cmp_fn(result, target)
+                return arithmetic
             if "old" in spec and "new" in spec:
                 field, old, new, cmp_op, value = spec["field"], spec["old"], spec["new"], spec.get("cmp_op", "=="), spec["value"]
-                cmp_fns = {
-                    "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
-                    ">": lambda a, b: a > b, "<": lambda a, b: a < b,
-                    ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
-                }
-                cmp_fn = cmp_fns.get(cmp_op, cmp_fns["=="])
-                return lambda r: cmp_fn(str(r.get(field, "")).replace(old, new), value)
+                cmp_fn = _comparison(cmp_op)
+                return lambda r: r.get(field) is not None and cmp_fn(_filter_string(r[field]).replace(old, new), value)
             return _ConstantPredicate(spec["field"], op, spec["value"])
         if "values" in spec:
             return _InPredicate(spec["field"], spec["values"], negate=(op == "not_in"))
@@ -227,7 +262,7 @@ def _build_predicate_from_spec(spec: dict):
     if "field_a" in spec and "op" in spec and "field_b" in spec:
         return _ComparePredicate(spec["field_a"], spec["op"], spec["field_b"])
     if "not_field" in spec:
-        return lambda r: not r.get(spec["not_field"])
+        return lambda r: r.get(spec["not_field"]) is None or _filter_string(r[spec["not_field"]]) == ""
     if "and" in spec:
         predicates = [_build_predicate_from_spec(s) for s in spec["and"]]
         return lambda r: all(p(r) for p in predicates)
@@ -284,27 +319,40 @@ class _IsTypePredicate:
         val = record.get(self._field)
         if val is None:
             return False
-        # Type checking based on Python type
-        if self._field_type in ("int64", "integer"):
-            return isinstance(val, int) and not isinstance(val, bool)
-        elif self._field_type in ("float64", "float"):
-            return isinstance(val, float)
-        elif self._field_type in ("bool", "boolean"):
-            return isinstance(val, bool)
-        elif self._field_type in ("string", "str"):
-            return isinstance(val, str)
-        elif self._field_type == "dictionary":
-            # Dictionary is an implementation detail; treat as string for Python
-            return isinstance(val, str)
-        elif self._field_type == "date32":
-            # Date32 is stored as int in Rust; in Python it could be various types
-            return isinstance(val, (int, str))
-        elif self._field_type == "timestamp":
-            # Timestamp is stored as int in Rust; in Python it could be various types
-            return isinstance(val, (int, str))
-        elif self._field_type == "decimal128":
-            # Decimal128 is stored as int in Rust; in Python it could be various types
-            return isinstance(val, (int, float, str))
+        kind = self._field_type
+        if kind == "string":
+            return isinstance(val, (str, int, float, date, Decimal))
+        if isinstance(val, str):
+            if kind == "dictionary":
+                return True
+            if kind in ("bool", "boolean"):
+                return val.lower() in {"true", "false", "1", "0", "yes", "no"}
+            if kind in ("int64", "timestamp") and re.fullmatch(r"[+-]?[0-9]+", val):
+                return -(1 << 63) <= int(val) < (1 << 63)
+            try:
+                if kind in ("date32", "timestamp"):
+                    date.fromisoformat(val.strip())
+                    return True
+                if kind in ("float64", "decimal128") and val == val.strip() and "_" not in val:
+                    float(val)
+                    return True
+            except (ValueError, OverflowError):
+                pass
+            return False
+        if kind == "int64":
+            if isinstance(val, (int, date, Decimal)):
+                return True
+            return isinstance(val, float) and val.is_integer() and -(1 << 63) <= val < (1 << 63)
+        if kind == "float64":
+            return isinstance(val, (int, float, Decimal))
+        if kind in ("bool", "boolean"):
+            return isinstance(val, (int, float)) and val in (0, 1)
+        if kind == "date32":
+            return type(val) is date
+        if kind == "timestamp":
+            return isinstance(val, datetime)
+        if kind == "decimal128":
+            return isinstance(val, Decimal)
         return False
 
 
@@ -336,6 +384,8 @@ class FilterRows:
                     )
             else:
                 # Plain callable; Python fallback execution, not fusable
+                if not callable(predicate):
+                    raise TypeError("FilterRows predicate must be an expression or callable")
                 self._predicate = predicate
                 self._filter_spec = None
         elif is_null is not None and field is not None:
@@ -349,6 +399,9 @@ class FilterRows:
             self._filter_spec = {"field": field, "op": "is_type", "value": is_type}
             self._predicate = _IsTypePredicate(field, is_type)
         elif field is not None and op is not None and value is not None:
+            from ..expr import _spec_value
+
+            value = _spec_value(value)
             self._filter_spec = {"field": field, "op": op, "value": value}
             _EXPRESSION_ONLY_OPS = frozenset({
                 "strip", "lstrip", "rstrip", "lower", "upper", "length",

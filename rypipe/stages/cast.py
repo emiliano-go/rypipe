@@ -1,7 +1,9 @@
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Callable
-from uuid import UUID
+
+import pyarrow as pa
+import pyarrow.compute as pc
 
 _PY_TO_RUST_TYPE = {
     int: "int64",
@@ -11,15 +13,33 @@ _PY_TO_RUST_TYPE = {
     date: "date32",
     datetime: "timestamp",
     Decimal: "decimal128",
-    UUID: "string",
 }
+
+_ARROW_TYPES = {
+    "int64": pa.int64(),
+    "float64": pa.float64(),
+    "bool": pa.bool_(),
+    "date32": pa.date32(),
+    "timestamp": pa.timestamp("us"),
+    "decimal128": pa.decimal128(38, 18),
+}
+
+
+def _cast_column(column, kind):
+    if pa.types.is_dictionary(column.type):
+        column = pc.dictionary_decode(column)
+    if pa.types.is_string(column.type) or pa.types.is_large_string(column.type):
+        from _rypipe._rypipe import _cast_strings
+
+        return _cast_strings(pa.Table.from_arrays([column], names=["value"]), kind)
+    return pc.cast(column, _ARROW_TYPES[kind])
 
 
 class CastTypes:
     __slots__ = ("_mapping",)
 
     def __init__(self, mapping: dict[str, Callable]):
-        self._mapping = mapping
+        self._mapping = dict(mapping)
 
     def apply(self, record: dict) -> dict:
         mapping = self._mapping
@@ -27,7 +47,10 @@ class CastTypes:
             return record
         for field, cast_fn in mapping.items():
             try:
-                record[field] = cast_fn(record[field])
+                kind = _PY_TO_RUST_TYPE.get(cast_fn)
+                value = record[field]
+                record[field] = (_cast_column(pa.array([value]), kind)[0].as_py()
+                                 if kind is not None else cast_fn(value))
             except KeyError:
                 pass
             except (ValueError, TypeError) as e:
@@ -46,11 +69,8 @@ class CastTypes:
         for field, fn in self._mapping.items():
             rust_type = _PY_TO_RUST_TYPE.get(fn)
             if rust_type is None:
-                if fn is str:
-                    continue
-                # Non-pushable cast; skip this field, keep the rest
-                continue
+                return None
             ft[field] = rust_type
         if not ft:
             return None
-        return {"field_types": ft}
+        return {"field_types": ft, "strict_types": True}

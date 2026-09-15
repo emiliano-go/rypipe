@@ -3,7 +3,6 @@ class RenameFields:
 
     def __init__(self, mapping: dict[str, str]):
         # Detect target-name collisions: multiple sources → same target
-        targets = list(mapping.values())
         seen: dict[str, str] = {}
         for src, tgt in mapping.items():
             if tgt in seen:
@@ -12,7 +11,7 @@ class RenameFields:
                     f"both map to {tgt!r}; each target name must be unique"
                 )
             seen[tgt] = src
-        self._mapping = mapping
+        self._mapping = dict(mapping)
 
     def apply(self, record: dict) -> dict:
         mapping = self._mapping
