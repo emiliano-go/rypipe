@@ -6,7 +6,7 @@
 
 * **Data work lives in Python.** Notebooks, ETL glue, and the modern lakehouse are Python-first.
 * **Rust wins the hot path, Python wins composition.** Parsing 100 M fields at ~950 MB/s needs Rust; chaining `RenameFields | FilterRows | CastTypes -> .to_pandas()` needs Python.
-* **Arrow is the bridge.** `rypipe` produces Arrow in Rust and hands it to `pyarrow`/`pandas`/`Polars` with no copy via the C Data Interface, the same columnar substrate every data tool speaks.
+* **Arrow is the bridge.** `rypipe` produces Arrow in Rust and hands it to `pyarrow`/`pandas`/`Polars` via the C Data Interface; string/dictionary buffers move without copying, while primitive exports copy.
 * **Pure Rust would shrink the audience 10×.** ETL and analysis are done by data engineers, analysts, and ML engineers, most never touch `cargo build`.
 
 If you need Rust-only, `rypipe-core` is still there (see [Rust API](./reference/rust-api.md)). The Python layer is a *thin* orchestration shell, not a bottleneck.
@@ -52,9 +52,9 @@ Rust parser (rypipe-core) ──► Data Interface ──► pyarrow.Table
     ──► pandas / Polars / DuckDB / Spark
 ```
 
-* **`pyarrow`** is the de-facto Arrow implementation in Python (25 M downloads/month). `rypipe` hands batches via the C Data Interface, no serialization, no copy, no GIL.
+* **`pyarrow`** is the de-facto Arrow implementation in Python (25 M downloads/month). `rypipe` hands batches via the C Data Interface without serialization; parsing is GIL-free and export briefly reacquires the GIL.
 * **`pandas 2.0+`** stores columns as `ArrowDtype` when `dtype_backend="pyarrow"`, rypipe tables become DataFrames for free.
-* **`Polars`** is itself a Rust core with Python bindings; `pl.from_arrow(table)` is zero-copy. Users already understand “Rust engine, Python API.”
+* **`Polars`** is itself a Rust core with Python bindings; `pl.from_arrow(table)` can reuse Arrow buffers, though rechunking or later operations may copy. Users already understand “Rust engine, Python API.”
 * **`DuckDB`, `DataFusion`, `DaFt`** all consume Arrow from Python. rypipe fits as the *ingestion* stage before the query engine, not a competitor.
 
 A pure-Rust engine would still need to export Arrow, and then every downstream step would re-wrap it in Python anyway. Putting the binding in the engine removes that friction once.
@@ -80,7 +80,7 @@ In other words: *you pay Rust for the hot loop, Python for the composition*. A p
 | **Prototyping** | `source \| FilterRows(...) \| .to_pandas()` in a notebook cell, instant feedback | Write a binary, handle `Result`, print tables manually, rebuild on every change |
 | **Reuse in prod** | Same notebook code runs in Airflow/Dagster unchanged | Rewrite notebook logic in Rust or maintain two codebases |
 | **Tool chain** | Stays in `pip`/`conda`/`uv`, no new tool | Adds `rustup`, `cargo`, `miri`, `clippy` to every data repo |
-| **Arrow interop** | `pyarrow`, `pandas`, `Polars` zero-copy out of the box | Must go through FFI or JSON/CSV round-trip to reach Python consumers anyway |
+| **Arrow interop** | `pyarrow`, `pandas`, `Polars` via the C Data Interface; zero-copy for string/dictionary buffers | Must go through FFI or JSON/CSV round-trip to reach Python consumers anyway |
 | **Adapter distribution** | Separate pip packages (`rypipe-csv`, `rypipe-json`), `pip install` discovers them | Separate crates, `cargo add` per project, no central registry for data users |
 
 ## 6. When Rust-only *does* make sense, and rypipe still supports it { #6-when-rust-only-does-make-sense-and-rypipe-still-supports-it }

@@ -76,7 +76,7 @@ from crxml import CrystalXMLSource
 
 src = CrystalXMLSource("huge.xml", row_tag="Row")
 
-# Streaming to a DataFrame (bounded memory)
+# Streaming parse memory is bounded; the resulting DataFrame is retained.
 df = pd.concat(b.to_pandas() for b in src.iter_record_batches(memory="256MB"))
 
 # Streaming to Parquet (bounded memory)
@@ -87,7 +87,7 @@ with pq.ParquetWriter("output.parquet", first.schema) as writer:
     for batch in batches:
         writer.write_batch(batch)
 
-# Parallel streaming (higher throughput on multi-core)
+# Parallel streaming parse (higher throughput on multi-core); DataFrame is retained.
 df = pd.concat(b.to_pandas() for b in src.iter_record_batches(memory="256MB", threads=16))
 
 # Advanced: batch-level control via iter_record_batches
@@ -210,7 +210,10 @@ use pyo3::prelude::*; // (CORE) plus (ADAPTER BOUND) glue
 
 #[pyfunction]
 fn read_log(py: Python, path: &str, field_mapping: Option<std::collections::HashMap<String,String>>) -> PyResult<pyo3::Bound<pyo3::PyAny>> {
-    let plan = execution_plan_from_kwargs(field_mapping, None, None, None, None, None, false, None, None)?; // (CORE)
+    let plan = execution_plan_from_kwargs(
+        field_mapping, None, None, None, None, None, false, None, None,
+        false, None, None,
+    )?; // (CORE)
     let batches = py.allow_threads(|| { // (CORE) GIL release
         use rypipe_core::{Pipeline, MemoryBudget};
         Pipeline::new(LogSplitter, LogParser).with_plan(plan).read_path_par(path, 4, false, false) // (CORE) plus (ADAPTER BOUND)
