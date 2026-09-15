@@ -11,8 +11,8 @@ use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
 use rypipe_core::{
-    bounded::MemoryBudget, ColumnarSink, CompareOp, ExecutionPlan, FilterPredicate, Pipeline,
-    RecordParser, Splitter, TableBuilder, Value,
+    bounded::MemoryBudget, ColumnarSink, CompareOp, ExecutionPlan, FieldType, FilterPredicate,
+    Pipeline, RecordParser, Splitter, TableBuilder, TrimMode, Value,
 };
 
 // ---------------------------------------------------------------------------
@@ -405,6 +405,114 @@ fn test_pure_compare_and_survives_batch_filter() {
         .sum();
     assert_eq!(single.num_rows(), 2);
     assert_eq!(par, 2);
+}
+
+#[test]
+fn typed_int64_comparison_keeps_precision_above_f64_mantissa() {
+    let plan = ExecutionPlan::new()
+        .type_as("A", FieldType::Int64)
+        .type_as("B", FieldType::Int64)
+        .filter_compare("A", CompareOp::Gt, "B");
+    assert_eq!(
+        parse_bytes(b"A=9007199254740993 B=9007199254740992\n", plan).num_rows(),
+        1
+    );
+}
+
+#[test]
+fn typed_mixed_numeric_comparison_preserves_operand_order() {
+    let plan = ExecutionPlan::new()
+        .type_as("A", FieldType::Float64)
+        .type_as("B", FieldType::Int64)
+        .filter_compare("A", CompareOp::Lt, "B");
+    assert_eq!(parse_bytes(b"A=1.5 B=2\n", plan).num_rows(), 1);
+}
+
+#[test]
+fn typed_and_string_columns_do_not_match_not_equal() {
+    let plan = ExecutionPlan::new()
+        .type_as("A", FieldType::Int64)
+        .type_as("B", FieldType::String)
+        .filter_compare("A", CompareOp::Ne, "B");
+    assert_eq!(parse_bytes(b"A=2 B=2\n", plan).num_rows(), 0);
+}
+
+#[test]
+fn timestamps_with_different_units_do_not_compare() {
+    use arrow::datatypes::TimeUnit;
+
+    let plan = ExecutionPlan::new()
+        .type_as("A", FieldType::Timestamp(TimeUnit::Second, None))
+        .type_as("B", FieldType::Timestamp(TimeUnit::Millisecond, None))
+        .filter_compare("A", CompareOp::Ne, "B");
+    assert_eq!(parse_bytes(b"A=1 B=1\n", plan).num_rows(), 0);
+}
+
+#[test]
+fn typed_decimal_comparison_does_not_narrow_to_i64() {
+    let plan = ExecutionPlan::new()
+        .type_as("A", FieldType::Decimal128(0))
+        .type_as("B", FieldType::Decimal128(0))
+        .filter_compare("A", CompareOp::Gt, "B");
+    assert_eq!(
+        parse_bytes(b"A=18446744073709551616 B=1\n", plan).num_rows(),
+        1
+    );
+}
+
+#[test]
+fn length_filter_counts_unicode_scalar_values() {
+    let plan = ExecutionPlan {
+        filter: Some(FilterPredicate::Length {
+            field: "A".into(),
+            op: CompareOp::Eq,
+            value: "1".into(),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(parse_bytes("A=é\n".as_bytes(), plan).num_rows(), 1);
+}
+
+#[test]
+fn strip_modes_trim_only_the_requested_side() {
+    let rows = |mode: TrimMode, expected: &str| {
+        let plan = ExecutionPlan {
+            filter: Some(FilterPredicate::Strip {
+                field: "A".into(),
+                op: CompareOp::Eq,
+                value: expected.into(),
+                mode,
+            }),
+            ..Default::default()
+        };
+        let mut sink = TableBuilder::with_plan(1, Arc::new(plan));
+        sink.begin_row();
+        sink.put_field("A", Value::Str(Cow::Borrowed(" x ")));
+        sink.end_row();
+        sink.finish().unwrap().num_rows()
+    };
+    assert_eq!(rows(TrimMode::Start, "x "), 1);
+    assert_eq!(rows(TrimMode::End, " x"), 1);
+    assert_eq!(rows(TrimMode::Both, "x "), 0);
+    assert_eq!(rows(TrimMode::Both, " x"), 0);
+}
+
+#[test]
+fn temporal_filters_do_not_match_an_invalid_cast_as_raw_text() {
+    for field_type in [
+        FieldType::Date32,
+        FieldType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+    ] {
+        let plan = ExecutionPlan {
+            field_types: [("A".into(), field_type)].into_iter().collect(),
+            filter: Some(FilterPredicate::Contains {
+                field: "A".into(),
+                value: "invalid".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(parse_bytes(b"A=invalid\n", plan).num_rows(), 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
