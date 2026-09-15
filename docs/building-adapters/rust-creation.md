@@ -512,7 +512,7 @@ fn read_log(
 
     // Export to Python: convert the batch via Arrow's PyO3 bridge, then
     // wrap it in a pyarrow.Table (the type the Python side promises).
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let pa = PyModule::import(py, "pyarrow")?;
         let rb = batch.to_pyarrow(py)?;
         let table = pa

@@ -82,15 +82,13 @@ collects stages into a plan. When `.to_arrow()` is called, the pipeline calls
 }
 ```
 
-You must merge these with your construction kwargs and pass them to your
-Rust reader. If you ignore `plan_overrides`, fused stages silently fall back
-to Python execution: 10-50× slower.
+You must merge these with your construction kwargs and pass them to your Rust
+reader. If you ignore `plan_overrides`, fused stage transformations are lost.
 
 !!! warning
 
-    Never ignore `plan_overrides`. Fused stages silently fall back to Python
-    execution over a full table when plan kwargs are not forwarded, turning a
-    microsecond Rust path into a millisecond Python loop.
+    Always forward `plan_overrides`. Otherwise requested transformations do not
+    run. A reader that rejects the keywords raises `TypeError`.
 
 
 ## Adapter class { #adapter-class }
@@ -118,7 +116,7 @@ class LogAdapter:
         self, path: str, memory: str | int = "64MiB",
         batch_size: int | None = None, **kwargs: Any,
     ):
-        """Yield ``pyarrow.RecordBatch`` objects with constant memory."""
+        """Yield ``pyarrow.RecordBatch`` objects with bounded parser memory."""
         yield from LogSource(path, **kwargs).iter_record_batches(
             memory=memory, batch_size=batch_size
         )
@@ -334,7 +332,7 @@ kwargs keep working:
 
 ```python
 class LogSource(Source):
-    def __init__(self, path, *, row_tag="Row", threads=0, **kwargs):
+    def __init__(self, path, *, row_tag="Row", threads=None, **kwargs):
         self._row_tag = row_tag
         self._threads = threads
         super().__init__(path, **kwargs)  # handles the common kwargs
@@ -435,7 +433,7 @@ from rypipe_log import LogSource
 
 src = LogSource("huge_report.log")
 
-# Materialize (bounded by the engine's default budget)
+# Materialize (the table/DataFrame remains in memory)
 df = src.to_pandas()
 src.to_parquet("output.parquet")
 
@@ -446,8 +444,10 @@ for batch in src.iter_record_batches(memory="256MiB"):
 
 With this wiring:
 
-* `to_pandas()` and `to_parquet(path)` go through the engine's bounded
-  read path.
+* `to_pandas()` materializes the result. Pass `memory=` to use incremental
+  batch parsing; the returned DataFrame still remains in memory.
+* `to_parquet(path, memory=...)` writes incrementally through the bounded read
+  path.
 * `iter_record_batches(memory="256MiB")` streams batches with peak memory
   bounded by the `memory` parameter.
 * Fusable stages run in the parse loop (no Python overhead).

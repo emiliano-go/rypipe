@@ -260,7 +260,7 @@ amount: 12000.75
 
 ### Splitter { #multi-line-splitter }
 
-Split on double newlines — each record starts after a blank line:
+Split on double newlines; each record starts after a blank line:
 
 ```rust
 use rypipe_core::Splitter;
@@ -270,7 +270,7 @@ struct MultilineSplitter;
 
 impl Splitter for MultilineSplitter {
     fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
-        // Find the next \n\n (blank line) — the record starts after it.
+        // Find the next \n\n (blank line); the record starts after it.
         let rest = &bytes[from..];
         for i in 0..rest.len().saturating_sub(1) {
             if rest[i] == b'\n' && rest[i + 1] == b'\n' {
@@ -356,7 +356,7 @@ impl RecordParser for MultilineParser {
 !!! warning "Blank lines produce silent null rows"
 
     If you forget to guard blank lines (either in the Splitter or Parser),
-    they produce rows with all null fields. No error, no warning — just
+    they produce rows with all null fields. No error, no warning; just
     wrong data. Always either:
     - Split on `\n\n` so blank lines are boundaries, not rows, **or**
     - Skip blank lines in `parse_chunk` with `if line.is_empty() { continue; }`
@@ -413,7 +413,7 @@ impl Splitter for PropertiesSplitter {
 }
 ```
 
-No manual byte scanning — the declarations tell the engine to skip
+No manual byte scanning; the declarations tell the engine to skip
 `\n` preceded by `\` and skip lines starting with `#` or `!`.
 
 ### Parser { #properties-parser }

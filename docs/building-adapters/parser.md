@@ -222,7 +222,7 @@ complete worked example.
 ### 7. Within-chunk state { #within-chunk-state }
 
 The parser is stateless **across** chunks (each chunk is parsed on an
-independent thread). But it CAN hold state **within** a chunk — tracking
+independent thread). But it CAN hold state **within** a chunk (tracking
 `[section]` headers, accumulating fields across lines, or handling `\`
 continuations:
 
