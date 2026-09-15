@@ -13,7 +13,9 @@
 
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{BufRead, Write};
+#[cfg(target_os = "linux")]
+use std::io::BufRead;
+use std::io::Write;
 use std::time::Instant;
 
 use rypipe_core::{
