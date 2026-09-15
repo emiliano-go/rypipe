@@ -173,7 +173,8 @@ where
     }
 
     /// Parse an in-memory byte slice in bounded-memory batches, calling
-    /// `consumer` per batch (streaming, constant memory).
+    /// `consumer` per batch. Memory stays bounded only if the consumer releases batches;
+    /// the budget guides batch sizing rather than limiting process RSS.
     pub fn read_bytes_stream_consumer<C>(
         &self,
         bytes: &[u8],
@@ -199,7 +200,7 @@ where
     }
 
     /// Parse a file in bounded-memory batches, calling `consumer` per batch
-    /// (streaming, constant memory).
+    /// without retaining output. The budget guides batch sizing rather than limiting RSS.
     pub fn read_path_stream_consumer<C>(
         &self,
         path: impl AsRef<Path>,
