@@ -36,7 +36,7 @@ string occupies zero bytes in the data arena.
 
 `ValidityBitmap` + `Vec<T>`. `to_arrow()` preserves nulls via `NullBuffer`.
 The boolean specialization `to_arrow_bool()` packs `Vec<bool>` into
-`BooleanBuffer` via `ScalarBuffer<u8>`.
+`BooleanBuffer` with one bit per value.
 
 ### Missing columns { #missing-columns }
 

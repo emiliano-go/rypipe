@@ -106,8 +106,7 @@ Flat contiguous array. `to_arrow()` moves the buffers out via
 `std::mem::take` but converts per element
 (`data.into_iter().map(A::Native::from).collect()`), so it allocates a new
 `ScalarBuffer` rather than moving the `Vec` wholesale. Boolean specialization
-via `to_arrow_bool()`, which maps to bytes and repacks into a
-`BooleanBuffer`.
+via `to_arrow_bool()` packs values into a `BooleanBuffer`.
 
 ### Push paths { #push-paths }
 

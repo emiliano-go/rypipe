@@ -173,10 +173,10 @@ fire for a row that is later rejected; `on_row_rejected` still reports it.
 
 - InputBuffer holds the entire file (or mmap)
 - One TableBuilder accumulates, flushed periodically
-- After each flush: batch is exported and dropped.
-- Peak memory: O(budget + batch); the budget is a soft target enforced by a
-  `bytes_used` trigger, not a hard bound.
-- RSS stays roughly constant regardless of file size.
+- After each flush: the batch is exported to the consumer, which may retain it.
+- Builder memory targets O(budget + batch), enforced by a `bytes_used` trigger.
+  Oversized records can exceed this target.
+- Input storage, mapped pages, and retained batches also contribute to RSS.
 
 ### Key difference: parallel vs bounded { #key-difference-parallel-vs-bounded }
 
@@ -227,10 +227,10 @@ internals, `InputBuffer`, or `ExecutionPlan`.
 ### Bounded memory { #bounded-memory }
 
 - Parse time: O(bytes / row_size) × cost_per_field (same as single)
-- Memory: O(budget + batch); the budget is a soft target enforced by the
+- Builder memory: O(budget + batch); the budget is a soft target enforced by the
   `bytes_used` flush trigger, not a hard bound (batches may exceed it when
   the required batch count hits the split cap)
-- RSS: O(budget + per-chunk overhead)
+- RSS also includes input storage, mapped pages, and retained output
 - Best for: files larger than available RAM, streaming pipelines
 - Trade-off: sequential processing, no parallelism within a batch
 
