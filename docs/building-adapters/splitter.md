@@ -161,7 +161,7 @@ impl Splitter for PropertiesSplitter {
         (sample.len() / n).max(1)
     }
 
-    // Declare format rules — the engine handles the scanning
+    // Declare format rules; the engine handles the scanning
     fn record_boundary(&self) -> RecordBoundary { RecordBoundary::Line }
     fn continuation_char(&self) -> Option<u8> { Some(b'\\') }
     fn comment_prefixes(&self) -> &[&[u8]] { &[b"#", b"!"] }
@@ -182,7 +182,7 @@ independent thread). But it CAN hold state **within** a chunk: track
 persists across `begin_row`/`end_row` calls within one `parse_chunk` call.
 
 If a state spans a chunk boundary (e.g., a `\` continuation that crosses
-from one chunk to the next), the Splitter must prevent that split — the
+from one chunk to the next), the Splitter must prevent that split; the
 declarative methods handle this automatically.
 
 ### Limitations

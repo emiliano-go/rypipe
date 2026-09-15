@@ -108,7 +108,7 @@ Always borrow from the input when possible:
 
 ```rust
 // Good: zero allocation: borrows the &str directly from the input bytes.
-// The engine copies into Arrow arrays later (zero-copy when possible).
+// The engine copies borrowed bytes into its column buffers.
 sink.put_field("name", Value::Str(Cow::Borrowed(name)));
 
 // Bad: allocates a String on the heap for every field value.
@@ -116,7 +116,7 @@ sink.put_field("name", Value::Str(Cow::Owned(name.to_string())));
 ```
 
 **Why it helps:** `Cow::Borrowed` avoids heap allocation. The engine copies
-the bytes into the Arrow array later (zero-copy when possible). In a
+the bytes into its column buffers. In a
 hot loop processing millions of rows, even small per-field allocations
 add up to measurable throughput loss.
 

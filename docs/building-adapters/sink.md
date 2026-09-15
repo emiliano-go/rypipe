@@ -70,7 +70,7 @@ The engine provides four push methods, from fastest to slowest. The speed
 differences come from skipped lookups, and each skip moves a responsibility
 onto your parser: the faster the method, the more preconditions you must
 guarantee yourself. The slower methods exist because they are simpler and
-robust by construction; a few nanoseconds per field only matter on very hot
+less error-prone; a few nanoseconds per field only matter on very hot
 paths, so start with `put_field` and move down this list only where
 profiling justifies it.
 
