@@ -49,3 +49,5 @@ mimalloc = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+proptest = "1"
+tempfile = "3"
