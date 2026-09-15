@@ -60,7 +60,7 @@ pub use parallel_stream::{
     ParallelStreamingBatchIterator, ParallelStreamingExecutor,
 };
 pub use pipeline::Pipeline;
-pub use plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate, RegexSpec};
+pub use plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate, RegexSpec, TrimMode};
 pub use schema::{DiscoveryOpts, FrozenSchema, UnknownFieldPolicy};
 pub use streaming::StreamingBatchIterator;
 pub use value::Value;
