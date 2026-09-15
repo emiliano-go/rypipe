@@ -4,17 +4,14 @@
 //! mode, and applying the execution plan. It is the recommended entry point for
 //! custom adapters.
 //!
-//! ```ignore
-//! use rypipe_core::{ExecutionPlan, FieldType, Pipeline};
-//!
-//! let pipeline = Pipeline::new(MySplitter, MyParser)
-//!     .with_plan(
-//!         ExecutionPlan::new()
-//!             .rename("raw_name", "name")
-//!             .type_as("amount", FieldType::Float64),
-//!     );
-//!
-//! let batch = pipeline.read_path("data.txt", false, false).unwrap();
+//! ```rust,no_run
+//! # use rypipe_core::{ExecutionPlan, FieldType, Pipeline, RecordParser, Splitter, Result};
+//! # fn example<S: Splitter + Clone, P: RecordParser + Clone>(splitter: S, parser: P) -> Result<()> {
+//! let pipeline = Pipeline::new(splitter, parser)
+//!     .with_plan(ExecutionPlan::new().rename("raw_name", "name").type_as("amount", FieldType::Float64));
+//! let _batch = pipeline.read_bytes(b"raw_name=alice\n")?;
+//! # Ok(())
+//! # }
 //! ```
 
 #[cfg(test)]

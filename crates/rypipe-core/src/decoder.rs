@@ -124,15 +124,16 @@ pub enum RecordBoundary {
 /// [`comment_prefixes`](Self::comment_prefixes)) and call
 /// [`find_next_record_boundary`] from your `next_record_start`:
 ///
-/// ```ignore
-/// fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
-///     find_next_record_boundary(
-///         bytes, from,
-///         self.continuation_char(),
-///         self.comment_prefixes(),
-///         self.record_boundary() == RecordBoundary::BlankLine,
-///     )
+/// ```rust
+/// use rypipe_core::{find_next_record_boundary, RecordBoundary, Splitter};
+/// struct Lines;
+/// impl Splitter for Lines {
+///     fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+///         find_next_record_boundary(bytes, from, self.continuation_char(), self.comment_prefixes(), self.record_boundary() == RecordBoundary::BlankLine)
+///     }
+///     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize { sample.len().max(1) }
 /// }
+/// assert_eq!(Lines.next_record_start(b"one\ntwo\n", 0), Some(4));
 /// ```
 pub trait Splitter: Send + Sync {
     /// Return the next record boundary at or after `from`.  Must return a
@@ -179,7 +180,7 @@ pub trait Splitter: Send + Sync {
     ///
     /// Default implementation:
     /// 1. Nominal offsets at `bytes.len() * i / n` for `i in 1..n`.
-    /// 2. `par_iter` over nominals (rayon), each calling `next_record_start`.
+    /// 2. Scan each nominal offset with `next_record_start`.
     /// 3. Reject candidates inside skip regions via `in_skip_region`.
     /// 4. Dedup, sort, prepend 0.
     /// 5. Apply chunk floor via `plan_chunk_count`.
@@ -188,19 +189,14 @@ pub trait Splitter: Send + Sync {
             return vec![0, bytes.len()];
         }
         let n = plan_chunk_count(bytes.len(), max_chunks, SplitMode::Parallel);
-        let nominals: Vec<usize> = (1..n).map(|i| bytes.len() / n * i).collect();
-
-        use rayon::prelude::*;
-
         let skip = self.skip_regions();
-        let has_skip = skip.is_some();
-
-        let mut points: Vec<usize> = nominals
-            .par_iter()
-            .filter_map(|&approx| {
+        // Planning must not start a global worker pool for bounded readers.
+        let mut points: Vec<usize> = (1..n)
+            .filter_map(|i| {
+                let approx = bytes.len() / n * i;
                 let pos = self.next_record_start(bytes, approx)?;
                 // Reject candidates inside skip regions.
-                if has_skip && in_skip_region(bytes, pos, skip.unwrap()) {
+                if skip.is_some_and(|finder| in_skip_region(bytes, pos, finder)) {
                     return None;
                 }
                 Some(pos)
@@ -227,10 +223,9 @@ pub trait Splitter: Send + Sync {
 /// properties files, `key = value \` continues on the next line: the `\n`
 /// after `\` is NOT a record boundary.
 ///
-/// ```ignore
-/// fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
-///     find_next_record_boundary(bytes, from, Some(b'\\'), &[], false)
-/// }
+/// ```rust
+/// use rypipe_core::is_continued_newline;
+/// assert!(is_continued_newline(b"key=value\\\nnext\n", 10));
 /// ```
 #[inline]
 pub fn is_continued_newline(bytes: &[u8], pos: usize) -> bool {
@@ -261,16 +256,12 @@ pub fn is_continued_newline(bytes: &[u8], pos: usize) -> bool {
 ///
 /// # Example
 ///
-/// ```ignore
-/// fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
-///     find_next_record_boundary(
-///         bytes, from,
-///         self.continuation_char(),
-///         self.comment_prefixes(),
-///         self.record_boundary() == RecordBoundary::BlankLine,
-///     )
-/// }
+/// ```rust
+/// use rypipe_core::find_next_record_boundary;
+/// let input = b"# comment\nfirst\nsecond\n";
+/// assert_eq!(find_next_record_boundary(input, 0, None, &[b"#"], false), Some(16));
 /// ```
+#[inline]
 pub fn find_next_record_boundary(
     bytes: &[u8],
     from: usize,
@@ -294,14 +285,31 @@ pub fn find_next_record_boundary(
                 } else {
                     newline
                 };
-                end > 0
-                    && bytes[end - 1] == character
-                    && (character != b'\\' || is_continued_newline(bytes, newline))
+                if character == b'\\' {
+                    is_continued_newline(bytes, newline)
+                } else {
+                    end > 0 && bytes[end - 1] == character
+                }
             })
         };
         if continued(nl_pos) {
             pos = nl_pos + 1;
             continue;
+        }
+
+        if !blank_line_mode && comment_prefixes.is_empty() {
+            return Some(nl_pos + 1);
+        }
+
+        if blank_line_mode {
+            let end = nl_pos - usize::from(nl_pos > 0 && bytes[nl_pos - 1] == b'\r');
+            if end == 0 || bytes[end - 1] != b'\n' {
+                pos = nl_pos + 1;
+                continue;
+            }
+            if comment_prefixes.is_empty() && !continued(end - 1) {
+                return Some(nl_pos + 1);
+            }
         }
 
         // Compute line start for comment check

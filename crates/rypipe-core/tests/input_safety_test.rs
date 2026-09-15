@@ -150,3 +150,71 @@ fn bounded_validation_and_parse_panics_return_errors_in_both_input_modes() {
         }));
     }
 }
+
+#[test]
+fn parallel_discovery_panics_return_errors_in_both_input_modes() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let data = b"discovery-panic\n";
+    std::fs::write(file.path(), data).unwrap();
+    let executor = rypipe_core::ParallelStreamingExecutor::new(MemoryBudget::new(1024), 1);
+    let parser = PanicParser(false);
+    let plan = Arc::new(ExecutionPlan::new());
+    let mut consumer = CollectingConsumer(Vec::new());
+    let byte_error = executor
+        .run_bytes_stream(
+            data,
+            &parser,
+            parser.clone(),
+            plan.clone(),
+            Default::default(),
+            &mut consumer,
+        )
+        .unwrap_err();
+    let file_error = executor
+        .run_stream(
+            file.path(),
+            &parser,
+            parser.clone(),
+            plan,
+            false,
+            Default::default(),
+            &mut consumer,
+        )
+        .unwrap_err();
+    assert_eq!(byte_error.to_string(), file_error.to_string());
+    assert!(byte_error
+        .to_string()
+        .contains("parser panicked during schema discovery"));
+}
+
+#[test]
+fn file_discovery_uses_the_byte_input_cache_key() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let data = "cache-signature\n".repeat(10_000);
+    std::fs::write(file.path(), data.as_bytes()).unwrap();
+    let signature = rypipe_core::schema::layout_signature(
+        data.as_bytes(),
+        &rypipe_core::schema::DiscoveryOpts::default(),
+    );
+    let mut consumer = CollectingConsumer(Vec::new());
+    rypipe_core::ParallelStreamingExecutor::new(MemoryBudget::new(1024 * 1024), 2)
+        .run_stream(
+            file.path(),
+            &PanicParser(false),
+            Parser,
+            Arc::new(ExecutionPlan::new()),
+            false,
+            rypipe_core::ParallelStreamOpts {
+                threads: 2,
+                ..Default::default()
+            },
+            &mut consumer,
+        )
+        .unwrap();
+    assert_eq!(
+        consumer.0.iter().map(|b| b.num_rows()).sum::<usize>(),
+        10_000
+    );
+    let cache = rypipe_core::schema::SCHEMA_CACHE.read().unwrap();
+    assert_eq!(cache.get(&signature).unwrap().as_ref(), &["value"]);
+}

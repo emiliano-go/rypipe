@@ -18,15 +18,47 @@ use crate::Result;
 #[derive(Clone, Copy, Debug)]
 pub struct MemoryBudget {
     bytes: usize,
+    strict: bool,
 }
 
 impl MemoryBudget {
     pub fn new(bytes: usize) -> Self {
-        Self { bytes }
+        Self {
+            bytes,
+            strict: false,
+        }
     }
 
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// Fail when an executor memory check exceeds its allocation allowance.
+    /// This does not impose an OS limit on process RSS or adapter-owned memory.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    pub fn is_strict(&self) -> bool {
+        self.strict
+    }
+
+    pub(crate) fn share(self, count: usize) -> Self {
+        Self {
+            bytes: self.bytes / count.max(1),
+            ..self
+        }
+    }
+
+    pub(crate) fn check(self, used: usize) -> Result<()> {
+        if self.strict && used > self.bytes {
+            return Err(crate::Error::Memory {
+                used,
+                limit: self.bytes,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -67,13 +99,17 @@ impl BoundedExecutor {
         bytes: &[u8],
         splitter: &dyn Splitter,
     ) -> (Vec<Range<usize>>, usize, usize) {
-        let bytes_per_row = splitter.estimate_bytes_per_row(bytes).max(1);
+        let bytes_per_row = splitter
+            .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
+            .max(1);
+        // Input, growing columns, merge buffers and Arrow output overlap.
+        let batch_bytes = (self.budget.bytes() / 64).max(1);
         let total_rows_est = bytes.len() / bytes_per_row;
-        let rows_per_batch = (self.budget.bytes() / bytes_per_row)
+        let rows_per_batch = (batch_bytes / bytes_per_row)
             .max(1)
             .min(total_rows_est.max(1));
 
-        let num_batches = (total_rows_est / rows_per_batch).max(1);
+        let num_batches = bytes.len().div_ceil(batch_bytes).max(1);
         let capped = num_batches.min(self.split_cap);
         let split_points = splitter.find_split_points(bytes, capped);
         let chunks = split_points_to_ranges(&split_points, bytes.len());
@@ -85,12 +121,15 @@ impl BoundedExecutor {
         bytes: &[u8],
         plan: Arc<ExecutionPlan>,
         bytes_per_row: usize,
+        budget: MemoryBudget,
     ) -> Result<TableBuilder>
     where
         P: RecordParser,
     {
+        budget.check(bytes.len())?;
         let mut engine =
             TableBuilder::with_plan((bytes.len() / bytes_per_row.max(512)).max(64), plan);
+        engine.set_memory_budget(budget)?;
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             parser.validate(bytes)?;
             parser.parse_chunk_generic(bytes, &mut engine)
@@ -107,14 +146,28 @@ impl BoundedExecutor {
                 "worker panicked during bounded parse: {msg}"
             )))
         })?;
+        engine.check_memory_budget()?;
         Ok(engine)
+    }
+
+    fn consume_batch<C: crate::consumer::BatchConsumer>(
+        &self,
+        mut engine: TableBuilder,
+        plan: &ExecutionPlan,
+        consumer: &mut C,
+    ) -> Result<()> {
+        let mut batch = engine.finish()?;
+        if let Some(ref filter) = plan.filter {
+            batch = apply_compare_filter(batch, filter)?;
+        }
+        self.budget.share(4).check(batch.get_array_memory_size())?;
+        consumer.consume(batch)
     }
 
     fn consume_chunks<I, C>(
         &self,
         chunks: I,
         rows_per_batch: usize,
-        bytes_per_row: usize,
         plan: Arc<ExecutionPlan>,
         consumer: &mut C,
     ) -> Result<()>
@@ -122,12 +175,31 @@ impl BoundedExecutor {
         I: IntoIterator<Item = Result<TableBuilder>>,
         C: crate::consumer::BatchConsumer,
     {
-        let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
+        let mut batch_engine = TableBuilder::with_plan(rows_per_batch.min(64), Arc::clone(&plan));
+        batch_engine.set_memory_budget(self.budget.share(4))?;
         let mut rows_in_batch = 0usize;
         for chunk_engine in chunks {
             let chunk_engine = chunk_engine?;
             let chunk_rows = chunk_engine.num_rows();
+            let rows_per_batch = rows_per_batch.min(
+                (self.budget.bytes() / 8)
+                    .saturating_mul(chunk_rows)
+                    .checked_div(chunk_engine.capacity_bytes().max(1))
+                    .unwrap_or(1)
+                    .max(1),
+            );
+            if rows_in_batch > 0
+                && batch_engine
+                    .capacity_bytes()
+                    .saturating_add(chunk_engine.capacity_bytes())
+                    > self.budget.bytes() / 4
+            {
+                let batch = batch_engine.split_off(batch_engine.num_rows());
+                self.consume_batch(batch, &plan, consumer)?;
+                rows_in_batch = 0;
+            }
             batch_engine.extend(chunk_engine)?;
+            batch_engine.check_memory_budget()?;
             rows_in_batch += chunk_rows;
             while rows_in_batch >= rows_per_batch
                 || batch_engine.bytes_used() >= self.budget.bytes()
@@ -145,11 +217,7 @@ impl BoundedExecutor {
                 } else {
                     n
                 };
-                let mut batch = batch_engine.split_off(n).finish()?;
-                if let Some(ref filter) = plan.filter {
-                    batch = apply_compare_filter(batch, filter)?;
-                }
-                consumer.consume(batch)?;
+                self.consume_batch(batch_engine.split_off(n), &plan, consumer)?;
                 rows_in_batch = rows_in_batch.saturating_sub(n);
             }
         }
@@ -160,11 +228,7 @@ impl BoundedExecutor {
             return Err(err);
         }
         if batch_engine.num_rows() > 0 {
-            let mut batch = batch_engine.finish()?;
-            if let Some(ref filter) = plan.filter {
-                batch = apply_compare_filter(batch, filter)?;
-            }
-            consumer.consume(batch)?;
+            self.consume_batch(batch_engine, &plan, consumer)?;
         }
         Ok(())
     }
@@ -199,15 +263,18 @@ impl BoundedExecutor {
         }
 
         let parse_plan = Arc::clone(&plan);
+        let budget = self.budget.share(4);
+        budget.check(chunks.capacity() * std::mem::size_of::<Range<usize>>())?;
         let chunks = chunks.into_iter().map(move |chunk| {
             Self::parse_chunk(
                 &parser,
                 &bytes[chunk.start..chunk.end],
                 Arc::clone(&parse_plan),
                 bytes_per_row,
+                budget,
             )
         });
-        self.consume_chunks(chunks, rows_per_batch, bytes_per_row, plan, consumer)
+        self.consume_chunks(chunks, rows_per_batch, plan, consumer)
     }
 
     /// Parse an in-memory byte slice in bounded batches, returning one
@@ -228,7 +295,7 @@ impl BoundedExecutor {
         let batches = Vec::new();
         let mut consumer = CollectingConsumer(batches);
         self.run_bytes_stream(bytes, splitter, parser, plan, &mut consumer)?;
-        Ok(consumer.0)
+        consumer.finish()
     }
 
     /// Parse `path` in batches, calling `consumer` per batch (streaming).
@@ -257,6 +324,7 @@ impl BoundedExecutor {
             return self.run_mapped_stream(input, splitter, parser, plan, consumer);
         }
 
+        self.budget.share(4).check(input.len())?;
         self.run_bytes_stream(input.as_slice(), splitter, parser, plan, consumer)
     }
 
@@ -284,7 +352,7 @@ impl BoundedExecutor {
         let batches = Vec::new();
         let mut consumer = CollectingConsumer(batches);
         self.run_stream(path, splitter, parser, plan, prefault, &mut consumer)?;
-        Ok(consumer.0)
+        consumer.finish()
     }
 
     /// Streaming path for mapped inputs: plan against the mapping, drop it,
@@ -322,6 +390,10 @@ impl BoundedExecutor {
 
         // Reusable buffer sized to the largest chunk to avoid per-chunk alloc.
         let max_chunk = chunks.iter().map(|r| r.len()).max().unwrap_or(0);
+        let budget = self.budget.share(4);
+        budget.check(
+            max_chunk.saturating_add(chunks.capacity() * std::mem::size_of::<Range<usize>>()),
+        )?;
         let mut chunk_buf = Vec::with_capacity(max_chunk);
 
         let parse_plan = Arc::clone(&plan);
@@ -330,9 +402,15 @@ impl BoundedExecutor {
             chunk_buf.resize(chunk_len, 0);
             file.seek(SeekFrom::Start(chunk.start as u64))?;
             file.read_exact(&mut chunk_buf)?;
-            Self::parse_chunk(&parser, &chunk_buf, Arc::clone(&parse_plan), bytes_per_row)
+            Self::parse_chunk(
+                &parser,
+                &chunk_buf,
+                Arc::clone(&parse_plan),
+                bytes_per_row,
+                budget,
+            )
         });
-        self.consume_chunks(parsed_chunks, rows_per_batch, bytes_per_row, plan, consumer)
+        self.consume_chunks(parsed_chunks, rows_per_batch, plan, consumer)
     }
 }
 

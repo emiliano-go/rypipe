@@ -15,6 +15,10 @@ pub enum Error {
     #[error("plan error: {0}")]
     Plan(String),
 
+    /// A strict executor memory allowance was exceeded.
+    #[error("memory budget exceeded: {used} bytes used, limit {limit} bytes")]
+    Memory { used: usize, limit: usize },
+
     /// Merge conflict between chunks (e.g. column type mismatch).
     #[error("merge error: {0}")]
     Merge(String),

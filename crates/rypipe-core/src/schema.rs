@@ -104,20 +104,30 @@ pub static SCHEMA_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 /// so that identical length + leading window is no longer enough to collide.
 pub fn layout_signature(bytes: &[u8], opts: &DiscoveryOpts) -> (u64, u64) {
     let mut hasher = FxHasher::default();
-    if (bytes.len() as u64) < opts.full_scan_threshold {
-        bytes.hash(&mut hasher);
-    } else {
-        // Hash a few windows spread through the file.  This makes the key
-        // much less likely to collide for same-sized exports from the same
-        // template with different trailing columns.
-        let n = 4usize;
-        let w = opts.window_bytes.min(bytes.len());
-        for i in 0..n {
-            let start = (bytes.len() - w) * i / n.max(1);
-            bytes[start..start + w].hash(&mut hasher);
-        }
+    for range in signature_chunks(bytes.len(), opts) {
+        bytes[range].hash(&mut hasher);
     }
     (bytes.len() as u64, hasher.finish())
+}
+
+pub(crate) fn signature_chunks(
+    len: usize,
+    opts: &DiscoveryOpts,
+) -> impl Iterator<Item = std::ops::Range<usize>> {
+    let full = (len as u64) < opts.full_scan_threshold;
+    let count = if full { 1 } else { 4 };
+    let width = if full {
+        len
+    } else {
+        opts.window_bytes.min(len)
+    };
+    (0..count).flat_map(move |i| {
+        let start = (len - width) * i / count;
+        let end = start + width;
+        (start..end)
+            .step_by(65536)
+            .map(move |offset| offset..end.min(offset.saturating_add(65536)))
+    })
 }
 
 /// Insert a discovered layout into the cache, evicting the oldest entry if

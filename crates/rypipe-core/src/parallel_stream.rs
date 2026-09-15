@@ -1,9 +1,10 @@
 //! Parallel streaming executor: multi-core parsing with bounded memory.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 use arrow::record_batch::RecordBatch;
@@ -19,220 +20,28 @@ use crate::plan::ExecutionPlan;
 use crate::schema::{DiscoveryOpts, FrozenSchema};
 use crate::Result;
 
-static DISCOVERY_NS: AtomicU64 = AtomicU64::new(0);
+mod discovery;
 
-/// Return the elapsed time (in nanoseconds) spent in schema discovery.
-pub fn discovery_profile() -> u64 {
-    DISCOVERY_NS.load(Ordering::Relaxed)
-}
-/// Reset the discovery timer to zero.
-pub fn reset_discovery_profile() {
-    DISCOVERY_NS.store(0, Ordering::Relaxed);
-}
-
-/// Options for parallel streaming.
-pub struct ParallelStreamOpts {
-    /// Number of worker threads.
-    pub threads: usize,
-    /// Whether to preserve row order (default: true).
-    pub ordered: bool,
-    /// Reorder memory limit in multiples of the parsing budget (0 = threads).
-    /// Ordered reads return an error if this limit is exceeded.
-    pub max_reorder: usize,
-    /// Explicit schema.  If `Some`, no discovery pass is needed.
-    /// Workers pre-size all columns from construction.
-    pub schema: Option<FrozenSchema>,
-}
-
-impl Default for ParallelStreamOpts {
-    fn default() -> Self {
-        Self {
-            threads: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1),
-            ordered: true,
-            max_reorder: 0, // 0 = use threads value
-            schema: None,
-        }
-    }
-}
-
-/// Discovery sink that collects raw field names in encounter order.
-/// `needs_value=false` keeps the scanner in locate-only mode (no value
-/// extraction), but we still need `resolve()` calls, so `needs_resolve`
-/// stays true. Capture happens in `resolve()` via interior mutability.
-struct DiscoverySink {
-    seen: std::cell::RefCell<rustc_hash::FxHashSet<Box<str>>>,
-    order: std::cell::RefCell<Vec<String>>,
-}
-
-impl DiscoverySink {
-    fn new() -> Self {
-        Self {
-            seen: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
-            order: std::cell::RefCell::new(Vec::new()),
-        }
-    }
-    fn into_order(self) -> Vec<String> {
-        self.order.into_inner()
-    }
-}
-
-impl crate::decoder::ColumnarSink for DiscoverySink {
-    #[inline]
-    fn begin_row(&mut self) {}
-    #[inline]
-    fn put_field(&mut self, name: &str, _value: crate::value::Value<'_>) {
-        // Full-value fallback (if needs_value were true); keep for completeness.
-        let mut seen = self.seen.borrow_mut();
-        if seen.insert(Box::from(name)) {
-            self.order.borrow_mut().push(name.to_string());
-        }
-    }
-    #[inline]
-    fn end_row(&mut self) {}
-    #[inline]
-    fn wants(&self, _name: &str) -> bool {
-        true
-    }
-    #[inline]
-    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
-        // Locate-only path calls `resolve` without `put_field`; capture here.
-        let mut seen = self.seen.borrow_mut();
-        if seen.insert(Box::from(name)) {
-            self.order.borrow_mut().push(name.to_string());
-        }
-        Some(name)
-    }
-    #[inline]
-    fn needs_value(&self) -> bool {
-        false
-    }
-    // needs_resolve defaults to true → scanner calls resolve() for each field.
-    fn finish(&mut self) -> crate::Result<arrow::record_batch::RecordBatch> {
-        Ok(arrow::record_batch::RecordBatch::new_empty(
-            std::sync::Arc::new(arrow::datatypes::Schema::empty()),
-        ))
-    }
-}
-
-fn discover_schema<P: crate::decoder::RecordParser>(
-    bytes: &[u8],
-    parser: &P,
-    plan: &crate::plan::ExecutionPlan,
-    splitter: &dyn crate::decoder::Splitter,
-) -> (FrozenSchema, Vec<String>) {
-    let t0 = std::time::Instant::now();
-    // Explicit schema already handled by caller; this is auto-discovery.
-    let opts = DiscoveryOpts::default();
-
-    let file_size = bytes.len() as u64;
-
-    // Dynamic sizing: scale window count and size by file size
-    let n = crate::schema::dynamic_window_count(file_size);
-    let wbytes = crate::schema::dynamic_window_size(file_size);
-
-    let order: Vec<String> = if file_size < opts.full_scan_threshold || n == 0 {
-        // Small file or dynamic sizing says full scan
-        let mut sink = DiscoverySink::new();
-        let _ = parser.parse_chunk_generic(bytes, &mut sink);
-        sink.into_order()
-    } else {
-        use rayon::prelude::*;
-        // Parallelise windows: n×wbytes independent parses
-        let per_window: Vec<Vec<String>> = (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let start = (file_size * i as u64 / n as u64) as usize;
-                let end = (start + wbytes).min(bytes.len());
-                if start >= end {
-                    return Vec::new();
-                }
-                let mut sink = DiscoverySink::new();
-                let slice = &bytes[start..end];
-                let _ = parser.parse_chunk_generic(slice, &mut sink);
-                sink.into_order()
-            })
-            .collect();
-        // Merge in file order, deduplicating, so global order approximates file order.
-        let mut seen = rustc_hash::FxHashSet::<String>::default();
-        let mut merged = Vec::new();
-        for mut v in per_window {
-            for name in v.drain(..) {
-                if seen.insert(name.clone()) {
-                    merged.push(name);
-                }
-            }
-        }
-        // Always scan the tail to catch late-appearing columns
-        if opts.always_scan_tail {
-            let tail_start = bytes.len().saturating_sub(wbytes);
-            let mut tail_sink = DiscoverySink::new();
-            let _ = parser.parse_chunk_generic(&bytes[tail_start..], &mut tail_sink);
-            for name in tail_sink.into_order() {
-                if seen.insert(name.clone()) {
-                    merged.push(name);
-                }
-            }
-        }
-        if merged.is_empty() && !bytes.is_empty() {
-            let mut sink = DiscoverySink::new();
-            let _ = parser.parse_chunk_generic(bytes, &mut sink);
-            sink.into_order()
-        } else {
-            merged
-        }
-    };
-    let elapsed = t0.elapsed().as_nanos() as u64;
-    DISCOVERY_NS.store(elapsed, Ordering::Relaxed);
-    let _ = splitter; // keep splitter in signature for future alignment
-    let schema = if order.is_empty() {
-        FrozenSchema::from_plan(&[], plan)
-    } else {
-        FrozenSchema::from_discovered(&order, plan)
-    };
-    (schema, order)
-}
-
-/// Public helper for batch workloads: discover the schema once and reuse.
-/// Example:
-/// ```ignore
-/// let schema = discover_schema_for_path(path, &splitter, &parser, &plan);
-/// for f in files { ParallelStreamingBatchIterator::new(..., schema.clone(), ...) }
-/// ```
-pub fn discover_schema_for_bytes<P: crate::decoder::RecordParser>(
-    bytes: &[u8],
-    splitter: &dyn crate::decoder::Splitter,
-    parser: &P,
-    plan: &crate::plan::ExecutionPlan,
-) -> FrozenSchema {
-    if !plan.schema_order.is_empty() {
-        let names: Vec<&str> = plan.schema_order.iter().map(|s| s.as_str()).collect();
-        return FrozenSchema::from_partial_plan(&names, plan);
-    }
-    let opts = DiscoveryOpts::default();
-    let sig = crate::schema::layout_signature(bytes, &opts);
-    {
-        let cache = crate::schema::SCHEMA_CACHE
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(order) = cache.get(&sig) {
-            crate::schema::SCHEMA_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-            return FrozenSchema::from_discovered(order, plan);
-        }
-    }
-    crate::schema::SCHEMA_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-    let (schema, order) = discover_schema(bytes, parser, plan, splitter);
-    if !order.is_empty() {
-        crate::schema::insert_schema_cache(sig, Arc::new(order));
-    }
-    schema
-}
+pub(crate) use discovery::discover_schema;
+pub use discovery::{
+    discover_schema_for_bytes, discovery_profile, reset_discovery_profile, ParallelStreamOpts,
+};
 
 /// Parallel streaming executor: parses chunks concurrently with bounded memory.
 pub struct ParallelStreamingExecutor {
     budget: MemoryBudget,
     max_in_flight: usize,
+}
+
+type DispatchState = Arc<(Mutex<Option<usize>>, Condvar)>;
+
+struct DispatchGuard(DispatchState);
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        *self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.0 .1.notify_all();
+    }
 }
 
 impl ParallelStreamingExecutor {
@@ -263,13 +72,32 @@ impl ParallelStreamingExecutor {
         if input.is_empty() {
             return Ok(());
         }
+        #[cfg(not(feature = "mmap"))]
+        self.budget.share(4).check(input.len())?;
+        #[cfg(feature = "mmap")]
+        let opts = if let InputBuffer::Mmap(handle) = &input {
+            let mut opts = opts;
+            if opts.schema.is_none() && plan.schema_order.is_empty() {
+                opts.schema = Some(discovery::discover_schema_for_file(
+                    handle,
+                    splitter,
+                    &parser,
+                    &plan,
+                    self.budget,
+                )?);
+            }
+            opts
+        } else {
+            self.budget.share(4).check(input.len())?;
+            opts
+        };
         // Share the InputBuffer across workers via Arc to avoid
         // the O(file_size × threads) to_vec() clone.
         let shared = std::sync::Arc::new(input);
         self.run_bytes_stream_shared(shared, splitter, parser, plan, opts, consumer)
     }
 
-    /// Stream from a shared InputBuffer (zero-copy on mmap).
+    /// Plan from shared input, then release file mappings before parsing.
     fn run_bytes_stream_shared<P, C>(
         &self,
         input: std::sync::Arc<InputBuffer>,
@@ -328,6 +156,9 @@ impl ParallelStreamingExecutor {
             Some(ref inp) => inp.as_slice(),
             None => bytes,
         };
+        if actual_bytes.is_empty() {
+            return Ok(());
+        }
         let n = opts.threads.max(1);
         let max_reorder = if opts.max_reorder > 0 {
             opts.max_reorder
@@ -360,7 +191,14 @@ impl ParallelStreamingExecutor {
                     } else {
                         crate::schema::SCHEMA_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
                         let (schema, order) =
-                            discover_schema(actual_bytes, &parser, &plan, splitter);
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                discover_schema(actual_bytes, &parser, &plan, splitter)
+                            }))
+                            .map_err(|_| {
+                                crate::Error::Parser(
+                                    "parser panicked during schema discovery".into(),
+                                )
+                            })?;
                         (schema, Arc::new(order))
                     };
                     if !order.is_empty() {
@@ -374,10 +212,20 @@ impl ParallelStreamingExecutor {
         let bytes_per_row = splitter
             .estimate_bytes_per_row(&actual_bytes[..actual_bytes.len().min(65536)])
             .max(1);
-        let chunk_size = (self.budget.bytes() / n.saturating_mul(2))
+        let slots = n
+            .saturating_mul(3)
+            .saturating_add(self.max_in_flight.saturating_mul(2))
+            .saturating_add(max_reorder)
+            .saturating_add(1);
+        let allowance = self.budget.share(slots);
+        let chunk_size = (self.budget.bytes() / n.saturating_mul(32))
             .max(bytes_per_row.saturating_mul(10))
-            .max(64 * 1024);
-        let num_chunks = (actual_bytes.len() / chunk_size).max(n).min(10000);
+            .max(if self.budget.is_strict() {
+                1
+            } else {
+                64 * 1024
+            });
+        let num_chunks = actual_bytes.len().div_ceil(chunk_size).max(n).min(10000);
         let split_points = splitter.find_split_points(actual_bytes, num_chunks);
         let mut ranges = crate::decoder::split_points_to_ranges(&split_points, actual_bytes.len());
         if ranges.is_empty() {
@@ -386,20 +234,41 @@ impl ParallelStreamingExecutor {
 
         let chunks_with_seq: Vec<(usize, std::ops::Range<usize>)> =
             ranges.into_iter().enumerate().rev().collect();
+        allowance.check(
+            chunks_with_seq.capacity() * std::mem::size_of::<(usize, std::ops::Range<usize>)>(),
+        )?;
 
         let (sender, receiver) = sync_channel(self.max_in_flight);
         let mut handles: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(n);
         let chunk_queue = std::sync::Arc::new(std::sync::Mutex::new(chunks_with_seq));
         let plan_arc = plan;
         let schema_arc = schema.map(std::sync::Arc::new);
+        let dispatch = DispatchGuard(Arc::new((Mutex::new(Some(0)), Condvar::new())));
+        let dispatch_window = max_reorder.saturating_add(1);
+        let ordered = opts.ordered;
         let est_row = splitter
             .estimate_bytes_per_row(&actual_bytes[..actual_bytes.len().min(65536)])
             .max(512);
 
         let bytes_fallback = if input.is_none() {
+            allowance.check(actual_bytes.len())?;
             Some(Arc::<[u8]>::from(actual_bytes))
         } else {
             None
+        };
+        let (input, file) = match input {
+            #[cfg(feature = "mmap")]
+            Some(input) if matches!(&*input, InputBuffer::Mmap(_)) => {
+                let input = Arc::try_unwrap(input).map_err(|_| {
+                    crate::Error::Plan("stream input still shared during planning".into())
+                })?;
+                let InputBuffer::Mmap(handle) = input else {
+                    unreachable!()
+                };
+                drop(handle.mmap);
+                (None, Some(Arc::new(std::sync::Mutex::new(handle.file))))
+            }
+            input => (input, None::<Arc<std::sync::Mutex<std::fs::File>>>),
         };
         for _ in 0..n {
             let queue = std::sync::Arc::clone(&chunk_queue);
@@ -409,41 +278,68 @@ impl ParallelStreamingExecutor {
             let schema_clone = schema_arc.clone();
             let input_clone = input.clone();
             let fallback_clone = bytes_fallback.clone();
+            let file_clone = file.clone();
+            let dispatch_clone = dispatch.0.clone();
             let handle = thread::spawn(move || -> Result<()> {
-                // Use shared InputBuffer when available (zero-copy on mmap);
-                // fall back to pre-cloned bytes for external callers.
                 let bytes_ref: &[u8] = match input_clone {
                     Some(ref inp) => inp.as_slice(),
                     None => fallback_clone.as_deref().unwrap_or(&[]),
                 };
+                let mut chunk_buffer = Vec::new();
                 loop {
                     let next = {
                         let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.pop()
                     };
                     let Some((seq, range)) = next else { break };
-                    let chunk_bytes = &bytes_ref[range.start..range.end];
-                    let mut builder = TableBuilder::with_plan(
-                        (chunk_bytes.len() / est_row).max(64),
-                        plan_clone.clone(),
-                    );
-                    // If schema is provided, pre-size columns from it.
-                    if let Some(ref schema) = schema_clone {
-                        if let Err(e) = builder.ensure_schema(schema) {
-                            let _ = sender_clone.send((seq, Err(e)));
+                    if ordered {
+                        let (next, ready) = &*dispatch_clone;
+                        let next = ready
+                            .wait_while(next.lock().unwrap_or_else(|e| e.into_inner()), |next| {
+                                next.is_some_and(|next| seq >= next.saturating_add(dispatch_window))
+                            })
+                            .unwrap_or_else(|e| e.into_inner());
+                        if next.is_none() {
                             break;
                         }
                     }
-                    if let Err(e) = parser_clone.validate(chunk_bytes) {
-                        let _ = sender_clone.send((seq, Err(e)));
-                        break;
-                    }
-                    if let Err(e) = parser_clone.parse_chunk_generic(chunk_bytes, &mut builder) {
-                        let _ = sender_clone.send((seq, Err(e)));
-                        break;
-                    }
-                    let res = builder.finish();
-                    if sender_clone.send((seq, res)).is_err() {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> Result<RecordBatch> {
+                            allowance.check(range.len())?;
+                            let chunk_bytes = if let Some(file) = &file_clone {
+                                chunk_buffer.resize(range.len(), 0);
+                                allowance.check(chunk_buffer.capacity())?;
+                                let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
+                                file.seek(SeekFrom::Start(range.start as u64))?;
+                                file.read_exact(&mut chunk_buffer)?;
+                                chunk_buffer.as_slice()
+                            } else {
+                                &bytes_ref[range.start..range.end]
+                            };
+                            let mut builder = TableBuilder::with_plan(
+                                (chunk_bytes.len() / est_row).max(64),
+                                plan_clone.clone(),
+                            );
+                            builder.set_memory_budget(allowance)?;
+                            // If schema is provided, pre-size columns from it.
+                            if let Some(ref schema) = schema_clone {
+                                builder.ensure_schema(schema)?;
+                                builder.check_memory_budget()?;
+                            }
+                            parser_clone.validate(chunk_bytes)?;
+                            parser_clone.parse_chunk_generic(chunk_bytes, &mut builder)?;
+                            let batch = builder.finish()?;
+                            allowance.check(batch.get_array_memory_size())?;
+                            Ok(batch)
+                        },
+                    ))
+                    .unwrap_or_else(|_| {
+                        Err(crate::Error::Parser(
+                            "worker panicked during parallel parse".into(),
+                        ))
+                    });
+                    let failed = result.is_err();
+                    if sender_clone.send((seq, result)).is_err() || failed {
                         break;
                     }
                 }
@@ -459,7 +355,7 @@ impl ParallelStreamingExecutor {
         let mut pending: BTreeMap<usize, RecordBatch> = BTreeMap::new();
         let mut next_seq = 0usize;
         let mut reorder_bytes: usize = 0;
-        let reorder_limit = max_reorder.saturating_mul(self.budget.bytes());
+        let reorder_limit = max_reorder.saturating_mul(allowance.bytes());
         let mut result = (|| -> Result<()> {
             for (seq, res) in receiver {
                 let batch = res?;
@@ -472,12 +368,15 @@ impl ParallelStreamingExecutor {
                             consumer.consume(b)?;
                             next_seq += 1;
                         }
+                        *dispatch.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = Some(next_seq);
+                        dispatch.0 .1.notify_all();
                     } else {
                         reorder_bytes = reorder_bytes.saturating_add(batch.get_array_memory_size());
-                        if reorder_bytes > reorder_limit {
-                            return Err(crate::Error::Parser(
-                                    "ordered parallel stream reorder buffer exceeded limit; increase memory or max_reorder, or set ordered=false".into(),
-                                ));
+                        if self.budget.is_strict() && reorder_bytes > reorder_limit {
+                            return Err(crate::Error::Memory {
+                                used: reorder_bytes,
+                                limit: reorder_limit,
+                            });
                         }
                         pending.insert(seq, batch);
                     }
@@ -487,6 +386,7 @@ impl ParallelStreamingExecutor {
             }
             Ok(())
         })();
+        drop(dispatch);
         for h in handles {
             let joined = h
                 .join()
@@ -577,9 +477,6 @@ impl Iterator for ParallelStreamingBatchIterator {
         if self.done {
             return None;
         }
-        // This is a simplified version that just receives in order as sent,
-        // not handling seq ordering for now. For true ordered, need BTreeMap logic as in run_stream.
-        // For first version, we will just receive and yield.
         match self.receiver.recv() {
             Ok(Ok(batch)) => Some(Ok(batch)),
             Ok(Err(e)) => {
@@ -630,7 +527,7 @@ mod tests {
     use crate::plan::ExecutionPlan;
     use crate::schema::clear_schema_cache;
     use crate::value::Value;
-    use arrow::array::Array;
+    use arrow::array::{Array, AsArray};
 
     /// Minimal parser: newline-separated rows of `key=value\t...` tokens.
     #[derive(Clone, Debug, Default)]
@@ -713,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_stream_reorder_overflow_is_error() {
+    fn ordered_soft_stream_tolerates_oversized_pending_batch() {
         let exec = ParallelStreamingExecutor::new(MemoryBudget::new(1), 2);
         let mut consumer = VecConsumer(Vec::new());
         let opts = ParallelStreamOpts {
@@ -729,8 +626,27 @@ mod tests {
             opts,
             &mut consumer,
         );
-        let err = result.expect_err("reorder overflow must fail");
-        assert!(err.to_string().contains("reorder buffer exceeded limit"));
+        result.unwrap();
+        assert_eq!(
+            consumer.0.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            2
+        );
+        assert_eq!(
+            consumer.0[0]
+                .column_by_name("a")
+                .unwrap()
+                .as_string::<i32>()
+                .value(0),
+            "1"
+        );
+        assert_eq!(
+            consumer.0[1]
+                .column_by_name("b")
+                .unwrap()
+                .as_string::<i32>()
+                .value(0),
+            "2"
+        );
     }
 
     fn names(schema: &FrozenSchema) -> Vec<&str> {

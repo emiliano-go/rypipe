@@ -61,7 +61,7 @@ impl StreamingBatchIterator {
     {
         let (sender, receiver) = sync_channel(1);
         let handle = thread::spawn(move || {
-            let executor = BoundedExecutor::new(budget);
+            let executor = BoundedExecutor::new(budget.share(2));
             let mut consumer = ChannelConsumer {
                 sender: sender.clone(),
             };
@@ -94,7 +94,7 @@ impl StreamingBatchIterator {
     {
         let (sender, receiver) = sync_channel(1);
         let handle = thread::spawn(move || {
-            let executor = BoundedExecutor::new(budget);
+            let executor = BoundedExecutor::new(budget.share(2));
             let mut consumer = ChannelConsumer {
                 sender: sender.clone(),
             };
