@@ -94,7 +94,7 @@ class LogAdapter(Adapter):
         return _rypipe_log.read(str(self._path), **plan)
 
     def iter_record_batches(self, memory="64MiB", batch_size=None, **kwargs):
-        """Yield RecordBatches with constant memory."""
+        """Yield RecordBatches with bounded parser memory when supported."""
         yield from _rypipe_log.iter_batches(
             str(self._path), memory=memory, batch_size=batch_size, **kwargs
         )
@@ -117,10 +117,11 @@ is which methods you override:
 The base class (`rypipe.Adapter`) inherits from `rypipe.Source`, which
 provides:
 
-* **Caching**: `to_arrow()` caches the result
+* **Caching**: ordinary materializing sinks cache their result; Pipeline and
+  Source caches remain separate.
 * **Pipeline operator**: `|`
 * **All sinks**: `.to_pandas()`, `.to_polars()`, `.to_parquet()`
-* **Fallback streaming**: `iter_record_batches()` materializes then splits
+* **Fallback streaming**: `iter_record_batches()` warns, materializes, then splits
 
 ## The crxml example { #the-crxml-example}
 
