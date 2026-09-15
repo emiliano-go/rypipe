@@ -47,9 +47,7 @@ def _apply_plan(table: pa.Table, plan: dict):
     drop_fields = plan.get("drop_fields") or []
     if drop_fields:
         keep = [i for i, n in enumerate(table.column_names) if n not in drop_fields]
-        table = pa.table(
-            [table.column(i) for i in keep], names=[table.column_names[i] for i in keep]
-        )
+        table = table.select(keep)
 
     # Cast.
     field_types = plan.get("field_types") or {}
@@ -160,7 +158,9 @@ def _apply_plan(table: pa.Table, plan: dict):
                     "==": "equal", "eq": "equal",
                     "!=": "not_equal", "ne": "not_equal",
                 }[op]
-                m = getattr(pc, fn_name)(table.column(field), spec["value"])
+                column = table.column(field)
+                literal = pc.cast(pa.scalar(spec["value"]), column.type)
+                m = getattr(pc, fn_name)(column, literal)
             return pc.fill_null(m, False)
         if "field_a" in spec and "op" in spec:
             field_a, op, field_b = spec["field_a"], spec["op"], spec["field_b"]
