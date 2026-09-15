@@ -1,8 +1,10 @@
 # Memory and chunking { #memory-and-chunking }
 
-`rypipe` parses as fast as the hardware allows while staying inside a memory budget. Two knobs control that trade-off:
+`rypipe` uses a memory budget to size batches and in-flight work. The default
+budget is a soft target. Strict Rust callers can turn tracked capacity checks
+into errors. Two knobs control batch planning:
 
-- `memory`: the maximum bytes the parser holds in flight. Pass a plain
+- `memory`: batch sizing allowance in bytes. Pass a plain
   integer (bytes) or a string with a unit. `rypipe` understands `B`, `KB`,
   `MB`, `GB`, `TB` (decimal, 1000-based) and `KiB`, `MiB`, `GiB`, `TiB`
   (binary, 1024-based). Adapters may parse strings differently: `crxml`
@@ -12,36 +14,66 @@
 - `chunks`: number of chunks for parallel mode. More chunks improve load
   balancing but increase scheduling overhead.
 
-This page explains how `BoundedExecutor` enforces the budget and how to size chunks for files larger or smaller than RAM.
+This page explains what the budget covers and how chunk planning changes with
+file size and execution mode.
 
 ## How `BoundedExecutor` works { #how-boundedexecutor-works }
 
-`BoundedExecutor::run` keeps peak memory near the configured budget:
+`BoundedExecutor::run` uses the configured budget to size work batches:
 
 1. Opens the file via `InputBuffer`.
 2. Estimates `bytes_per_row` from `Splitter::estimate_bytes_per_row`.
-3. Computes `rows_per_batch` from the budget.
+3. Estimates input rows with a conservative `budget / 64` target, then adjusts
+   output row targets from observed builder capacity.
 4. Splits the file into batches sized to fit the memory budget, capped at 100,000
-   split points by default. The cap is a safeguard against pathological chunk
-   counts, and it is configurable via `max_split_chunks` on the plan. Raise it
-   for very large files with small budgets: once the required batch count
-   exceeds the cap, each batch grows past the budget and peak RSS follows.
+   split points by default. This executor cap is separate from the default
+   splitter's 1024-point cap and is configurable via `max_split_chunks` on the
+   plan. A batch can still exceed the allowance when one record or either cap
+   prevents finer splitting.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates.
 
-The budget covers builder storage: string arenas, numeric buffers, and validity bitmaps. It does not include the input buffer, Arrow export buffers, or downstream pandas conversion. Set the budget lower than total RAM.
+The engine divides its allowance conservatively across stages. Tracked work
+includes builder columns, row buffers, merge state, Arrow batches, queues, and
+some input or chunk storage. Caller-owned input, adapter-private allocations,
+and output retained by the caller remain outside this accounting. A check can
+observe capacity after an allocation has grown, so strict mode is an error
+policy, not an allocator or OS limit.
 
 ## Sizing the memory budget { #sizing-the-memory-budget }
 
 A reasonable starting point for a workstation is 500 MiB. For a server with many concurrent parsers, divide available RAM by the expected concurrency. For embedded or container workloads, use 128 MiB or less.
 
-The budget is a target, not a hard limit. Spikes can happen when:
+By default, the budget guides batch sizing and is not a hard process-memory
+limit. Spikes can happen when:
 
 - a batch contains an unusually wide row;
 - a string column receives a very large value;
 - the `bytes_per_row` estimate was wrong because of high variance.
 
-If you see RSS overshoots, lower the budget and add more batches.
+Lower the budget when you need smaller engine batches. RSS can still exceed it
+because several stages and untracked allocations coexist.
+
+## Strict budget errors { #strict-budget-errors }
+
+Rust callers that need an allocation allowance can opt into strict checks:
+
+```rust
+let budget = MemoryBudget::new(64 * 1024 * 1024).with_strict(true);
+let batches = pipeline.read_bytes_stream(data, budget)?;
+```
+
+Strict mode returns `Error::Memory { used, limit }` when tracked builder,
+parser, merge, input, or output work exceeds the allowance. The Python bridge
+maps this error to `MemoryError`. It checks at
+allocation and handoff points, so a long row can fail even when the estimated
+row count looked safe. A failure after earlier batches is still an error from
+the iterator or parallel stream; callers must handle it instead of treating
+the already-consumed batches as a complete result.
+
+`with_strict(false)` is the default. Strict mode is an accounting policy for
+engine-owned work. It does not cap OS RSS, mmap pages, adapter-owned memory,
+Arrow allocations outside the tracked points, or downstream objects.
 
 ## Sizing chunks for parallel mode { #sizing-chunks-for-parallel-mode }
 
@@ -72,7 +104,11 @@ For these formats, prefer a smaller memory budget and more batches, or use strea
 
 ## Files larger than RAM { #files-larger-than-ram }
 
-Stream mode is designed for this case. The input buffer is dropped before parsing, so mapped pages are released before downstream work starts. Each batch is parsed, exported, and discarded independently.
+Stream mode is designed for this case. Uncompressed mmap input uses the mapping
+for planning, then reads chunks from the file and releases the mapping before
+parsing. Compressed or non-mmap input may retain a full decompressed/read
+buffer. Each batch is parsed, exported, and discarded independently, but no
+mode guarantees an OS RSS ceiling.
 
 Tips:
 
@@ -89,15 +125,18 @@ If the file is small but the parser is slow (for example, complex XML), parallel
 
 ## Memory model { #memory-model }
 
-- `InputBuffer::Mmap` maps the file and applies `MADV_WILLNEED` (prefault) or `MADV_SEQUENTIAL` (RSS-sensitive) advice on Unix. The mapping is dropped before Arrow export, so no borrowed bytes outlive it.
+- `InputBuffer::Mmap` may map an uncompressed file and apply `MADV_WILLNEED` (prefault) or `MADV_SEQUENTIAL` advice on Unix. Stream execution drops that mapping after planning and reads chunks with seek/read. Other execution modes can retain the input through parsing and export.
 - `InputBuffer::Owned` simply reads the file into a `Vec<u8>`.
 - `StrColumn` owns its bytes; Arrow arrays are built from owned buffers.
 - Numeric columns use `PrimColumn<T>` (flat Vec + ValidityBitmap).
 
 ## Summary { #summary }
 
-- Use `memory` to cap builder storage; leave headroom for export and downstream work.
-- `BoundedExecutor` derives `rows_per_batch` from the budget and the splitter's `estimate_bytes_per_row`, and caps the batch count at 100,000 split points (`max_split_chunks` overrides the cap).
+- Use `memory` to size tracked engine work; leave headroom for export and downstream work.
+- `BoundedExecutor` combines splitter estimates with conservative per-stage
+  allowances, then adjusts output targets from observed builder capacity. It
+  caps the batch count at 100,000 split points (`max_split_chunks` overrides
+  the cap).
 - Start with `chunks = 4 * physical_cores` and tune by measurement.
 - Reduce the budget when row size variance is high.
 - Use stream mode for files larger than RAM; use columnar mode for small files.

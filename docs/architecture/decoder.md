@@ -65,15 +65,17 @@ See [Skip regions](../building-adapters/skip-regions.md) for the full interface.
 The default implementation handles everything:
 
 1. Early return `vec![0, bytes.len()]` when `max_chunks <= 1` or input is empty
-2. `plan_chunk_count` computes target chunk count from `max_chunks` (2 MiB floor,
+2. `plan_chunk_count` computes target chunk count from `max_chunks` (2 MiB target,
    `16 × threads` cap, 1024 hard max)
 3. Nominal offsets at `bytes.len() * i / n` where `n` is the result of step 2
-4. `par_iter` over nominals calling `next_record_start`
+4. Serially scan nominal offsets with `next_record_start` (parallel parsing
+   happens after ranges are built)
 5. Skip-region rejection via `in_skip_region`
 6. Dedup, sort, prepend 0, append `bytes.len()`
 
-Override only with a measured reason. The default applies the 2 MiB floor
-that prevents sub-MB chunk collapse.
+Override only with a measured reason. The 2 MiB value is a sizing heuristic;
+thread minimums can still produce smaller chunks. The default splitter caps its
+result at 1024 chunks.
 
 ## RecordParser { #recordparser }
 
@@ -285,7 +287,7 @@ first and `len` last.
 pub fn plan_chunk_count(bytes: usize, threads: usize, mode: SplitMode) -> usize
 ```
 
-Determines chunk count with 2 MiB floor, thread caps, and 1024 maximum.
+Determines chunk count with a 2 MiB target, thread minimums, and a 1024 maximum.
 See [Chunk planning](../building-adapters/chunk-planning.md).
 
 ### in_skip_region { #in_skip_region }

@@ -86,24 +86,26 @@ and implementation examples.
 implementation provides:
 
 1. **Nominal offsets** at `bytes.len() * i / n` for `i in 1..n`
-2. **Parallel search** via `par_iter`, each calling `next_record_start`
+2. **Serial boundary search** over nominal offsets, each calling
+   `next_record_start`; parsing remains parallel after ranges are built
 3. **Skip-region rejection** via `in_skip_region` (bounded backward scan)
 4. **Dedup** and sort
-5. **Chunk floor** via `plan_chunk_count` (2 MiB minimum, thread caps)
+5. **Chunk sizing** via `plan_chunk_count` (2 MiB target, thread minimums,
+   1024-chunk cap)
 
 ```rust
 fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
     let n = plan_chunk_count(bytes.len(), max_chunks, SplitMode::Parallel);
     let nominals: Vec<usize> = (1..n).map(|i| bytes.len() * i / n).collect();
 
-    // par_iter over nominals, each calling next_record_start
+// serial scan over nominals, each calling next_record_start
     // reject candidates inside skip regions
     // dedup, sort, prepend 0, append bytes.len()
 }
 ```
 
 The default is strictly better than hand-rolled splitting because it applies
-the measured chunk-size floor (`MIN_CHUNK_BYTES = 2 MiB`) that prevents the
+the measured chunk-size target (`MIN_CHUNK_BYTES = 2 MiB`) that guides the
 sub-1 MB chunk collapse. See [Chunk planning](./chunk-planning.md).
 
 ## What the engine does with split points { #what-the-engine-does-with-split-points }
@@ -196,7 +198,7 @@ such formats.
 
 ## Common mistakes { #common-mistakes }
 
-1. **Overriding `find_split_points`**: Bypasses the chunk floor and skip-region
+1. **Overriding `find_split_points`**: Bypasses chunk sizing and skip-region
    rejection. The default is almost always better.
 
 2. **Splitting inside records**: Each chunk must contain whole records. Split at

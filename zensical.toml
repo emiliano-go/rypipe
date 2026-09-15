@@ -130,7 +130,18 @@ name = "rypipe on PyPI"
 ]
 
 [[project.nav]]
-"Examples" = "examples.md"
+"Examples" = [
+    "examples.md",
+    { "BlockMasks microbenchmark" = "examples/bench-blockmasks.md" },
+    { "Push-tier benchmark" = "examples/bench-push-tier.md" },
+    { "Six-tier scanner benchmark" = "examples/bench-scanner-single.md" },
+    { "Throughput benchmark" = "examples/bench-throughput.md" },
+    { "Engine probe" = "examples/engine-probe.md" },
+    { "XML report fixture" = "examples/report-fixture.md" },
+    { "INI adapter" = "examples/rypipe-ini.md" },
+    { "LDIF adapter" = "examples/rypipe-ldif.md" },
+    { "Properties adapter" = "examples/rypipe-properties.md" },
+]
 
 [[project.nav]]
 "crxml Adapter" = "crxml-adapter.md"

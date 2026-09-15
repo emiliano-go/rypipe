@@ -258,11 +258,12 @@ AVX2 prologue on 2/3 of calls).
 
 **Before:** Adapters implement `find_split_points` from scratch, which is a
 recurring source of performance bugs: sampling too little data causes
-sub-MB chunk collapse, sampling too much scans far more of the file than
+small-chunk collapse, sampling too much scans far more of the file than
 needed.
 
-**After:** Default `find_split_points` uses `next_record_start` + rayon +
-skip-region rejection + dedup + chunk floor (2 MiB minimum).
+**After:** Default `find_split_points` uses `next_record_start` with serial
+boundary scanning plus
+skip-region rejection + dedup + chunk-size target (2 MiB heuristic).
 
 **Example:** a minimal Splitter gets the tuned default for free:
 
@@ -279,7 +280,7 @@ impl Splitter for RowTagSplitter {
         2048 // coarse hint, only used for chunk sizing
     }
 }
-// find_split_points comes free: rayon + skip-region rejection + 2 MiB floor.
+// find_split_points comes free: serial boundary scan + skip-region rejection + chunk sizing.
 let points = RowTagSplitter.find_split_points(bytes, 16);
 ```
 

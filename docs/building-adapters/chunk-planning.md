@@ -7,7 +7,7 @@ constants.
 ## Constants { #constants }
 
 ```rust
-/// Minimum chunk size in bytes. Sub-MB chunks collapse throughput.
+/// Chunk-size target in bytes used by planner heuristic.
 pub const MIN_CHUNK_BYTES: usize = 2 << 20; // 2 MiB
 
 /// Maximum number of split chunks.
@@ -35,11 +35,11 @@ pub enum SplitMode {
 2. `cap = 16 * threads` (Parallel) or `8 * threads` (Streaming)
 3. `result = min(by_size, cap).max(threads).min(MAX_SPLIT_CHUNKS)`
 
-## Why 2 MiB floor { #why-2-mib-floor }
+## Why 2 MiB target { #why-2-mib-floor }
 
-Sub-1 MB chunks collapse throughput due to per-chunk fixed cost (thread
-dispatch, cache cold start). Measured: 100 MB at par128 (0.78 MB chunks)
-= 2,265 MB/s vs par16 (6.25 MB chunks) = 3,735 MB/s.
+The planner uses 2 MiB as a chunk-size heuristic for fixed per-chunk costs.
+Thread minimums can still produce smaller chunks, and the splitter caps its
+result at 1024 chunks.
 
 ## Why Parallel and Streaming differ { #why-parallel-and-streaming-differ }
 
@@ -64,7 +64,7 @@ This matches `plan_chunk_count(bytes, threads, SplitMode::Parallel)`
 
 ## Build and test { #build-and-test }
 
-Verify the planner's floor and thread clamp against the real constants:
+Verify the planner's target and thread clamp against the real constants:
 
 ```console
 $ cargo test chunk_planning

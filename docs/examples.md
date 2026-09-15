@@ -2,6 +2,22 @@
 
 This page shows common patterns in Python and Rust. All Python examples assume a registered adapter is installed (for example `pip install crxml` for XML). `rypipe` itself does not ship format parsers.
 
+## Repository examples
+
+The runnable Rust examples live in `crates/rypipe-core/examples/`. Each page
+below explains what the program isolates, why its measurement choices matter,
+how to run it, and what its output cannot prove.
+
+- [BlockMasks microbenchmark](examples/bench-blockmasks.md)
+- [Push-tier benchmark](examples/bench-push-tier.md)
+- [Six-tier scanner benchmark](examples/bench-scanner-single.md)
+- [Throughput benchmark](examples/bench-throughput.md)
+- [Engine probe](examples/engine-probe.md)
+- [XML report fixture](examples/report-fixture.md)
+- [INI adapter](examples/rypipe-ini.md)
+- [LDIF adapter](examples/rypipe-ldif.md)
+- [Properties adapter](examples/rypipe-properties.md)
+
 Legend: `(ADAPTER BOUND)` is code you write in your adapter crate (format specific). `(CORE)` is code in `rypipe` crates (reused). The split is the same as in [Architecture](./architecture/).
 
 ## Python API examples { #python-api-examples }

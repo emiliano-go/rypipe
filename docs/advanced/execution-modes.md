@@ -17,7 +17,8 @@ Stream mode uses `BoundedExecutor`. It keeps a memory budget and parses the file
 
 1. Opens the file via `InputBuffer`.
 2. Estimates `bytes_per_row` from the splitter.
-3. Computes `rows_per_batch` from the budget.
+3. Uses a conservative input target and observed builder capacity to choose
+   output rows per batch.
 4. Splits the file into batches sized to fit the memory budget, capped at 100,000
    split points as an internal safeguard against pathological chunk counts.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
@@ -25,8 +26,8 @@ Stream mode uses `BoundedExecutor`. It keeps a memory budget and parses the file
 
 On the mmap path, the mapping is dropped after planning and before the parse
 loop begins (reopened per-chunk via seek+read), so mmap-backed pages are
-released before downstream work starts. This keeps peak memory close to the
-budget even for files much larger than RAM. On the in-memory path
+released before downstream work starts. This reduces retained input storage,
+but does not impose an OS RSS cap. On the in-memory path
 (`run_bytes_stream`), the input slice is borrowed from the caller for the
 duration of the parse.
 
@@ -71,7 +72,9 @@ Use parallel mode when:
 
 Parallel streaming (`ParallelStreamingExecutor` `crates/rypipe-core/src/parallel_stream.rs`) parses chunks concurrently with bounded memory:
 
-1. `chunk_size = budget / (threads * 2)` (e.g. 256 MB / 16 threads → 8 MB/chunk, 2 chunks/thread → 256 MB peak).
+1. The parallel chunk target divides budget conservatively across threads and
+   in-flight work, approximately `budget / (threads * 32)` before observed
+   capacity adjustments.
 2. `Splitter::find_split_points` creates `num_chunks` ranges.
 3. Worker pool (`std::thread` or `rayon` `ThreadPool`) pulls `Range` + `seq` from a queue, parses into `TableBuilder`, sends `(seq, Result<RecordBatch>)` via `sync_channel(max_in_flight)` (backpressure).
 4. Coordinator orders by `seq` via `BTreeMap` pending and delivers to `BatchConsumer` in file order.
@@ -100,8 +103,15 @@ submit chunk 3 ──────────► │ parse chunk │──► ch
 
 - **Backpressure**: the `sync_channel(max_in_flight)` blocks the main thread when the channel is full, preventing more than `threads × 2` chunks from being in flight at once.
 - **Ordering**: results arrive out of order (faster chunks finish first). The coordinator uses a `BTreeMap<u64, Result<RecordBatch>>` keyed by sequence number to deliver batches in file order.
+- **Ordered lead**: with ordered output, `max_reorder` bounds how far worker
+  dispatch may run ahead of the next sequence number. A slow early chunk
+  backpressures later dispatch, so pending results cannot grow without bound.
+- **Reorder bytes**: strict budgets return `Error::Memory` when pending ordered
+  batches exceed their byte allowance. Soft budgets tolerate that oversize.
 - **Memory**: active workers, queued batches, ordered results waiting for delivery, and input storage all contribute. The budget controls chunk sizing; it does not cap process RSS.
-- **Error handling**: if any chunk panics or returns an error, the entire stream is aborted. `catch_unwind` at the worker level prevents a single bad chunk from crashing the process.
+- **Error handling**: if any chunk panics or returns an error, the entire
+  stream is aborted. Worker panic handling converts the panic to an error and
+  releases workers waiting on the queue or result handoff.
 
 Use parallel streaming when:
 
@@ -196,7 +206,7 @@ may prefer columnar for much larger files than a simple newline-delimited format
 
 | Concern | Prefer | Avoid | Why |
 |---------|--------|-------|-----|
-| Lowest memory | stream | parallel | Bounded batches keep peak RSS flat. |
+| Lowest memory | stream | parallel | Bounded batches reduce retained engine storage; RSS still includes input, workers, Arrow, and downstream allocations. |
 | Lowest latency to first batch | stream | parallel | First batch is emitted before the whole file is read. |
 | Highest throughput on large files | parallel | columnar | Many cores parse simultaneously. |
 | Highest throughput on small files | columnar | parallel | Chunk overhead dominates. |

@@ -115,7 +115,10 @@ fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
 }
 ```
 
-The default `find_split_points` handles nominal offsets, parallel search via rayon, skip-region rejection, dedup, sort, and the 2 MiB chunk floor that prevents sub-MB collapse. Override only with a measured reason; most adapters benefit from the default.
+The default `find_split_points` handles nominal offsets, serial boundary search,
+skip-region rejection, dedup, sort, and a 2 MiB chunk-size target heuristic
+with thread and 1024-chunk caps. Parsing workers remain parallel. Override only
+with a measured reason; most adapters benefit from the default.
 
 ### Emitting `Value::Null` for missing fields { #emitting-value-null-for-missing-fields }
 
