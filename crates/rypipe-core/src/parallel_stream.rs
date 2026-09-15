@@ -36,7 +36,8 @@ pub struct ParallelStreamOpts {
     pub threads: usize,
     /// Whether to preserve row order (default: true).
     pub ordered: bool,
-    /// Maximum reorder buffer size (default: = threads).
+    /// Reorder memory limit in multiples of the parsing budget (0 = threads).
+    /// Ordered reads return an error if this limit is exceeded.
     pub max_reorder: usize,
     /// Explicit schema.  If `Some`, no discovery pass is needed.
     /// Workers pre-size all columns from construction.
@@ -373,8 +374,8 @@ impl ParallelStreamingExecutor {
         let bytes_per_row = splitter
             .estimate_bytes_per_row(&actual_bytes[..actual_bytes.len().min(65536)])
             .max(1);
-        let chunk_size = (self.budget.bytes() / (n * 2))
-            .max(bytes_per_row * 10)
+        let chunk_size = (self.budget.bytes() / n.saturating_mul(2))
+            .max(bytes_per_row.saturating_mul(10))
             .max(64 * 1024);
         let num_chunks = (actual_bytes.len() / chunk_size).max(n).min(10000);
         let split_points = splitter.find_split_points(actual_bytes, num_chunks);
@@ -384,7 +385,7 @@ impl ParallelStreamingExecutor {
         }
 
         let chunks_with_seq: Vec<(usize, std::ops::Range<usize>)> =
-            ranges.into_iter().enumerate().collect();
+            ranges.into_iter().enumerate().rev().collect();
 
         let (sender, receiver) = sync_channel(self.max_in_flight);
         let mut handles: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(n);
@@ -392,12 +393,11 @@ impl ParallelStreamingExecutor {
         let plan_arc = plan;
         let schema_arc = schema.map(std::sync::Arc::new);
         let est_row = splitter
-            .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
+            .estimate_bytes_per_row(&actual_bytes[..actual_bytes.len().min(65536)])
             .max(512);
 
-        // Pre-clone bytes for the fallback path (when input is None).
         let bytes_fallback = if input.is_none() {
-            Some(actual_bytes.to_vec())
+            Some(Arc::<[u8]>::from(actual_bytes))
         } else {
             None
         };
@@ -456,78 +456,56 @@ impl ParallelStreamingExecutor {
         // Coordinator: order by seq and deliver.
         // If `ordered`, buffer out-of-order batches until the next-in-sequence arrives.
         // If unordered, deliver immediately.
-        // When the reorder buffer overflows, fall back to unordered delivery.
         let mut pending: BTreeMap<usize, RecordBatch> = BTreeMap::new();
         let mut next_seq = 0usize;
         let mut reorder_bytes: usize = 0;
-        let mut fallback_unordered = false;
-        let mut first_chunk_error: Option<crate::Error> = None;
-        let reorder_limit = max_reorder * self.budget.bytes();
-        for (seq, res) in receiver {
-            match res {
-                Ok(batch) => {
-                    if opts.ordered && !fallback_unordered {
-                        if seq == next_seq {
-                            consumer.consume(batch)?;
+        let reorder_limit = max_reorder.saturating_mul(self.budget.bytes());
+        let mut result = (|| -> Result<()> {
+            for (seq, res) in receiver {
+                let batch = res?;
+                if opts.ordered {
+                    if seq == next_seq {
+                        consumer.consume(batch)?;
+                        next_seq += 1;
+                        while let Some(b) = pending.remove(&next_seq) {
+                            reorder_bytes -= b.get_array_memory_size();
+                            consumer.consume(b)?;
                             next_seq += 1;
-                            while let Some(b) = pending.remove(&next_seq) {
-                                consumer.consume(b)?;
-                                next_seq += 1;
-                            }
-                        } else {
-                            reorder_bytes += batch.get_array_memory_size();
-                            if reorder_bytes > reorder_limit {
-                                // Buffer overflow: drain pending in arrival order
-                                // (closest to correct), then deliver all remaining
-                                // batches unordered.  This avoids a hard error when
-                                // the memory budget is too small for the chunk count.
-                                for (_, b) in std::mem::take(&mut pending) {
-                                    consumer.consume(b)?;
-                                }
-                                consumer.consume(batch)?;
-                                reorder_bytes = 0;
-                                fallback_unordered = true;
-                            } else {
-                                pending.insert(seq, batch);
-                            }
                         }
                     } else {
-                        // Unordered (either opted out or fell back): deliver immediately.
-                        consumer.consume(batch)?;
+                        reorder_bytes = reorder_bytes.saturating_add(batch.get_array_memory_size());
+                        if reorder_bytes > reorder_limit {
+                            return Err(crate::Error::Parser(
+                                    "ordered parallel stream reorder buffer exceeded limit; increase memory or max_reorder, or set ordered=false".into(),
+                                ));
+                        }
+                        pending.insert(seq, batch);
                     }
-                }
-                Err(e) => {
-                    // Keep the first failure: skipping a failed chunk would
-                    // silently drop its rows (e.g. strict_types violations).
-                    if first_chunk_error.is_none() {
-                        first_chunk_error = Some(e);
-                    }
+                } else {
+                    consumer.consume(batch)?;
                 }
             }
-        }
-        if let Some(e) = first_chunk_error {
-            return Err(e);
-        }
-        // Drain remaining.
-        if opts.ordered && !fallback_unordered {
-            while let Some(b) = pending.remove(&next_seq) {
-                consumer.consume(b)?;
-                next_seq += 1;
-            }
-        }
+            Ok(())
+        })();
         for h in handles {
-            h.join().map_err(|_| {
-                crate::Error::Parser(
-                    "worker panicked during parallel parse. \
+            let joined = h
+                .join()
+                .map_err(|_| {
+                    crate::Error::Parser(
+                        "worker panicked during parallel parse. \
                      This usually indicates a bug in the parser (e.g., returning \
                      Cow::Borrowed that outlives the input chunk, or an unwrap() \
                      on None/Err during parsing). Check your RecordParser::parse_chunk \
                      implementation for incorrect lifetime handling or missing error checks."
-                        .to_string(),
-                )
-            })??;
+                            .to_string(),
+                    )
+                })
+                .and_then(|r| r);
+            if result.is_ok() {
+                result = joined;
+            }
         }
-        Ok(())
+        result
     }
 }
 
@@ -587,8 +565,9 @@ struct ChannelConsumer {
 }
 impl BatchConsumer for ChannelConsumer {
     fn consume(&mut self, batch: RecordBatch) -> Result<()> {
-        let _ = self.sender.send(Ok(batch));
-        Ok(())
+        self.sender
+            .send(Ok(batch))
+            .map_err(|_| crate::Error::Parser("stream consumer disconnected".into()))
     }
 }
 
@@ -638,6 +617,15 @@ mod tests {
     use std::borrow::Cow;
 
     use super::*;
+
+    #[test]
+    fn channel_consumer_reports_disconnect() {
+        let (sender, receiver) = sync_channel(1);
+        drop(receiver);
+        let mut consumer = ChannelConsumer { sender };
+        let batch = RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty()));
+        assert!(consumer.consume(batch).is_err());
+    }
     use crate::decoder::{ColumnarSink, RecordParser, Splitter};
     use crate::plan::ExecutionPlan;
     use crate::schema::clear_schema_cache;
@@ -687,6 +675,62 @@ mod tests {
             let n = sample.iter().filter(|&&b| b == b'\n').count().max(1);
             sample.len() / n
         }
+    }
+
+    struct TwoChunkSplitter;
+    impl Splitter for TwoChunkSplitter {
+        fn next_record_start(&self, _bytes: &[u8], _from: usize) -> Option<usize> {
+            None
+        }
+        fn find_split_points(&self, bytes: &[u8], _max_chunks: usize) -> Vec<usize> {
+            vec![0, 4.min(bytes.len()), bytes.len()]
+        }
+        fn estimate_bytes_per_row(&self, _sample: &[u8]) -> usize {
+            5
+        }
+    }
+
+    struct VecConsumer(Vec<RecordBatch>);
+    impl BatchConsumer for VecConsumer {
+        fn consume(&mut self, batch: RecordBatch) -> Result<()> {
+            self.0.push(batch);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct DelayedParser;
+    impl RecordParser for DelayedParser {
+        fn validate(&self, bytes: &[u8]) -> Result<()> {
+            NameValueParser.validate(bytes)
+        }
+        fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+            if bytes.starts_with(b"a=1") {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            NameValueParser.parse_chunk(bytes, sink)
+        }
+    }
+
+    #[test]
+    fn ordered_stream_reorder_overflow_is_error() {
+        let exec = ParallelStreamingExecutor::new(MemoryBudget::new(1), 2);
+        let mut consumer = VecConsumer(Vec::new());
+        let opts = ParallelStreamOpts {
+            threads: 2,
+            max_reorder: 1,
+            ..Default::default()
+        };
+        let result = exec.run_bytes_stream(
+            b"a=1\nb=2\n",
+            &TwoChunkSplitter,
+            DelayedParser,
+            Arc::new(ExecutionPlan::new()),
+            opts,
+            &mut consumer,
+        );
+        let err = result.expect_err("reorder overflow must fail");
+        assert!(err.to_string().contains("reorder buffer exceeded limit"));
     }
 
     fn names(schema: &FrozenSchema) -> Vec<&str> {

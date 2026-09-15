@@ -24,13 +24,14 @@ struct ChannelConsumer {
 impl BatchConsumer for ChannelConsumer {
     fn consume(&mut self, batch: RecordBatch) -> Result<()> {
         // If the receiver is dropped (consumer gone), we stop.
-        let _ = self.sender.send(Ok(batch));
-        Ok(())
+        self.sender
+            .send(Ok(batch))
+            .map_err(|_| crate::Error::Parser("stream consumer disconnected".into()))
     }
 }
 
-/// Streaming iterator that yields `RecordBatch`es one at a time, with
-/// constant memory bounded by `budget + batch`.
+/// Streaming iterator that yields `RecordBatch`es through a bounded queue.
+/// The budget guides batch sizing; it does not cap process memory.
 ///
 /// Created by `BoundedExecutor::stream` / `Pipeline::stream_batches`.
 /// Backed by a worker thread running `BoundedExecutor::run_stream` and a
@@ -149,17 +150,6 @@ impl Iterator for StreamingBatchIterator {
     }
 }
 
-impl Drop for StreamingBatchIterator {
-    fn drop(&mut self) {
-        // Drop the receiver to unblock the worker if it's waiting on send.
-        // The worker will then exit when it tries to send.
-        self.done = true;
-        // Receiver is dropped here; handle's thread will be joined on drop
-        // via the Option<JoinHandle>; we don't block in Drop, just let it
-        // detach. The OS will clean up.
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +157,48 @@ mod tests {
     use crate::plan::ExecutionPlan;
     use crate::value::Value;
     use crate::Result;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn channel_consumer_reports_disconnect() {
+        let (sender, receiver) = sync_channel(1);
+        drop(receiver);
+        let mut consumer = ChannelConsumer { sender };
+        let batch = RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty()));
+        assert!(consumer.consume(batch).is_err());
+    }
+
+    #[derive(Clone)]
+    struct CountingParser(Arc<AtomicUsize>);
+    impl RecordParser for CountingParser {
+        fn validate(&self, bytes: &[u8]) -> Result<()> {
+            LineParser.validate(bytes)
+        }
+        fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
+            self.0.fetch_add(
+                bytes.iter().filter(|&&b| b == b'\n').count(),
+                Ordering::SeqCst,
+            );
+            LineParser.parse_chunk(bytes, sink)
+        }
+    }
+
+    #[test]
+    fn dropping_iterator_stops_worker_after_disconnect() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let data = b"A=1\n".repeat(500);
+        let mut iter = StreamingBatchIterator::new_bytes(
+            data,
+            LineSplitter,
+            CountingParser(Arc::clone(&seen)),
+            Arc::new(ExecutionPlan::new()),
+            MemoryBudget::new(64),
+        );
+        let worker = iter.handle.take().unwrap();
+        drop(iter);
+        worker.join().unwrap().unwrap();
+        assert!(seen.load(Ordering::SeqCst) < 500);
+    }
 
     #[derive(Clone, Debug, Default)]
     struct LineSplitter;

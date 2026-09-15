@@ -1,6 +1,4 @@
 #[cfg(feature = "mmap")]
-use std::fs::File;
-#[cfg(feature = "mmap")]
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::Path;
@@ -82,11 +80,101 @@ impl BoundedExecutor {
         (chunks, rows_per_batch, bytes_per_row)
     }
 
+    fn parse_chunk<P>(
+        parser: &P,
+        bytes: &[u8],
+        plan: Arc<ExecutionPlan>,
+        bytes_per_row: usize,
+    ) -> Result<TableBuilder>
+    where
+        P: RecordParser,
+    {
+        let mut engine =
+            TableBuilder::with_plan((bytes.len() / bytes_per_row.max(512)).max(64), plan);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parser.validate(bytes)?;
+            parser.parse_chunk_generic(bytes, &mut engine)
+        }))
+        .unwrap_or_else(|payload| {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            Err(crate::Error::Parser(format!(
+                "worker panicked during bounded parse: {msg}"
+            )))
+        })?;
+        Ok(engine)
+    }
+
+    fn consume_chunks<I, C>(
+        &self,
+        chunks: I,
+        rows_per_batch: usize,
+        bytes_per_row: usize,
+        plan: Arc<ExecutionPlan>,
+        consumer: &mut C,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = Result<TableBuilder>>,
+        C: crate::consumer::BatchConsumer,
+    {
+        let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
+        let mut rows_in_batch = 0usize;
+        for chunk_engine in chunks {
+            let chunk_engine = chunk_engine?;
+            let chunk_rows = chunk_engine.num_rows();
+            batch_engine.extend(chunk_engine)?;
+            rows_in_batch += chunk_rows;
+            while rows_in_batch >= rows_per_batch
+                || batch_engine.bytes_used() >= self.budget.bytes()
+            {
+                if batch_engine.num_rows() == 0 {
+                    break;
+                }
+                let n = rows_per_batch.min(batch_engine.num_rows());
+                let n = if batch_engine.bytes_used() >= self.budget.bytes()
+                    && batch_engine.num_rows() > 1
+                {
+                    let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
+                        / batch_engine.bytes_used() as f64) as usize;
+                    est.clamp(1, n)
+                } else {
+                    n
+                };
+                let mut batch = batch_engine.split_off(n).finish()?;
+                if let Some(ref filter) = plan.filter {
+                    batch = apply_compare_filter(batch, filter)?;
+                }
+                consumer.consume(batch)?;
+                rows_in_batch = rows_in_batch.saturating_sub(n);
+            }
+        }
+        if let Some(err) = batch_engine.unknown_error.take() {
+            return Err(crate::Error::Merge(err));
+        }
+        if let Some(err) = batch_engine.strict_error.take() {
+            return Err(err);
+        }
+        if batch_engine.num_rows() > 0 {
+            let mut batch = batch_engine.finish()?;
+            if let Some(ref filter) = plan.filter {
+                batch = apply_compare_filter(batch, filter)?;
+            }
+            consumer.consume(batch)?;
+        }
+        Ok(())
+    }
+
     /// Parse an in-memory byte slice in bounded batches, calling `consumer` per batch.
     ///
     /// Chunks are sliced directly from `bytes`; no file I/O occurs. This is
     /// the streaming entry point for adapters holding decompressed data.
-    /// Peak memory is `budget + batch`.
+    /// The budget controls batch sizing; allocator, parser, input, and Arrow
+    /// overhead can raise process RSS above this target.
     pub fn run_bytes_stream<P, C>(
         &self,
         bytes: &[u8],
@@ -110,83 +198,16 @@ impl BoundedExecutor {
             chunks.push(0..bytes.len());
         }
 
-        let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
-        let mut rows_in_batch = 0usize;
-
-        for chunk in &chunks {
-            let chunk_bytes = &bytes[chunk.start..chunk.end];
-            let mut chunk_engine = TableBuilder::with_plan(
-                (chunk.len() / bytes_per_row.max(512)).max(64),
-                Arc::clone(&plan),
-            );
-            parser.validate(chunk_bytes)?;
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                parser.parse_chunk_generic(chunk_bytes, &mut chunk_engine)
-            }))
-            .unwrap_or_else(|payload| {
-                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                    (*s).to_string()
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                Err(crate::Error::Parser(format!(
-                    "worker panicked during bounded parse: {msg}"
-                )))
-            })?;
-
-            let chunk_rows = chunk_engine.num_rows();
-            batch_engine.extend(chunk_engine)?;
-            rows_in_batch += chunk_rows;
-
-            // Dynamic sizing: flush when either row count or actual bytes_used exceeds budget.
-            while rows_in_batch >= rows_per_batch
-                || batch_engine.bytes_used() >= self.budget.bytes()
-            {
-                if batch_engine.num_rows() == 0 {
-                    break;
-                }
-                let n = rows_per_batch.min(batch_engine.num_rows());
-                // If bytes_used is the trigger, estimate a smaller n to stay under budget
-                let n = if batch_engine.bytes_used() >= self.budget.bytes()
-                    && batch_engine.num_rows() > 1
-                {
-                    let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
-                        / batch_engine.bytes_used() as f64) as usize;
-                    est.clamp(1, n)
-                } else {
-                    n
-                };
-                let mut to_consume = batch_engine.split_off(n);
-                let mut batch = to_consume.finish()?;
-                if let Some(ref filter) = plan.filter {
-                    batch = apply_compare_filter(batch, filter)?;
-                }
-                consumer.consume(batch)?;
-                rows_in_batch = rows_in_batch.saturating_sub(n);
-            }
-        }
-
-        // `split_off` resets deferred errors on the flushed batches, so any
-        // strict-types / unknown-field violation accumulated across chunks
-        // must be surfaced here, even when every row was already flushed.
-        if let Some(err) = batch_engine.unknown_error.take() {
-            return Err(crate::Error::Merge(err));
-        }
-        if let Some(err) = batch_engine.strict_error.take() {
-            return Err(err);
-        }
-
-        if batch_engine.num_rows() > 0 {
-            let mut batch = batch_engine.finish()?;
-            if let Some(ref filter) = plan.filter {
-                batch = apply_compare_filter(batch, filter)?;
-            }
-            consumer.consume(batch)?;
-        }
-
-        Ok(())
+        let parse_plan = Arc::clone(&plan);
+        let chunks = chunks.into_iter().map(move |chunk| {
+            Self::parse_chunk(
+                &parser,
+                &bytes[chunk.start..chunk.end],
+                Arc::clone(&parse_plan),
+                bytes_per_row,
+            )
+        });
+        self.consume_chunks(chunks, rows_per_batch, bytes_per_row, plan, consumer)
     }
 
     /// Parse an in-memory byte slice in bounded batches, returning one
@@ -233,7 +254,7 @@ impl BoundedExecutor {
 
         #[cfg(feature = "mmap")]
         if matches!(input, InputBuffer::Mmap(_)) {
-            return self.run_mapped_stream(path, input, splitter, parser, plan, consumer);
+            return self.run_mapped_stream(input, splitter, parser, plan, consumer);
         }
 
         self.run_bytes_stream(input.as_slice(), splitter, parser, plan, consumer)
@@ -271,7 +292,6 @@ impl BoundedExecutor {
     #[cfg(feature = "mmap")]
     fn run_mapped_stream<P, C>(
         &self,
-        path: &Path,
         input: InputBuffer,
         splitter: &dyn Splitter,
         parser: P,
@@ -294,83 +314,25 @@ impl BoundedExecutor {
             chunks.push(0..bytes.len());
         }
 
-        drop(input);
+        let InputBuffer::Mmap(handle) = input else {
+            unreachable!("mapped input required");
+        };
+        let mut file = handle.file;
+        drop(handle.mmap);
 
-        let mut batch_engine = TableBuilder::with_plan(bytes_per_row.max(64), Arc::clone(&plan));
-        let mut rows_in_batch = 0usize;
-
-        // Reopen the file for streaming reads. Canonicalize first to mitigate
-        // TOCTOU if the path is a symlink that could be swapped between the
-        // mmap planning pass and this reopen.
-        let real_path = std::fs::canonicalize(path)?;
-        let mut file = File::open(&real_path)?;
         // Reusable buffer sized to the largest chunk to avoid per-chunk alloc.
         let max_chunk = chunks.iter().map(|r| r.len()).max().unwrap_or(0);
         let mut chunk_buf = Vec::with_capacity(max_chunk);
 
-        for chunk in &chunks {
+        let parse_plan = Arc::clone(&plan);
+        let parsed_chunks = chunks.into_iter().map(move |chunk| {
             let chunk_len = chunk.len();
             chunk_buf.resize(chunk_len, 0);
             file.seek(SeekFrom::Start(chunk.start as u64))?;
             file.read_exact(&mut chunk_buf)?;
-            let mut chunk_engine = TableBuilder::with_plan(
-                (chunk.len() / bytes_per_row.max(512)).max(64),
-                Arc::clone(&plan),
-            );
-            parser.validate(&chunk_buf)?;
-            parser.parse_chunk_generic(&chunk_buf, &mut chunk_engine)?;
-
-            let chunk_rows = chunk_engine.num_rows();
-            batch_engine.extend(chunk_engine)?;
-            rows_in_batch += chunk_rows;
-
-            // Dynamic sizing: flush when either row count or actual bytes_used exceeds budget.
-            while rows_in_batch >= rows_per_batch
-                || batch_engine.bytes_used() >= self.budget.bytes()
-            {
-                if batch_engine.num_rows() == 0 {
-                    break;
-                }
-                let n = rows_per_batch.min(batch_engine.num_rows());
-                // If bytes_used is the trigger, estimate a smaller n to stay under budget
-                let n = if batch_engine.bytes_used() >= self.budget.bytes()
-                    && batch_engine.num_rows() > 1
-                {
-                    let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
-                        / batch_engine.bytes_used() as f64) as usize;
-                    est.clamp(1, n)
-                } else {
-                    n
-                };
-                let mut to_consume = batch_engine.split_off(n);
-                let mut batch = to_consume.finish()?;
-                if let Some(ref filter) = plan.filter {
-                    batch = apply_compare_filter(batch, filter)?;
-                }
-                consumer.consume(batch)?;
-                rows_in_batch = rows_in_batch.saturating_sub(n);
-            }
-        }
-
-        // `split_off` resets deferred errors on the flushed batches, so any
-        // strict-types / unknown-field violation accumulated across chunks
-        // must be surfaced here, even when every row was already flushed.
-        if let Some(err) = batch_engine.unknown_error.take() {
-            return Err(crate::Error::Merge(err));
-        }
-        if let Some(err) = batch_engine.strict_error.take() {
-            return Err(err);
-        }
-
-        if batch_engine.num_rows() > 0 {
-            let mut batch = batch_engine.finish()?;
-            if let Some(ref filter) = plan.filter {
-                batch = apply_compare_filter(batch, filter)?;
-            }
-            consumer.consume(batch)?;
-        }
-
-        Ok(())
+            Self::parse_chunk(&parser, &chunk_buf, Arc::clone(&parse_plan), bytes_per_row)
+        });
+        self.consume_chunks(parsed_chunks, rows_per_batch, bytes_per_row, plan, consumer)
     }
 }
 
