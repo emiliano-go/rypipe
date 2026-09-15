@@ -81,6 +81,9 @@ class Expr:
 
     __hash__ = None  # type: ignore[assignment]
 
+    def __bool__(self):
+        raise TypeError("column expressions have no truth value; compare with a value first")
+
     # -- membership -------------------------------------------------------
     def isin(self, values) -> "Predicate":
         if isinstance(values, (str, bytes)):
@@ -204,6 +207,9 @@ class Predicate:
 
     def __init__(self, spec: dict):
         self._spec = spec
+
+    def __bool__(self):
+        raise TypeError("predicates have no truth value; combine them with &, |, or ~")
 
     def __and__(self, other: "Predicate") -> "Predicate":
         if not isinstance(other, Predicate):

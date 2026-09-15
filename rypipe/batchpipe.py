@@ -46,7 +46,11 @@ class ArrowSource(Operator):
     __slots__ = ("_batches", "_i")
 
     def __init__(self, table, batch_size: int = 1024):
-        self._batches = table.to_batches(max_chunksize=batch_size)
+        import pyarrow as pa
+
+        self._batches = table.to_batches(max_chunksize=batch_size) or [
+            pa.RecordBatch.from_arrays([c.combine_chunks() for c in table.columns], schema=table.schema)
+        ]
         self._i = 0
 
     def next_batch(self) -> Optional[Batch]:
@@ -58,27 +62,20 @@ class ArrowSource(Operator):
 
 
 def _fuse_rename(mapping: dict):
-    import pyarrow as pa
-
     def fn(batch: Batch) -> Batch:
         rb = batch.data
         names = [mapping.get(n, n) for n in rb.schema.names]
-        batch.data = pa.RecordBatch.from_arrays(rb.columns, names=names)
+        batch.data = rb.rename_columns(names)
         return batch
 
     return fn
 
 
 def _fuse_drop(fields: frozenset):
-    import pyarrow as pa
-
     def fn(batch: Batch) -> Batch:
         rb = batch.data
         keep = [i for i, n in enumerate(rb.schema.names) if n not in fields]
-        batch.data = pa.RecordBatch.from_arrays(
-            [rb.column(i) for i in keep],
-            names=[rb.schema.names[i] for i in keep],
-        )
+        batch.data = rb.select(keep)
         return batch
 
     return fn
@@ -97,41 +94,6 @@ def _fuse_filter_spec(spec: dict):
             def mask_of(rb):
                 m = pc.is_null(rb.column(field))
                 return pc.fill_null(m, False)
-        elif op == "is_type":
-            target = spec["value"]
-            _ARROW_TYPE_MAP = {
-                "string": pa.string(),
-                "int64": pa.int64(),
-                "float64": pa.float64(),
-                "bool": pa.bool_(),
-                "boolean": pa.bool_(),
-                "date32": pa.date32(),
-                "timestamp": pa.timestamp("ns"),
-                "dictionary": pa.dictionary(pa.int32(), pa.string()),
-            }
-            arrow_type = _ARROW_TYPE_MAP.get(target)
-            if arrow_type is not None:
-                def mask_of(rb):
-                    col_type = rb.schema.field(field).type
-                    match = col_type == arrow_type or (
-                        pa.types.is_dictionary(col_type) and arrow_type == pa.string()
-                    )
-                    return pa.array([match] * rb.num_rows, type=pa.bool_())
-            else:
-                def mask_of(rb):
-                    return pa.array([True] * rb.num_rows, type=pa.bool_())
-        elif op == "starts_with":
-            def mask_of(rb):
-                m = pc.starts_with(rb.column(field), spec["value"])
-                return pc.fill_null(m, False)
-        elif op == "ends_with":
-            def mask_of(rb):
-                m = pc.ends_with(rb.column(field), spec["value"])
-                return pc.fill_null(m, False)
-        elif op == "contains":
-            def mask_of(rb):
-                m = pc.match_substring(rb.column(field), spec["value"])
-                return pc.fill_null(m, False)
         else:
             value = spec["value"]
             fn_name = {
@@ -144,7 +106,18 @@ def _fuse_filter_spec(spec: dict):
             }[op]
 
             def mask_of(rb):
-                m = getattr(pc, fn_name)(rb.column(field), value)
+                from .stages.filter import _literal_scalar
+
+                column = rb.column(field)
+                try:
+                    literal = _literal_scalar(value, column.type)
+                except (ValueError, TypeError, pa.ArrowException):
+                    return pa.array([False] * rb.num_rows, type=pa.bool_())
+                m = getattr(pc, fn_name)(column, literal)
+                if pa.types.is_floating(column.type):
+                    m = pc.and_(m, pc.invert(pc.is_nan(column)))
+                    if literal.as_py() != literal.as_py():
+                        return pa.array([False] * rb.num_rows, type=pa.bool_())
                 return pc.fill_null(m, False)
 
     else:
@@ -165,11 +138,27 @@ def _fuse_filter_spec(spec: dict):
         }[op]
 
         def mask_of(rb):
-            m = getattr(pc, fn_name)(rb.column(field_a), rb.column(field_b))
+            a, b = rb.column(field_a), rb.column(field_b)
+            if a.type != b.type:
+                numeric = lambda t: pa.types.is_integer(t) or pa.types.is_floating(t)
+                if numeric(a.type) and numeric(b.type):
+                    a, b = pc.cast(a, pa.float64(), safe=False), pc.cast(b, pa.float64(), safe=False)
+                elif pa.types.is_decimal(a.type) and pa.types.is_decimal(b.type):
+                    common = pa.decimal256(76, max(a.type.scale, b.type.scale))
+                    a, b = pc.cast(a, common), pc.cast(b, common)
+                else:
+                    return pa.array([False] * rb.num_rows, type=pa.bool_())
+            m = getattr(pc, fn_name)(a, b)
+            if pa.types.is_floating(a.type):
+                m = pc.and_(m, pc.invert(pc.or_(pc.is_nan(a), pc.is_nan(b))))
             return pc.fill_null(m, False)
 
     def fn(batch: Batch) -> Batch:
-        m = mask_of(batch.data)
+        fields = (spec["field"],) if "field" in spec else (spec["field_a"], spec["field_b"])
+        if any(field not in batch.data.schema.names for field in fields):
+            m = pa.array([spec["op"] == "is_null"] * batch.data.num_rows, type=pa.bool_())
+        else:
+            m = mask_of(batch.data)
         if batch.selection is None:
             batch.selection = m
         else:
@@ -182,15 +171,50 @@ def _fuse_filter_spec(spec: dict):
 def _arrow_fusable(stage) -> Optional[Callable[[Batch], Batch]]:
     """Compile a stage to a single-pass batch function, or None."""
     from .stages.drop import DropFields
-    from .stages.filter import FilterRows
+    from .stages.filter import FilterRows, FilterRowsAll, FilterRowsAny, FilterRowsNot
     from .stages.rename import RenameFields
+    from .stages.cast import CastTypes, _cast_column
+
+    if isinstance(stage, CastTypes):
+        plan = stage._plan_kwargs()
+        if plan is not None:
+            def cast(batch):
+                batch.data = batch.compact()
+                batch.selection = None
+                for name, kind in plan["field_types"].items():
+                    index = batch.data.schema.get_field_index(name)
+                    if index >= 0:
+                        column = _cast_column(batch.data.column(index), kind)
+                        batch.data = batch.data.set_column(index, name, column)
+                return batch
+
+            return cast
 
     if isinstance(stage, RenameFields):
         return _fuse_rename(stage._mapping)
     if isinstance(stage, DropFields):
         return _fuse_drop(stage._fields_set)
-    if isinstance(stage, FilterRows) and stage._filter_spec is not None:
-        return _fuse_filter_spec(stage._filter_spec)
+    if isinstance(stage, (FilterRows, FilterRowsAll, FilterRowsAny, FilterRowsNot)):
+        plan = stage._plan_kwargs()
+        if plan is None:
+            return None
+        spec = plan["filter"]
+        if (set(spec) <= {"field", "field_a", "field_b", "op", "value"}
+                and spec.get("op") in {"==", "eq", "!=", "ne", ">", "gt", "<", "lt",
+                                       ">=", "ge", "<=", "le", "is_null"}):
+            return _fuse_filter_spec(spec)
+
+        def filter_rows(batch):
+            import pyarrow as pa
+
+            batch.data = batch.compact()
+            batch.selection = pa.array(
+                [stage.apply(row) is not None for row in batch.data.to_pylist()],
+                type=pa.bool_(),
+            )
+            return batch
+
+        return filter_rows
     return None
 
 
@@ -270,6 +294,7 @@ class LambdaOp(Operator):
                     out.append(r)
             if out:
                 return Batch(self._build(out))
+            return Batch(b.data.slice(0, 0))
 
 
 def build_chain(table, stages, batch_size: int = 1024):
@@ -331,6 +356,7 @@ def collect_table(op: Operator):
     op.open()
     try:
         batches = []
+        empty = None
         while True:
             b = op.next_batch()
             if b is None:
@@ -338,8 +364,10 @@ def collect_table(op: Operator):
             dense = b.compact()
             if dense.num_rows:
                 batches.append(dense)
+            else:
+                empty = dense
         if not batches:
-            return pa.table({})
+            return pa.Table.from_batches([empty]) if empty is not None else pa.table({})
         return pa.Table.from_batches(batches)
     finally:
         op.close()

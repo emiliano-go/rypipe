@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 import _rypipe
 
-from .source import Adapter, Source
+from .source import Adapter, Source, _positive_int, _require_table
 from .expr import col
 from .pipeline import Pipeline
 from .stages import (
@@ -60,6 +61,7 @@ __all__ = [
     "read_par",
     "read_stream",
     "read_batches",
+    "iter_record_batches",
     "register_adapter",
     "resolve_engine",
     "RenameFields",
@@ -80,6 +82,7 @@ __all__ = [
     "XmlError",
     "PlanError",
     "MergeError",
+    "ParserError",
     "RypipeError",
 ]
 
@@ -87,6 +90,7 @@ ParseError = _rypipe.ParseError
 XmlError = _rypipe.XmlError
 PlanError = _rypipe.PlanError
 MergeError = _rypipe.MergeError
+ParserError = _rypipe.ParserError
 resolve_engine = _rypipe.resolve_engine
 
 # Map common extensions to adapter names. Adapters must register themselves
@@ -148,7 +152,7 @@ def _guess_format(path: str | os.PathLike[str]) -> str:
 def register_adapter(
     name: str,
     adapter: Any,
-    extensions: Iterable[str] | None = None,
+    extensions: Iterable[str] | str | None = None,
 ) -> None:
     """Register a format adapter with rypipe.
 
@@ -164,10 +168,31 @@ def register_adapter(
     extensions:
         Optional file extensions that map to this adapter (e.g. [".xml"]).
     """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("adapter name must be a non-empty string")
+    _validate_adapter(adapter)
+    exts = [extensions] if isinstance(extensions, str) else list(extensions or ())
+    if any(not isinstance(ext, str) or not ext.startswith(".") or len(ext) < 2 for ext in exts):
+        raise ValueError("extensions must be non-empty file suffixes such as '.csv'")
     _ADAPTERS[name] = adapter
-    if extensions is not None:
-        for ext in extensions:
-            _EXTENSION_MAP[ext.lower()] = name
+    _EXTENSION_MAP.update((ext.lower(), name) for ext in exts)
+
+
+def _validate_adapter(adapter: Any) -> None:
+    if not callable(getattr(adapter, "read", None)):
+        raise TypeError("adapter must expose a callable read(path, **kwargs) method")
+
+
+def _get_adapter(path, format, adapter):
+    if adapter is None:
+        fmt = format if format is not None else _guess_format(path)
+        adapter = _ADAPTERS.get(fmt)
+        if adapter is None:
+            raise RypipeError(
+                f"no adapter registered for {fmt!r}; import its adapter package before reading"
+            )
+    _validate_adapter(adapter)
+    return adapter
 
 
 def read(
@@ -201,17 +226,8 @@ def read(
     RypipeError
         If no adapter is registered for the requested format.
     """
-    if adapter is not None:
-        return adapter.read(str(path), **kwargs)
-
-    fmt = format if format is not None else _guess_format(path)
-    adapter = _ADAPTERS.get(fmt)
-    if adapter is None:
-        raise RypipeError(
-            f"no adapter registered for {fmt!r}; "
-            f"install the corresponding adapter package (e.g. pip install rypipe-{fmt})"
-        )
-    return adapter.read(str(path), **kwargs)
+    adapter = _get_adapter(path, format, adapter)
+    return _require_table(adapter.read(str(path), **kwargs))
 
 
 def read_par(
@@ -234,7 +250,7 @@ def read_stream(
     memory: int | str = "64MiB",
     **kwargs: Any,
 ) -> Any:
-    """Read a file with bounded memory using a registered adapter.
+    """Pass a parsing memory budget to the registered adapter's reader.
 
     This is a convenience wrapper that passes `memory` through to the adapter's
     `read` method. The adapter decides how to interpret it.
@@ -251,10 +267,8 @@ def read_batches(
 ) -> Iterator[Any]:
     """Read a file and yield ``pyarrow.RecordBatch`` objects incrementally.
 
-    Memory is bounded during parsing when the adapter honours ``memory``.
-    Note that batches are currently produced from a materialized table, so
-    peak memory is not yet fully incremental; a callback-based executor will
-    remove this limitation in a future release.
+    Uses ``iter_record_batches``. Adapters with streaming support produce
+    batches incrementally; other adapters warn and materialize first.
 
     Yields
     ------
@@ -273,21 +287,11 @@ def iter_record_batches(
     batch_size: int | None = None,
     **kwargs: Any,
 ) -> Iterator[Any]:
-    """Stream a file into Arrow ``RecordBatch`` objects with constant memory.
+    """Yield Arrow batches using the adapter's streaming reader when available.
 
-    Unlike ``read`` (which materializes a full ``pyarrow.Table``) or the old
-    ``read_batches`` (which also materialized), this yields each ``RecordBatch``
-    as soon as it is produced and drops it after the consumer returns. Peak
-    memory is ``memory`` + one batch + export buffer.
-
-    When ``batch_size`` is ``None`` (default) it is derived from ``memory``
-    and the estimated row size (like ``BoundedExecutor``). Pass ``batch_size=1``
-    for the smallest possible batches (one row per batch, ~1 KB) and the lowest
-    memory footprint; only feasible when the pipeline stays in Rust.
-
-    For the Python path, the per-batch ``pyarrow.RecordBatch`` object and the
-    interpreter overhead mean true 64 KB is only reachable from Rust via
-    ``BatchConsumer``. The Python generator is still bounded but a few MB.
+    Without a streaming reader, this warns and materializes the full table.
+    ``memory`` limits executor buffers, not input storage, Python overhead, or
+    output retained by the consumer. Batch sizing depends on the adapter.
 
     Yields
     ------
@@ -298,31 +302,22 @@ def iter_record_batches(
     --------
     >>> import pyarrow.parquet as pq
     >>> writer = pq.ParquetWriter("out.parquet", schema)
-    >>> for batch in rypipe.iter_record_batches("50GB.xml", format="crxml", memory="64KB", row_tag="Details"):
+    >>> for batch in rypipe.iter_record_batches("data.xml", format="crxml", memory="64MB", row_tag="Details"):
     ...     writer.write_batch(batch)
     >>> writer.close()
     """
-    if adapter is not None:
-        if hasattr(adapter, "iter_record_batches"):
-            yield from adapter.iter_record_batches(str(path), memory=memory, batch_size=batch_size, **kwargs)  # type: ignore
-            return
-        # Fallback: adapter only has read()
-        table = adapter.read(str(path), **kwargs)
-        if batch_size is None:
-            yield from table.to_batches()
-        else:
-            yield from table.to_batches(max_chunksize=batch_size)
-        return
+    if batch_size is not None:
+        batch_size = _positive_int(batch_size)
+    adapter = _get_adapter(path, format, adapter)
+    stream = getattr(adapter, "iter_record_batches", None)
+    if callable(stream):
+        import pyarrow as pa
 
-    fmt = format if format is not None else _guess_format(path)
-    ad = _ADAPTERS.get(fmt)
-    if ad is not None and hasattr(ad, "iter_record_batches"):
-        yield from ad.iter_record_batches(str(path), memory=memory, batch_size=batch_size, **kwargs)  # type: ignore
+        for batch in stream(str(path), memory=memory, batch_size=batch_size, **kwargs):
+            if not isinstance(batch, pa.RecordBatch):
+                raise TypeError(f"streaming reader must yield pyarrow.RecordBatch; got {type(batch).__name__}")
+            yield batch
         return
-    # Generic fallback: use bounded read then split (still materializes, but works for any adapter)
-    table = read(path, format=fmt, **kwargs)
-    # If table is huge, this still materializes; the true streaming path requires adapter support.
-    if batch_size is None:
-        yield from table.to_batches()
-    else:
-        yield from table.to_batches(max_chunksize=batch_size)
+    warnings.warn("adapter has no streaming reader; materializing the full table", RuntimeWarning, stacklevel=2)
+    table = _require_table(adapter.read(str(path), **kwargs))
+    yield from table.to_batches(max_chunksize=batch_size)

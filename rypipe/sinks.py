@@ -7,6 +7,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Iterable, Union
 
+from .source import _positive_int
 
 def to_pandas(
     pipeline: Iterable[dict],
@@ -23,12 +24,12 @@ def to_pandas(
         A Source, Pipeline, or iterable of dicts.
     chunksize:
         Number of rows per intermediate DataFrame (chunks construction only,
-        not parsing).  Use ``memory`` for true bounded-memory streaming.
+        not parsing). Use ``memory`` to request the adapter's streaming reader.
     memory:
         Memory budget per parsing chunk (e.g. ``"64MiB"``).  When provided,
         batches are produced via ``iter_record_batches`` and each batch is
-        converted to a DataFrame incrementally.  Peak memory is bounded by
-        ``memory`` + one batch.
+        converted to a DataFrame incrementally. All output remains in memory.
+        Adapters without streaming support materialize the input table first.
     dtype_backend:
         ``"pyarrow"`` (default) for Arrow-backed dtypes, ``"numpy"`` for
         NumPy-backed dtypes.
@@ -37,47 +38,65 @@ def to_pandas(
     """
     import pandas as pd
 
+    if dtype_backend not in ("pyarrow", "numpy"):
+        raise ValueError("dtype_backend must be 'pyarrow' or 'numpy'")
+    if chunksize is not None:
+        chunksize = _positive_int(chunksize, "chunksize")
     types_mapper = pd.ArrowDtype if dtype_backend == "pyarrow" else None
+    if dtype_backend == "pyarrow":
+        import pyarrow as pa
 
-    # True streaming path: use iter_record_batches for bounded memory
     if memory is not None and hasattr(pipeline, "iter_record_batches"):
         chunks = []
         for batch in pipeline.iter_record_batches(memory=memory, **kwargs):
             chunks.append(batch.to_pandas(types_mapper=types_mapper))
-        return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+        return (pd.concat(chunks, ignore_index=True) if chunks else
+                to_arrow(pipeline).slice(0, 0).to_pandas(types_mapper=types_mapper))
 
-    # Existing chunksize path (chunks DataFrame construction only)
+    if hasattr(pipeline, "to_arrow") or hasattr(pipeline, "_to_arrow"):
+        table = to_arrow(pipeline)
+        if chunksize is None:
+            return table.to_pandas(types_mapper=types_mapper)
+        chunks = [batch.to_pandas(types_mapper=types_mapper)
+                  for batch in table.to_batches(max_chunksize=chunksize)]
+        return pd.concat(chunks, ignore_index=True) if chunks else table.to_pandas(types_mapper=types_mapper)
     if chunksize is None:
-        if hasattr(pipeline, "_to_arrow"):
-            table = pipeline._to_arrow()
-            if table is not None:
-                return table.to_pandas(types_mapper=types_mapper)
         if hasattr(pipeline, "_iter_batches"):
             chunks = [
-                pd.DataFrame.from_records(batch) for batch in pipeline._iter_batches()
+                (pa.Table.from_pylist(batch).to_pandas(types_mapper=types_mapper)
+                 if dtype_backend == "pyarrow" else pd.DataFrame.from_records(batch))
+                for batch in pipeline._iter_batches()
             ]
             return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
-        return pd.DataFrame.from_records(iter(pipeline))
+        rows = list(pipeline)
+        return (pa.Table.from_pylist(rows).to_pandas(types_mapper=types_mapper)
+                if dtype_backend == "pyarrow" else pd.DataFrame.from_records(rows))
     chunks = []
     batch = []
     for rec in pipeline:
         batch.append(rec)
         if len(batch) >= chunksize:
-            chunks.append(pd.DataFrame.from_records(batch))
+            chunks.append(
+                pa.Table.from_pylist(batch).to_pandas(types_mapper=types_mapper)
+                if dtype_backend == "pyarrow" else pd.DataFrame.from_records(batch)
+            )
             batch = []
     if batch:
-        chunks.append(pd.DataFrame.from_records(batch))
+        chunks.append(
+            pa.Table.from_pylist(batch).to_pandas(types_mapper=types_mapper)
+            if dtype_backend == "pyarrow" else pd.DataFrame.from_records(batch)
+        )
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
 def to_arrow(pipeline: Iterable[dict]):
     """Return a ``pyarrow.Table`` from a pipeline or source."""
+    if hasattr(pipeline, "to_arrow"):
+        return pipeline.to_arrow()
     if hasattr(pipeline, "_to_arrow"):
         table = pipeline._to_arrow()
         if table is not None:
             return table
-    if hasattr(pipeline, "to_arrow"):
-        return pipeline.to_arrow()
     import pyarrow as pa
 
     return pa.Table.from_pylist(list(pipeline))
@@ -97,7 +116,8 @@ def to_polars(
     memory:
         Memory budget per parsing chunk (e.g. ``"64MiB"``).  When provided,
         batches are produced via ``iter_record_batches`` and each batch is
-        converted to a DataFrame incrementally.  Peak memory is bounded.
+        converted to a DataFrame incrementally. All output remains in memory.
+        Adapters without streaming support materialize the input table first.
     **kwargs:
         Forwarded to ``iter_record_batches`` (e.g. ``threads=16``).
     """
@@ -107,7 +127,7 @@ def to_polars(
         chunks = []
         for batch in pipeline.iter_record_batches(memory=memory, **kwargs):
             chunks.append(pl.from_arrow(batch))
-        return pl.concat(chunks) if chunks else pl.DataFrame()
+        return pl.concat(chunks) if chunks else pl.from_arrow(to_arrow(pipeline).slice(0, 0))
     return pl.from_arrow(to_arrow(pipeline))
 
 
@@ -128,7 +148,8 @@ def to_parquet(
     memory:
         Memory budget per parsing chunk (e.g. ``"64MiB"``).  When provided,
         batches are produced via ``iter_record_batches`` and written
-        incrementally via ``ParquetWriter``.  Peak memory is bounded.
+        incrementally via ``ParquetWriter``. Adapters without streaming support
+        materialize the input table first.
     **kwargs:
         Forwarded to ``pyarrow.parquet.ParquetWriter`` (e.g.
         ``compression="zstd"``) or to ``iter_record_batches`` (e.g.
@@ -136,31 +157,31 @@ def to_parquet(
     """
     import pyarrow.parquet as pq
 
-    # Separate ParquetWriter kwargs from iter_record_batches kwargs
-    parquet_kwargs: dict[str, Any] = {}
-    iter_kwargs: dict[str, Any] = {}
-    parquet_keys = {
-        "compression", "compression_level", "row_group_size",
-        "use_dictionary", "write_statistics", "version",
-    }
-    for k, v in kwargs.items():
-        if k in parquet_keys:
-            parquet_kwargs[k] = v
-        else:
-            iter_kwargs[k] = v
-
     if memory is not None and hasattr(pipeline, "iter_record_batches"):
+        import inspect
+
+        parquet_keys = {
+            name for fn in (pq.ParquetWriter, pq.write_table)
+            for name, param in inspect.signature(fn).parameters.items()
+            if name not in {"self", "table", "where", "schema"}
+            and param.kind is not inspect.Parameter.VAR_KEYWORD
+        }
+        parquet_kwargs = {k: v for k, v in kwargs.items() if k in parquet_keys}
+        iter_kwargs = {k: v for k, v in kwargs.items() if k not in parquet_keys}
+        row_group_size = parquet_kwargs.pop("row_group_size", None)
         writer = None
         try:
             for batch in pipeline.iter_record_batches(memory=memory, **iter_kwargs):
                 if writer is None:
                     writer = pq.ParquetWriter(str(path), batch.schema, **parquet_kwargs)
-                writer.write_batch(batch)
+                writer.write_batch(batch, row_group_size=row_group_size)
         finally:
             if writer is not None:
                 writer.close()
+        if writer is None:
+            pq.write_table(to_arrow(pipeline), str(path), row_group_size=row_group_size, **parquet_kwargs)
         return
-    pq.write_table(to_arrow(pipeline), str(path), **parquet_kwargs)
+    pq.write_table(to_arrow(pipeline), str(path), **kwargs)
 
 
 def to_csv(
@@ -219,7 +240,8 @@ def collect(
     memory:
         Memory budget per parsing chunk (e.g. ``"64MiB"``).  When provided,
         batches are produced via ``iter_record_batches`` and collected
-        incrementally.  Peak memory is bounded.
+        incrementally. The returned list retains all rows; the parser budget
+        does not limit its size.
     **kwargs:
         Forwarded to ``iter_record_batches`` (e.g. ``threads=16``).
     """

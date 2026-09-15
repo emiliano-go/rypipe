@@ -29,51 +29,57 @@ def _merge_observer_hooks(plan_overrides: dict, hooks: dict) -> None:
             existing[hook] = fn
 
 
-def plan_split(stages):
-    """Split stages into (pushdown plan kwargs, remaining stages).
-
-    Multiple fusable ``FilterRows`` stages that each push a ``filter`` spec are
-    combined with an implicit ``and`` (``{"and": [...]}``) so chaining
-    ``FilterRows`` stages no longer silently drops all but the last filter.
-    ``observer`` hook dicts merge per-hook, chaining callables when several
-    stages provide the same hook.
-    Other plan keys (``field_mapping``, ``drop_fields``, etc.) still merge
-    with last-write-wins via ``dict.update``.
-    """
+def plan_split(stages, source_plan=None):
+    """Push a prefix matching the engine's rename/drop/cast/filter order."""
+    order = {"field_mapping": 0, "drop_fields": 1, "field_types": 2,
+             "filter": 3, "observer": 4}
+    existing = dict(source_plan or {})
+    rank = max((order[k] for k, v in existing.items() if k in order and v), default=-1)
     plan_overrides: dict = {}
-    remaining: list = []
-    filter_specs: list = []
-    for stage in stages:
-        if hasattr(stage, "_plan_kwargs"):
-            kwargs = stage._plan_kwargs()
-            if kwargs is not None:
-                kwargs = dict(kwargs)
-                if "observer" in kwargs:
-                    obs = kwargs.pop("observer")
-                    if obs:
-                        _merge_observer_hooks(plan_overrides, obs)
-                if "filter" in kwargs:
-                    filter_specs.append(kwargs.pop("filter"))
-                if kwargs:
-                    plan_overrides.update(kwargs)
+    filter_specs = [existing["filter"]] if existing.get("filter") is not None else []
+    for index, stage in enumerate(stages):
+        kwargs = stage._plan_kwargs() if hasattr(stage, "_plan_kwargs") else None
+        if kwargs is None:
+            return plan_overrides, list(stages[index:])
+        ranks = [order[k] for k in kwargs if k in order]
+        if (ranks and min(ranks) < rank
+                or kwargs.get("field_mapping") and existing.get("field_mapping")
+                or set(kwargs.get("field_types", ())) & set(existing.get("field_types", ()))):
+            return plan_overrides, list(stages[index:])
+        for key, value in kwargs.items():
+            if key == "filter":
+                filter_specs.append(value)
+                value = filter_specs[0] if len(filter_specs) == 1 else {"and": list(filter_specs)}
+            elif key == "drop_fields":
+                value = sorted(set(existing.get(key, ())) | set(value))
+            elif key == "field_types":
+                value = {**existing.get(key, {}), **value}
+            elif key == "observer":
+                _merge_observer_hooks(plan_overrides, value)
                 continue
-        remaining.append(stage)
-    if filter_specs:
-        plan_overrides["filter"] = filter_specs[0] if len(filter_specs) == 1 else {"and": filter_specs}
-    return plan_overrides, remaining
+            plan_overrides[key] = value
+            existing[key] = value
+        rank = max([rank, *ranks])
+    return plan_overrides, []
 
 
 def _try_columnar_fusion(source, stages):
     """Run fusable stages inside the source and return a dict iterator."""
     if not hasattr(source, "_read_arrow") or not hasattr(source, "_build_plan_kwargs"):
         return None
+    cached = getattr(source, "_cached_arrow", None)
+    if cached is not None:
+        plan_overrides, remaining = {}, stages
+    else:
+        plan_overrides, remaining = plan_split(stages, source._build_plan_kwargs())
 
-    plan_overrides, remaining = plan_split(stages)
-
-    if not plan_overrides and len(remaining) == len(stages):
+    if cached is None and not plan_overrides and len(remaining) == len(stages):
         return None
 
-    table = source._read_arrow(plan_overrides=plan_overrides or None)
+    table = cached if cached is not None else source._read_arrow(plan_overrides=plan_overrides or None)
+    from .source import _require_table
+
+    table = _require_table(table)
     from .batchpipe import build_chain, iter_dicts
 
     op, trailing = build_chain(

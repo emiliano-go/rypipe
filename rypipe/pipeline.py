@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional, Union
 
+from .source import _positive_int, _require_table
 
 Stage = Callable[[Iterable[dict]], Iterable[dict]]
 
@@ -18,7 +19,7 @@ class Pipeline:
     remaining stages run over Arrow batches or dict rows.
     """
 
-    __slots__ = ("_source", "_stages", "_batch_size")
+    __slots__ = ("_source", "_stages", "_batch_size", "_cached_arrow")
 
     def __init__(
         self,
@@ -28,8 +29,12 @@ class Pipeline:
         batch_size: int = 1024,
     ):
         self._source = source
-        self._stages = stages or []
-        self._batch_size = batch_size
+        self._stages = list(stages or ())
+        for stage in self._stages:
+            if not callable(stage) and not callable(getattr(stage, "apply", None)):
+                raise TypeError("pipeline stage must be callable or expose apply(record)")
+        self._batch_size = _positive_int(batch_size)
+        self._cached_arrow = None
 
     def __or__(self, stage: Stage) -> "Pipeline":
         return Pipeline(
@@ -41,14 +46,13 @@ class Pipeline:
     def __iter__(self) -> Iterator[dict]:
         from .fusion import fused_iter
 
+        if self._cached_arrow is not None:
+            return (row for batch in self._cached_arrow.to_batches(max_chunksize=self._batch_size)
+                    for row in batch.to_pylist())
         return fused_iter(self._source, self._stages)
 
-    def _to_arrow(self):
-        """Try to run the whole pipeline as a batch chain to one table.
-
-        Returns ``None`` when the pipeline cannot short-circuit (e.g. the
-        source is not plan-aware or there are trailing generic stages).
-        """
+    def _read_arrow(self):
+        """Materialize a plan-aware source and execute its stages once."""
         src = self._source
         if not (hasattr(src, "_read_arrow") and hasattr(src, "_build_plan_kwargs")):
             return None
@@ -56,85 +60,88 @@ class Pipeline:
         from .batchpipe import build_chain, collect_table
         from .fusion import plan_split
 
-        plan_overrides, remaining = plan_split(self._stages)
-        table = src._read_arrow(plan_overrides=plan_overrides or None)
+        if getattr(src, "_cached_arrow", None) is not None:
+            plan_overrides, remaining = {}, self._stages
+        else:
+            plan_overrides, remaining = plan_split(self._stages, src._build_plan_kwargs())
+        table = src._read_arrow(plan_overrides=plan_overrides) if plan_overrides else src.to_arrow()
+        table = _require_table(table)
+        if not remaining:
+            return table
         op, trailing = build_chain(
             table,
             remaining,
             batch_size=getattr(src, "_batch_size", 1024),
         )
         if trailing:
-            return None
+            import pyarrow as pa
+
+            table = collect_table(op)
+            stream = (row for batch in table.to_batches(max_chunksize=self._batch_size)
+                      for row in batch.to_pylist())
+            for stage in trailing:
+                stream = stage(stream)
+            rows = list(stream)
+            return pa.Table.from_pylist(rows) if rows else table.slice(0, 0)
         return collect_table(op)
+
+    def to_arrow(self):
+        """Execute once and cache the resulting ``pyarrow.Table``."""
+        import pyarrow as pa
+
+        if self._cached_arrow is None:
+            table = self._read_arrow()
+            self._cached_arrow = table if table is not None else pa.Table.from_pylist(list(self))
+        return self._cached_arrow
+
+    def _to_arrow(self):
+        return self.to_arrow()
+
+    def clear_cache(self) -> None:
+        """Drop the cached pipeline result, leaving the source cache intact."""
+        self._cached_arrow = None
+
+    def schema(self) -> list[str]:
+        """Return output column names, materializing and caching if needed."""
+        return self.to_arrow().column_names
 
     def _iter_batches(self, batch_size: Optional[int] = None):
         if batch_size is None:
             batch_size = self._batch_size
-        table = self._to_arrow()
-        if table is not None:
-            for batch in table.to_batches(max_chunksize=batch_size):
-                yield batch.to_pylist()
-            return
-
-        batch: list[dict] = []
-        for row in self:
-            batch.append(row)
-            if len(batch) >= batch_size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
+        batch_size = _positive_int(batch_size)
+        for batch in self.to_arrow().to_batches(max_chunksize=batch_size):
+            yield batch.to_pylist()
 
     def iter_arrow_batches(self, batch_size: Optional[int] = None):
-        """Yield ``pyarrow.RecordBatch`` objects from the fused pipeline.
-
-        Uses the Arrow batch chain when possible; falls back to materializing
-        rows into batches otherwise.
-        """
+        """Yield batches from the pipeline's cached Arrow table."""
         if batch_size is None:
             batch_size = self._batch_size
-        import pyarrow as pa
-
-        table = self._to_arrow()
-        if table is not None:
-            yield from table.to_batches(max_chunksize=batch_size)
-            return
-
-        batch: list[dict] = []
-        for row in self:
-            batch.append(row)
-            if len(batch) >= batch_size:
-                yield from pa.Table.from_pylist(batch).to_batches()
-                batch = []
-        if batch:
-            yield from pa.Table.from_pylist(batch).to_batches()
+        batch_size = _positive_int(batch_size)
+        yield from self.to_arrow().to_batches(max_chunksize=batch_size)
 
     def iter_record_batches(
-        self, memory: int | str = "64MiB", batch_size: Optional[int] = None
+        self, memory: int | str = "64MiB", batch_size: Optional[int] = None, **kwargs: Any
     ):
-        """Yield ``RecordBatch`` objects with constant memory.
-
-        Streaming via ``BatchConsumer`` when the source and all stages are
-        fusable; otherwise falls back to ``to_arrow``.
-        """
-        # Try streaming via source if all stages are fusable
+        """Stream fusable stages when supported; otherwise materialize the pipeline."""
+        if batch_size is not None:
+            batch_size = _positive_int(batch_size)
         src = self._source
-        if hasattr(src, "iter_record_batches"):
-            try:
-                from .fusion import plan_split
+        if self._cached_arrow is not None or getattr(src, "_cached_arrow", None) is not None:
+            yield from self.to_arrow().to_batches(
+                max_chunksize=self._batch_size if batch_size is None else batch_size
+            )
+            return
+        if hasattr(src, "iter_record_batches") and hasattr(src, "_build_plan_kwargs"):
+            from .fusion import plan_split
 
-                plan_overrides, remaining = plan_split(self._stages)
-                if not remaining:
-                    yield from src.iter_record_batches(
-                        memory=memory, batch_size=batch_size, **(plan_overrides or {})
-                    )
-                    return
-            except Exception:
-                # plan_split or iter_record_batches can raise for many reasons
-                # (unsupported stages, adapter limitations, etc.); fall through
-                # to the materialized fallback below.
-                pass
-        # Fallback: materialize then split
+            plan_overrides, remaining = plan_split(self._stages, src._build_plan_kwargs())
+            if not remaining:
+                yield from src.iter_record_batches(
+                    memory=memory, batch_size=batch_size, **{**kwargs, **plan_overrides}
+                )
+                return
+        if kwargs:
+            raise TypeError("streaming options require a fully fusable pipeline")
         yield from self.iter_arrow_batches(batch_size=batch_size)
 
     def to_pandas(

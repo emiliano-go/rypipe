@@ -17,10 +17,28 @@ pipeline syntax crxml had for free::
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from copy import deepcopy
+from operator import index
 from pathlib import Path
 from typing import Any, Iterator, Optional, Union
 
 import pyarrow as pa
+
+
+def _positive_int(value, name="batch_size") -> int:
+    try:
+        result = index(value)
+    except TypeError:
+        raise ValueError(f"{name} must be a positive integer") from None
+    if isinstance(value, bool) or result <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
+def _require_table(table) -> pa.Table:
+    if not isinstance(table, pa.Table):
+        raise TypeError(f"reader must return a pyarrow.Table; got {type(table).__name__}")
+    return table
 
 
 class Source(ABC):
@@ -46,6 +64,7 @@ class Source(ABC):
         "_use_mmap",
         "_batch_size",
         "_cached_arrow",
+        "_reader_options",
     )
 
     def __init__(
@@ -63,23 +82,27 @@ class Source(ABC):
         observer: Optional[dict[str, Any]] = None,
         use_mmap: bool = True,
         batch_size: int = 1024,
+        **reader_options: Any,
     ):
         self._path = Path(path)
         if not self._path.exists():
             raise FileNotFoundError(f"File not found: {self._path}")
 
-        self._field_mapping = field_mapping or {}
-        self._drop_fields = drop_fields or []
-        self._filter = filter
-        self._field_types = field_types or {}
-        self._dictionary_columns = dictionary_columns or []
-        self._schema = schema or []
+        if self._path.is_dir():
+            raise IsADirectoryError(f"Expected an input file: {self._path}")
+        self._field_mapping = dict(field_mapping or {})
+        self._drop_fields = list(drop_fields or ())
+        self._filter = deepcopy(filter)
+        self._field_types = dict(field_types or {})
+        self._dictionary_columns = list(dictionary_columns or ())
+        self._schema = list(schema or ())
         self._auto_dict = auto_dict
         self._strict_types = strict_types
-        self._observer = observer
+        self._observer = dict(observer) if observer is not None else None
         self._use_mmap = use_mmap
-        self._batch_size = batch_size
+        self._batch_size = _positive_int(batch_size)
         self._cached_arrow = None
+        self._reader_options = reader_options
 
     @abstractmethod
     def _read_arrow(self, plan_overrides: Optional[dict[str, Any]] = None) -> pa.Table:
@@ -94,7 +117,7 @@ class Source(ABC):
 
     def _build_plan_kwargs(self) -> dict[str, Any]:
         """Return the construction-time pushdown kwargs."""
-        kwargs: dict[str, Any] = {"use_mmap": self._use_mmap}
+        kwargs: dict[str, Any] = {**getattr(self, "_reader_options", {}), "use_mmap": self._use_mmap}
         if self._field_mapping:
             kwargs["field_mapping"] = self._field_mapping
         if self._drop_fields:
@@ -115,16 +138,14 @@ class Source(ABC):
         return kwargs
 
     def schema(self) -> list[str]:
-        """Return the output column names from the first row."""
-        if self._schema:
-            return list(self._schema)
-        first = next(iter(self), None)
-        return [*first] if first else []
+        """Return output column names, materializing and caching if needed."""
+        return self.to_arrow().column_names
 
     def _iter_batches(self, batch_size: Optional[int] = None) -> Iterator[list[dict]]:
         """Yield batches of dicts from the parsed table."""
         if batch_size is None:
             batch_size = self._batch_size
+        batch_size = _positive_int(batch_size)
         for batch in self.to_arrow().to_batches(max_chunksize=batch_size):
             yield batch.to_pylist()
 
@@ -140,27 +161,45 @@ class Source(ABC):
         """
         if batch_size is None:
             batch_size = self._batch_size
+        batch_size = _positive_int(batch_size)
         yield from self.to_arrow().to_batches(max_chunksize=batch_size)
 
     def iter_record_batches(
-        self, memory: int | str = "64MiB", batch_size: Optional[int] = None
+        self, memory: int | str = "64MiB", batch_size: Optional[int] = None,
+        **plan_overrides: Any,
     ) -> Iterator["pa.RecordBatch"]:
-        """Yield ``RecordBatch`` objects with constant memory (streaming).
+        """Yield batches from the cache or the adapter's streaming reader.
 
-        Unlike ``to_arrow()`` (which materializes a full table), this streams
-        via ``BatchConsumer`` and drops each batch after the consumer returns.
-        Peak is ``memory`` + one batch. Pass ``memory="64KB"`` and
-        ``batch_size=1`` for one-row batches (Rust-only 64 KB).
-
-        Subclasses that wrap a Rust `StreamingBatchIterator` (e.g. ``crxml``)
-        should override ``_iter_record_batches_stream`` to get true streaming;
-        otherwise this falls back to ``to_arrow().to_batches()``.
+        Adapters implement ``_iter_record_batches_stream`` to stream. Without
+        that hook, this warns and materializes the full table. ``memory`` limits
+        executor buffers, not input storage, Python overhead, or retained output.
         """
-        if hasattr(self, "_iter_record_batches_stream"):
-            yield from self._iter_record_batches_stream(memory, batch_size)  # type: ignore
+        if batch_size is not None:
+            batch_size = _positive_int(batch_size)
+        if self._cached_arrow is not None and not plan_overrides:
+            yield from self._cached_arrow.to_batches(
+                max_chunksize=self._batch_size if batch_size is None else batch_size
+            )
             return
-        # Fallback: materialize then split (still bounded during parse if adapter streams)
-        yield from self.to_arrow().to_batches(max_chunksize=batch_size or self._batch_size)
+        if hasattr(self, "_iter_record_batches_stream"):
+            import pyarrow as pa
+
+            for batch in self._iter_record_batches_stream(memory, batch_size, **plan_overrides):
+                if not isinstance(batch, pa.RecordBatch):
+                    raise TypeError(
+                        "streaming reader must yield pyarrow.RecordBatch; "
+                        f"got {type(batch).__name__}"
+                    )
+                yield batch
+            return
+        import warnings
+
+        warnings.warn(
+            f"{type(self).__name__} has no streaming reader; materializing the full table",
+            RuntimeWarning, stacklevel=2,
+        )
+        table = self._read_arrow(plan_overrides=plan_overrides) if plan_overrides else self.to_arrow()
+        yield from table.to_batches(max_chunksize=self._batch_size if batch_size is None else batch_size)
 
     def __iter__(self) -> Iterator[dict]:
         """Iterate rows as dicts."""
@@ -170,7 +209,7 @@ class Source(ABC):
     def to_arrow(self) -> pa.Table:
         """Return a ``pyarrow.Table``, parsing once and caching the result."""
         if self._cached_arrow is None:
-            self._cached_arrow = self._read_arrow()
+            self._cached_arrow = _require_table(self._read_arrow())
         return self._cached_arrow
 
     def clear_cache(self) -> None:
@@ -190,8 +229,8 @@ class Source(ABC):
         memory:
             Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
             provided, batches are produced via ``iter_record_batches`` and
-            each batch is converted to a DataFrame incrementally.  Peak
-            memory is bounded by ``memory`` + one batch.  Pass ``threads``
+            each batch is converted to a DataFrame incrementally. The full
+            output remains in memory. Pass ``threads``
             in ``**kwargs`` for parallel streaming.
         dtype_backend:
             ``"pyarrow"`` (default) for Arrow-backed dtypes, ``"numpy"``
@@ -199,18 +238,9 @@ class Source(ABC):
         **kwargs:
             Forwarded to ``iter_record_batches`` (e.g. ``threads=16``).
         """
-        import pandas as pd
+        from .sinks import to_pandas
 
-        if memory is not None:
-            types_mapper = pd.ArrowDtype if dtype_backend == "pyarrow" else None
-            chunks = []
-            for batch in self.iter_record_batches(memory=memory, **kwargs):
-                chunks.append(batch.to_pandas(types_mapper=types_mapper))
-            return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
-        table = self.to_arrow()
-        if dtype_backend == "pyarrow":
-            return table.to_pandas(types_mapper=pd.ArrowDtype)
-        return table.to_pandas()
+        return to_pandas(self, memory=memory, dtype_backend=dtype_backend, **kwargs)
 
     def to_polars(self, memory: int | str | None = None, **kwargs: Any):
         """Return a Polars DataFrame.
@@ -220,20 +250,15 @@ class Source(ABC):
         memory:
             Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
             provided, batches are produced via ``iter_record_batches`` and
-            each batch is converted to a DataFrame incrementally.  Peak
-            memory is bounded.  Pass ``threads`` in ``**kwargs`` for
+            each batch is converted to a DataFrame incrementally. The full
+            output remains in memory. Pass ``threads`` in ``**kwargs`` for
             parallel streaming.
         **kwargs:
             Forwarded to ``iter_record_batches`` (e.g. ``threads=16``).
         """
-        import polars as pl
+        from .sinks import to_polars
 
-        if memory is not None:
-            chunks = []
-            for batch in self.iter_record_batches(memory=memory, **kwargs):
-                chunks.append(pl.from_arrow(batch))
-            return pl.concat(chunks) if chunks else pl.DataFrame()
-        return pl.from_arrow(self.to_arrow())
+        return to_polars(self, memory=memory, **kwargs)
 
     def to_parquet(
         self,
@@ -250,35 +275,16 @@ class Source(ABC):
         memory:
             Memory budget per parsing chunk (e.g. ``"64MiB"``).  When
             provided, batches are produced via ``iter_record_batches`` and
-            written incrementally via ``ParquetWriter``.  Peak memory is
-            bounded.  Pass ``threads`` in ``**kwargs`` for parallel
+            written incrementally via ``ParquetWriter``. Adapters without a
+            streaming reader materialize first. Pass ``threads`` for parallel
             streaming.
         **kwargs:
             Forwarded to ``ParquetWriter`` (e.g. ``compression="zstd"``)
             or to ``iter_record_batches`` (e.g. ``threads=16``).
         """
-        import pyarrow.parquet as pq
+        from .sinks import to_parquet
 
-        if memory is not None:
-            parquet_keys = {
-                "compression", "compression_level", "row_group_size",
-                "use_dictionary", "write_statistics", "version",
-            }
-            parquet_kwargs = {k: v for k, v in kwargs.items() if k in parquet_keys}
-            iter_kwargs = {k: v for k, v in kwargs.items() if k not in parquet_keys}
-            writer = None
-            try:
-                for batch in self.iter_record_batches(memory=memory, **iter_kwargs):
-                    if writer is None:
-                        writer = pq.ParquetWriter(
-                            str(path), batch.schema, **parquet_kwargs
-                        )
-                    writer.write_batch(batch)
-            finally:
-                if writer is not None:
-                    writer.close()
-            return
-        pq.write_table(self.to_arrow(), str(path), **kwargs)
+        to_parquet(self, path, memory=memory, **kwargs)
 
     def __or__(self, stage) -> "Pipeline":
         from .pipeline import Pipeline
@@ -330,4 +336,4 @@ class Adapter(Source):
                     k: v for k, v in plan_overrides.items() if k != "observer"
                 }
             plan.update(plan_overrides)
-        return self.read(str(self._path), **plan)
+        return _require_table(self.read(str(self._path), **plan))
