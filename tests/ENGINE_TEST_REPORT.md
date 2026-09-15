@@ -1,5 +1,189 @@
 # Engine testing and code quality review
 
+## September 15 framework completion pass
+
+Upstream `master` was fast-forwarded from `9b4be276` to `c257ea2a`. Local
+framework work was restored over the merge, including upstream's adapter moves
+to `examples/`. The pre-merge stash remains available as a backup.
+
+This pass concentrates on the framework. The nine example pages explain the
+existing examples; it adds no adapter format features. Source and pipeline
+materializers retain their shared cache path.
+
+### Changes and fixed defects
+
+- Added soft memory targets and `MemoryBudget::with_strict(true)`. Strict
+  executor checks return `Error::Memory`; the shared Python bridge maps that
+  error to `MemoryError`. Checks cover tracked input, builders, pending output,
+  and Arrow batches. They are not allocator interception or an OS RSS limit;
+  some checks happen after allocation. Caller-retained output, Python's baseline,
+  arbitrary adapter allocations, and allocator retention are outside a hard cap.
+- Fixed an initial-capacity calculation that used byte counts as row counts.
+  Input chunks now target one sixty-fourth of the bounded executor budget.
+  Output sizing uses observed builder capacity, and large merges flush first.
+  Empty destination columns take ownership of source buffers. Dictionary
+  lookups no longer allocate a temporary key for already-known values.
+- File schema discovery and signature hashing now use bounded reads instead
+  of faulting an entire small-file mapping into RSS. File and byte discovery
+  share signature ranges and cache keys. Planning drops the mapping before
+  streaming; reads retain the original file handle. Default split planning
+  runs serially, avoiding an otherwise unnecessary global Rayon pool.
+- Ordered parallel workers cannot dispatch arbitrarily far ahead of a slow
+  chunk. The dispatch window backpressures workers before the reorder buffer
+  grows too far. Worker panics become errors, and cancellation releases workers
+  waiting on the dispatch condition variable. Soft mode permits oversized
+  pending batches; strict mode reports memory overflow. Ordering stays enabled.
+- Collected bounded batches now align columns that first appear later, filling
+  earlier rows with nulls. Mixed automatic dictionary/string encodings are
+  reconciled to strings; uniform dictionary output remains encoded. The
+  regression verifies both original encodings exist, then checks all 12,000
+  collected values, common schemas, and 6,000 missing-field nulls.
+- Split predicate-row handling, memory accounting, scalar conversion, and
+  parallel schema discovery into focused modules. Shared batch finalization
+  applies filtering and budget checks at every bounded flush.
+- Made all five Rust doctests compile: three execute and two use `no_run`.
+  No doctest is ignored. Expanded decoder coverage and specialized common
+  boundary paths without changing stateful splitter semantics.
+- CI now builds and tests native adapters and a fresh generated template,
+  tests installed Python wheels in isolated mode, and defines a native Linux
+  ARM64 core job. Corrected action pins that pointed to v1 releases despite
+  newer version labels. Added four fuzz smoke targets and weekly/manual longer
+  campaigns with persistent corpora and separate failure artifacts.
+- Added nine dedicated example pages and navigation. The 66-page site passes
+  a clean strict build after Unslop; `llms-full.txt` includes the pages.
+
+### Local verification
+
+All local runtime results below are Windows x86-64. The Python harness runs
+outside the measured Rust child process. Platform-matrix and ARM execution
+still require a remote CI run for these local changes.
+
+| Check | Result |
+| --- | --- |
+| Workspace Rust, all features | 294 passed, including five doctests; none ignored |
+| Memory and collection regressions | Nine passed with all features and without default features |
+| Property-test cases | `PROPTEST_CASES=4096` for the final workspace run |
+| Clippy and formatting | All targets/features, warnings denied; formatting checked |
+| Isolated root wheel tests | 138 passed, 15 warnings |
+| Isolated adapter wheel tests | 76 passed |
+| Adapter Rust tests | 22 passed |
+| Fresh generated-template wheel | One Python smoke test passed |
+| Documentation | 66 pages; strict clean build passed |
+
+The final root wheel includes the bounded-memory and collection fixes. Adapter
+and template wheels were rebuilt and tested earlier in this pass; their tested
+entry points do not call the subsequently changed bounded collector or ordered
+streaming coordinator. They are not claimed as rebuilds after every core edit.
+
+Four AddressSanitizer campaigns ran for 181 seconds each. Their scope is
+boundary selection, splitter behavior, parser-to-Arrow conversion, and UTF-8
+validation; they do not fuzz the ordered streaming coordinator.
+
+| Fuzz target | Executions | Result |
+| --- | ---: | --- |
+| Boundary | 2,174,683 | Passed |
+| Splitter | 22,014 | Passed |
+| Parser to Arrow | 106,807 | Passed |
+| UTF-8 validation | 14,158,043 | Passed |
+| Total | 16,461,547 | No failures or crash artifacts |
+
+An earlier four-target campaign added 32,399,043 executions against the earlier
+revision. These bounded campaigns are not exhaustive. ASan process RSS includes
+instrumentation overhead and is not used to assess the engine memory target.
+Logs are `target/framework-fuzz-final-{boundary,splitter,parser,validate}.log`.
+
+### Final performance and memory measurements
+
+The final streaming matrix used 232 fresh Rust child processes after native
+builds and fuzzing finished. Each consumer checks every emitted value and the
+expected row count, then drops output. Timings include those checks. The budget
+was 10 MiB. RSS figures below are median peak increases above each child's
+pre-execution baseline, about 5.1 MiB for file modes. Byte modes preload input
+before that baseline, so their delta excludes the caller-owned input.
+
+For 100 MiB inputs, 128-byte payloads, one output column, and ten processes per
+case, extra RSS in MiB was:
+
+| Record style | File stream | Byte stream | Iterator | Ordered parallel |
+| --- | ---: | ---: | ---: | ---: |
+| Plain | 2.68 | 1.61 | 4.34 | 6.08 |
+| Continued | 2.68 | 1.59 | 4.43 | 6.19 |
+| Comments | 2.84 | 1.61 | 8.34 | 10.07 |
+| Blank separators | 2.68 | 1.61 | 4.34 | 6.08 |
+
+Throughput for those cases, in input MiB/s:
+
+| Record style | File stream | Byte stream | Iterator | Ordered parallel |
+| --- | ---: | ---: | ---: | ---: |
+| Plain | 833.4 | 914.8 | 906.6 | 716.4 |
+| Continued | 559.2 | 594.2 | 577.9 | 547.2 |
+| Comments | 765.0 | 906.7 | 785.0 | 736.6 |
+| Blank separators | 727.0 | 833.2 | 773.0 | 715.9 |
+
+Three processes per case covered larger input, longer rows, and output
+expansion. The probe repeats each input payload into every requested column,
+so the eight-column case expands payload data eightfold. Extra RSS in MiB:
+
+| Input / payload / columns | Style | File stream | Byte stream | Iterator | Ordered parallel |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 10 MiB / 32 bytes / 8 | Plain | 5.28 | 5.02 | 5.27 | 14.55 |
+| 10 MiB / 32 bytes / 8 | Continued | 5.25 | 5.40 | 4.67 | 12.75 |
+| 100 MiB / 4,096 bytes / 4 | Plain | 5.84 | 5.56 | 5.07 | 14.95 |
+| 100 MiB / 4,096 bytes / 4 | Continued | 5.84 | 5.57 | 5.34 | 14.13 |
+| 256 MiB / 128 bytes / 1 | Plain | 4.19 | 3.36 | 4.34 | 12.04 |
+| 256 MiB / 128 bytes / 1 | Continued | 4.28 | 3.82 | 4.44 | 13.29 |
+
+The largest individual extra-RSS sample was 19.88 MiB in the continued,
+eight-column ordered-parallel case. The soft target therefore is not a uniform
+RSS ceiling. Concurrent buffers, output expansion, and allocator retention
+still matter. Largest emitted Arrow batches were about 2.0 MiB in the long-row
+case. Strict-mode regressions verify tracked-overflow errors and recovery;
+these soft-mode RSS measurements do not prove a strict process-memory cap.
+
+Default splitter planning caps also remain relevant. A splitter may return
+larger chunks than requested when its record boundaries or chunk cap require
+it. Strict execution can reject those chunks. Retaining consumer output and
+up-front decompression can also increase memory independently of streaming
+batch sizing.
+
+The boundary comparison checked identical offsets before timing seven
+alternating declarative/manual rounds in each of ten fresh processes per
+style. The decoder was unchanged by subsequent allocation/collection fixes.
+
+| Style | Median ratio | Minimum | p90 | Maximum | Runs above 1.05 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Plain | 0.8161 | 0.7263 | 0.9039 | 0.9655 | 0/10 |
+| Continued | 0.8917 | 0.8066 | 0.9568 | 0.9613 | 0/10 |
+| Comments | 1.0072 | 0.9483 | 1.0499 | 1.0685 | 1/10 |
+| Blank separators | 0.9594 | 0.8299 | 1.0083 | 1.0108 | 0/10 |
+
+All medians meet the 5% overhead target. The comment-mode outlier prevents a
+claim that every run stays within 5%. Ratios and throughput describe these
+fixtures on this host, not a guarantee for other adapters or machines.
+
+Raw runs are in `target/engine-measurements/framework-final-v6.json`,
+`framework-wide-schema-v6.json`, `framework-long-rows-v6.json`, and
+`framework-large-input-v6.json`. Boundary distributions are in
+`framework-final-v4.json`. These generated files are ignored by Git;
+the tables above preserve their measured results.
+
+Reproduce from the repository root, after builds finish:
+
+```text
+cargo build --release -p rypipe-core --all-features --example engine_probe
+python scripts/benchmark_engine.py --reps 10 --modes boundary stream stream-bytes iterator stream-parallel
+python scripts/benchmark_engine.py --reps 3 --mib 10 --width 32 --columns 8 --kinds plain continued --modes stream stream-bytes iterator stream-parallel
+python scripts/benchmark_engine.py --reps 3 --mib 100 --width 4096 --columns 4 --kinds plain continued --modes stream stream-bytes iterator stream-parallel
+python scripts/benchmark_engine.py --reps 3 --mib 256 --width 128 --columns 1 --kinds plain continued --modes stream stream-bytes iterator stream-parallel
+```
+
+Pass `--output <path>` to retain each report separately. The Python RSS sampler
+supports Windows and Linux. See the CI workflow for clean native packaging and
+platform jobs. Publishing and running that matrix remains the only unchecked
+acceptance item in `REMAINING_WORK.md`.
+
+## September 14 baseline
+
 September 14, 2026. This pass covered core execution, Python bindings, public
 sinks, and the Properties, INI, and LDIF adapters on Windows x86-64.
 
