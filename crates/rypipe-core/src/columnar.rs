@@ -200,8 +200,10 @@ pub(crate) enum TypedValue<'a> {
     Bool(bool),
     /// Days since the Unix epoch.
     Date32(i32),
-    /// Raw integer in the column's `TimeUnit`.
-    Timestamp(i64),
+    /// Raw integer and the column's `TimeUnit`.
+    Timestamp(i64, TimeUnit),
+    /// Scaled integer and decimal scale.
+    Decimal128(i128, u8),
 }
 
 /// Flat string column storage in Arrow layout: one contiguous byte arena +
@@ -427,16 +429,14 @@ impl<T: Copy> PrimColumn<T> {
 }
 
 impl PrimColumn<bool> {
-    /// Zero-copy Arrow export for booleans: packs `Vec<bool>` into a
-    /// `BooleanBuffer` for `BooleanArray`.
+    /// Pack Boolean values into Arrow's bit buffer.
     #[allow(clippy::wrong_self_convention)]
     fn to_arrow_bool(&mut self) -> Result<ArrayRef> {
-        use arrow::buffer::{BooleanBuffer, ScalarBuffer};
+        use arrow::buffer::BooleanBuffer;
         let data = std::mem::take(&mut self.data);
         let validity = std::mem::take(&mut self.validity);
         let nulls = validity.into_arrow();
-        let buf: ScalarBuffer<u8> = data.iter().map(|&b| b as u8).collect();
-        let bool_buf = BooleanBuffer::new(buf.into(), 0, data.len());
+        let bool_buf = BooleanBuffer::from(data);
         let arr = BooleanArray::new(bool_buf, nulls);
         Ok(Arc::new(arr))
     }
@@ -521,6 +521,13 @@ pub fn parse_decimal128(s: &str, scale: u8) -> Option<i128> {
     if int_part.is_empty() && frac_part.is_empty() {
         return None;
     }
+    if !int_part
+        .bytes()
+        .chain(frac_part.bytes())
+        .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
     let int_val: i128 = if int_part.is_empty() {
         0
     } else {
@@ -531,15 +538,26 @@ pub fn parse_decimal128(s: &str, scale: u8) -> Option<i128> {
     if !frac_part.is_empty() {
         let digits = &frac_part[..frac_part.len().min(scale as usize)];
         if !digits.is_empty() {
-            if !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
             let frac: i128 = digits.parse().ok()?;
             let frac_scaled = frac.checked_mul(10i128.checked_pow(scale - digits.len() as u32)?)?;
             val = val.checked_add(frac_scaled)?;
         }
     }
     Some(if neg { -val } else { val })
+}
+
+pub(crate) fn format_decimal128(value: i128, scale: u8) -> String {
+    if scale == 0 {
+        return value.to_string();
+    }
+    let sign = if value.is_negative() { "-" } else { "" };
+    let mut digits = value.unsigned_abs().to_string();
+    let scale = scale as usize;
+    if digits.len() <= scale {
+        digits = format!("{:0>width$}", digits, width = scale + 1);
+    }
+    let split = digits.len() - scale;
+    format!("{sign}{}.{}", &digits[..split], &digits[split..])
 }
 
 /// Parse an ISO-8601 datetime (or bare date = midnight) into an integer in
@@ -578,7 +596,7 @@ pub fn parse_timestamp(s: &str, unit: TimeUnit, format: Option<&str>) -> Option<
 }
 
 /// Format days-since-epoch back to ISO-8601 (`YYYY-MM-DD`).
-fn format_date32(days: i32) -> String {
+pub(crate) fn format_date32(days: i32) -> String {
     match chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
         .and_then(|epoch| epoch.checked_add_signed(chrono::Duration::days(days as i64)))
     {
@@ -588,7 +606,7 @@ fn format_date32(days: i32) -> String {
 }
 
 /// Format a raw timestamp integer to ISO-8601 (`YYYY-MM-DDTHH:MM:SS(.fff…)`).
-fn format_timestamp(v: i64, unit: TimeUnit) -> String {
+pub(crate) fn format_timestamp(v: i64, unit: TimeUnit) -> String {
     let (secs, subsec_nanos) = match unit {
         TimeUnit::Second => (v, 0u32),
         TimeUnit::Millisecond => (
@@ -1042,7 +1060,9 @@ impl ColumnBuilder {
                 let unit = *unit;
                 v.get(index).map(|ts| format_timestamp(ts, unit))
             }
-            ColumnBuilder::Decimal128(_, v) => v.get(index).map(|n| n.to_string()),
+            ColumnBuilder::Decimal128(scale, v) => {
+                v.get(index).map(|n| format_decimal128(n, *scale))
+            }
             ColumnBuilder::Dictionary {
                 codes,
                 data,
@@ -1066,8 +1086,12 @@ impl ColumnBuilder {
             ColumnBuilder::Float64(v) => v.get(index).map(TypedValue::Float64),
             ColumnBuilder::Boolean(v) => v.get(index).map(TypedValue::Bool),
             ColumnBuilder::Date32(v) => v.get(index).map(TypedValue::Date32),
-            ColumnBuilder::Timestamp(_, _, v) => v.get(index).map(TypedValue::Timestamp),
-            ColumnBuilder::Decimal128(_, v) => v.get(index).map(|n| TypedValue::Int64(n as i64)),
+            ColumnBuilder::Timestamp(unit, _, v) => v
+                .get(index)
+                .map(|value| TypedValue::Timestamp(value, *unit)),
+            ColumnBuilder::Decimal128(scale, v) => {
+                v.get(index).map(|n| TypedValue::Decimal128(n, *scale))
+            }
             ColumnBuilder::Dictionary {
                 codes,
                 data,
@@ -1525,6 +1549,34 @@ mod tests {
         assert_eq!(parse_decimal128("bad", 2), None);
         assert_eq!(parse_decimal128("1.2.3", 2), None);
         assert_eq!(parse_decimal128("", 2), None);
+        assert_eq!(parse_decimal128("1.é", 1), None);
+        assert_eq!(parse_decimal128("1.23junk", 2), None);
+        assert_eq!(parse_decimal128("1.2.3", 0), None);
+        assert_eq!(parse_decimal128("--1", 2), None);
+    }
+
+    #[test]
+    fn test_boolean_export_packs_bits() {
+        let values = [
+            Some(false),
+            Some(true),
+            None,
+            Some(true),
+            Some(false),
+            Some(true),
+            Some(true),
+            Some(false),
+            Some(true),
+            None,
+            Some(false),
+        ];
+        let mut column = PrimColumn::<bool>::default();
+        for value in values {
+            column.push(value);
+        }
+        let array = column.to_arrow_bool().unwrap();
+        let array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(array.iter().collect::<Vec<_>>(), values);
     }
 
     #[test]
