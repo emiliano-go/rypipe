@@ -1,15 +1,22 @@
-# Streaming with constant memory { #streaming-with-constant-memory }
+# Streaming batches { #streaming-with-constant-memory }
 
-`rypipe` can stream arbitrarily large files with **constant memory**, even a 50 GB file on a 2 GB Raspberry Pi, by yielding `RecordBatch` objects one at a time and dropping each after the consumer returns.
+`rypipe`'s streaming iterator yields `RecordBatch` objects and releases each
+batch after the consumer returns when the adapter supplies a streaming
+implementation. The configured budget limits the parser's chunk and queue
+work; input mappings, decompressed data, and collected output can add memory.
+The fallback path materializes the table first.
 
 ## Bounded vs streaming { #bounded-vs-streaming }
 
-| Mode | API | Peak memory | When to use |
+| Mode | API | Retained output | When to use |
 |---|---|---|---|
-| `bounded` (collecting) | `BoundedExecutor::run` / `Pipeline::read_path_stream` → `Vec<RecordBatch>` | `budget + sum(batches)`: still grows with file size if you collect | `source.to_arrow()` with `memory="256MB"` for a single table |
-| `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | `budget + one batch`: constant | `for batch in src.iter_record_batches(memory="64KB"):` + `ParquetWriter` |
+| `bounded` (collecting) | `BoundedExecutor::run` / `Pipeline::read_path_stream` → `Vec<RecordBatch>` | All returned batches | Build a full table while limiting parsing buffers |
+| `streaming` (consuming) | `BoundedExecutor::run_stream` + `BatchConsumer` / `iter_record_batches` | Current batch and queued batches, unless the consumer keeps more | Write batches directly with `ParquetWriter` |
 
-The engine already respects a `MemoryBudget` (`crates/rypipe-core/src/bounded.rs`) and `StreamingBatchIterator` (`crates/rypipe-core/src/streaming.rs`) reuses a single `Vec<u8>` chunk buffer (`chunk_buf.resize(chunk_len)` in `bounded.rs`) and `TableBuilder::reset()` (`crates/rypipe-core/src/engine/table_builder.rs`) to keep RSS at `budget + batch`.
+`MemoryBudget` controls batch sizing. The bounded executor reuses its chunk
+buffer and resets the table builder between batches. Input storage, oversized
+records, buffer capacity, worker queues, and Python allocations mean the budget
+is not a hard limit on process RSS or individual Arrow batch allocation.
 
 ## Rust API { #rust-api }
 
@@ -82,7 +89,10 @@ pipe = src | DropFields(["Field22"]) | FilterRows(field="Level", op="==", value=
 df = pd.concat(b.to_pandas() for b in pipe.iter_record_batches(memory="256MB"))
 ```
 
-Note that `crxml`'s `CrystalXMLSource` sink methods (`to_pandas` / `to_polars` / `to_parquet`) take **no** `memory=` argument; `iter_record_batches` is the bounded-memory entry point. The framework also ships generic sink helpers (`rypipe.to_pandas(src, memory=...)` and friends) that stream through `iter_record_batches` internally; those exist for adapter authors whose sources do not override the sinks, and end users do not need them.
+Adapter packages may expose extra sink options, but the framework's `memory=`
+sink path is incremental only when the adapter supplies streaming support. Use
+`iter_record_batches()` when you need direct control. A DataFrame, list, or
+Arrow table returned to the caller still occupies memory for its full result.
 
 Unit note: Both `crxml` and the framework accept `B` / `KB` / `MB` / `GB` / `TB`
 and `KiB` / `MiB` / `GiB` / `TiB` (1024-based, case-insensitive, no space
@@ -116,11 +126,16 @@ size: smaller budgets produce smaller batches.
 
 ## When streaming falls back { #when-streaming-falls-back }
 
-`Pipeline.iter_record_batches` checks `plan_split` (`rypipe/fusion.py`); if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented: it yields `to_arrow().to_batches()`. For constant memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, `FilterRows` with the keyword form or a compilable lambda).
+`Pipeline.iter_record_batches` checks `plan_split` (`rypipe/fusion.py`); if `remaining` non-fusable stages exist, it falls back to `iter_arrow_batches` (materialized). The same happens for `Source.iter_record_batches` when `_iter_record_batches_stream` is not implemented: it yields `to_arrow().to_batches()`. For bounded parser memory, keep stages fusable (`RenameFields`, `DropFields`, `CastTypes`, and keyword-form or expression-predicate `FilterRows`).
 
 ## Testing { #testing }
 
-Parse a large file (for example `crxml`'s `bench_data/synthetic_1gb.xml`) with `memory="64KB"` against the full columnar path and assert the same row count, then assert `RSS < budget*2` via `resource.getrusage`. `crxml`'s `benchmarks/bench_extended.py` includes bounded-memory configurations (`bounded64` / `bounded256`) you can diff against the columnar baseline.
+Parse a large file (for example `crxml`'s `bench_data/synthetic_1gb.xml`) with
+`memory="64KB"` and compare row counts with the columnar path. Measure RSS
+with a platform-appropriate profiler and record input mapping, adapter, and
+consumer behavior; collected outputs and fallback materialization are outside
+the parser budget. `crxml`'s `benchmarks/bench_extended.py` includes
+bounded-memory configurations (`bounded64` / `bounded256`) for comparison.
 
 ## See also { #see-also }
 
