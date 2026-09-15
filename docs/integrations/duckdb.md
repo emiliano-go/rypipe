@@ -6,7 +6,7 @@ description: Query rypipe output with DuckDB
 # DuckDB { #duckdb }
 
 DuckDB reads Arrow tables and pandas DataFrames natively via the Arrow C
-Data Interface. No adapter or connector needed — pass the table directly.
+Data Interface. No adapter or connector needed; pass the table directly.
 
 ## Setup { #setup }
 
@@ -33,7 +33,7 @@ con.execute("SELECT Department, SUM(Amount) FROM sales GROUP BY Department").fet
 !!! tip
 
     All values come out of the parser as strings. Use `CastTypes` in the
-    pipeline to convert numeric columns before passing to DuckDB —
+    pipeline to convert numeric columns before passing to DuckDB;
     otherwise `SUM()`, `AVG()`, etc. will fail with a type error.
 
 ## With pipelines { #with-pipelines }
@@ -67,8 +67,8 @@ con = duckdb.connect()
 result = con.execute("SELECT * FROM table").fetchdf()
 ```
 
-DuckDB reads PyArrow tables without conversion — zero copy via the Arrow
-C Data Interface.
+DuckDB reads PyArrow tables without conversion (zero copy via the Arrow
+C Data Interface).
 
 ## Why this works { #why-this-works }
 
