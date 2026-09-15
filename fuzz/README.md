@@ -19,5 +19,11 @@ parser-to-Arrow row consistency, and UTF-8 validation against the standard
 library. Failures are saved under `fuzz/artifacts`; minimize them with
 `cargo +nightly fuzz tmin TARGET ARTIFACT`, then add a regression test.
 
+CI runs 30-second smoke campaigns on every change. Weekly scheduled and
+manual campaigns run each target for 10 minutes, restore
+`fuzz/corpus/<target>` from the previous run, and upload `fuzz/artifacts` even
+when a target fails. Keep minimized failures as regression tests; uploaded
+artifacts are retained by CI for triage.
+
 These targets exercise Rust parsers directly. Python integration is covered
 by `tests/adapters` and `crates/rypipe-python/tests`.
