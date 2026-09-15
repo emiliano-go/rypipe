@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,16 +26,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@50fbc622fc4ef5163becd7fab6573eac35f8462e # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: Check formatting
         run: cargo fmt --check
@@ -51,10 +54,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@50fbc622fc4ef5163becd7fab6573eac35f8462e # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
 
@@ -69,15 +72,15 @@ jobs:
     needs: rust
     steps:
       - name: Checkout repository
-        uses: actions/checkout@50fbc622fc4ef5163becd7fab6573eac35f8462e # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: Run throughput benchmark
         run: cargo run --release -p rypipe-core --example bench_throughput
@@ -122,15 +125,15 @@ jobs:
         shell: bash
     steps:
       - name: Checkout repository
-        uses: actions/checkout@50fbc622fc4ef5163becd7fab6573eac35f8462e # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: ${{ matrix.python-version }}
 
@@ -155,4 +158,147 @@ jobs:
         # no built extension module in it).
         run: |
           pip install target/wheels/*.whl
-          pytest crates/rypipe-python/tests/
+          python -I -m pytest crates/rypipe-python/tests/
+
+  adapters:
+    name: Native adapters and generated template
+    runs-on: ubuntu-latest
+    needs: rust
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools and engine
+        run: |
+          python -m pip install maturin pytest pyarrow pandas polars
+          maturin build --release --manifest-path crates/rypipe-python/Cargo.toml
+          pip install target/wheels/*.whl
+
+      - name: Build and install native adapters
+        run: |
+          for adapter in examples/rypipe-ini examples/rypipe-ldif examples/rypipe-properties; do
+            cargo test --manifest-path "$adapter/Cargo.toml" --no-default-features
+            out="$RUNNER_TEMP/$adapter-wheel"
+            mkdir -p "$out"
+            maturin build --release --manifest-path "$adapter/Cargo.toml" --out "$out"
+            pip install "$out"/*.whl
+          done
+
+      - name: Test adapters
+        run: python -I -m pytest tests/adapters
+
+      - name: Install cargo-generate
+        run: cargo install cargo-generate --locked
+
+      - name: Generate and smoke-test template
+        run: |
+          generated="$RUNNER_TEMP/rypipe-template"
+          mkdir -p "$generated"
+          cargo generate --init --path "$GITHUB_WORKSPACE/template" --name sample_adapter --define description="CI generated adapter" --destination "$generated"
+          test -f "$generated/Cargo.toml"
+          grep -Fq 'rypipe-core = { version = "0.3.2", features = ["mmap"] }' "$generated/Cargo.toml"
+          grep -Fq 'rypipe_python = { package = "rypipe-python", version = "0.3.2" }' "$generated/Cargo.toml"
+          sed -i 's#rypipe-core = { version = "0.3.2", features = \["mmap"\] }#rypipe-core = { path = "'"$GITHUB_WORKSPACE"'/crates/rypipe-core", features = ["mmap"] }#' "$generated/Cargo.toml"
+          sed -i 's#rypipe_python = { package = "rypipe-python", version = "0.3.2" }#rypipe_python = { package = "rypipe-python", path = "'"$GITHUB_WORKSPACE"'/crates/rypipe-python" }#' "$generated/Cargo.toml"
+          maturin build --release --manifest-path "$generated/Cargo.toml"
+          pip install "$generated"/target/wheels/*.whl
+          python -I -m pytest "$generated/tests"
+
+  rust-arm64:
+    name: Native Rust regression (Linux ARM64)
+    runs-on: ubuntu-24.04-arm
+    needs: rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Run ARM64 core regression suite
+        run: cargo test -p rypipe-core --all-features
+
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install nightly and cargo-fuzz
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: nightly
+      - run: cargo install cargo-fuzz --locked
+
+      - name: Run all fuzz targets
+        run: |
+          mkdir -p fuzz/artifacts
+          for target in fuzz_boundary fuzz_splitter fuzz_parser fuzz_validate; do mkdir -p "fuzz/corpus/$target"; done
+          find fuzz/seeds -type f -exec cp -n {} fuzz/corpus/fuzz_splitter/ \;
+          find fuzz/seeds -type f -exec cp -n {} fuzz/corpus/fuzz_parser/ \;
+          for target in fuzz_boundary fuzz_splitter fuzz_parser fuzz_validate; do
+            mkdir -p "$GITHUB_WORKSPACE/fuzz/artifacts/$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=30 -artifact_prefix="$GITHUB_WORKSPACE/fuzz/artifacts/$target/"
+          done
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-smoke-artifacts
+          path: fuzz/artifacts
+
+  fuzz-long:
+    name: Scheduled fuzz campaign
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install nightly and cargo-fuzz
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: nightly
+      - run: cargo install cargo-fuzz --locked
+      - name: Restore persistent corpora
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ github.ref_name }}-
+      - name: Run longer campaigns
+        run: |
+          mkdir -p fuzz/artifacts
+          for target in fuzz_boundary fuzz_splitter fuzz_parser fuzz_validate; do mkdir -p "fuzz/corpus/$target"; done
+          find fuzz/seeds -type f -exec cp -n {} fuzz/corpus/fuzz_splitter/ \;
+          find fuzz/seeds -type f -exec cp -n {} fuzz/corpus/fuzz_parser/ \;
+          for target in fuzz_boundary fuzz_splitter fuzz_parser fuzz_validate; do
+            mkdir -p "$GITHUB_WORKSPACE/fuzz/artifacts/$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=600 -artifact_prefix="$GITHUB_WORKSPACE/fuzz/artifacts/$target/"
+          done
+      - name: Upload campaign artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-long-${{ github.run_id }}
+          path: fuzz/artifacts
