@@ -65,8 +65,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rypipe-core = "0.3"
-arrow = { version = "=55.2.0", default-features = false, features = ["pyarrow", "ffi"] }
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
+rypipe_python = { package = "rypipe-python", version = "0.3.2" }
+arrow = { version = "=59.3.0", default-features = false, features = ["pyarrow", "ffi"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
 simdutf8 = "0.1"
 ```
@@ -77,12 +78,12 @@ versions.
 
 !!! warning "Arrow and pyo3 version pinning"
 
-    `arrow` must be pinned with `=` (e.g. `=55.2.0`) to match the version
+    `arrow` must be pinned with `=` (e.g. `=59.3.0`) to match the version
     `rypipe-core` was built against. A mismatch produces inscrutable linker
     errors like `undefined symbol` or `missing field`. If you see these,
-    check that your `arrow` version matches `rypipe-core`'s exactly. Do not
-    use `rypipe-python`'s versions (0.29/59.2) — it is not published to
-    crates.io and has a lib name collision.
+    check that your `arrow` version matches `rypipe-core`'s exactly. The
+    `rypipe_python` dependency alias avoids its `_rypipe` extension name
+    colliding with your adapter module.
 
 !!! note "Developing inside the rypipe workspace"
 
@@ -262,7 +263,7 @@ The RecordParser has two methods:
     if in_record { sink.end_row(); }
     ```
 
-    See [Multi-line Record Adapter](building-adapters/examples.md#multi-line-adapter) for a
+    See [Multi-line Record Adapter](examples.md#multi-line-adapter) for a
     complete worked example.
 
 !!! tip "Continuations and comments"
@@ -295,86 +296,54 @@ call it directly, they use `LogSource` instead:
 
 ### `src/lib.rs` (Python bindings) { #python-bindings }
 
-```rust
-use arrow::pyarrow::ToPyArrow;
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
-use rypipe_core::{ExecutionPlan, FieldType, FilterPredicate, Pipeline};
-use std::collections::HashMap;
+The shared helper validates the plan and builds every supported predicate.
+Detach Python while parsing, then export the result as a table:
 
-// Internal function: called by LogSource._read_arrow().
-// Users never call this directly. The kwargs are the merged pushdown plan
-// that fused pipeline stages produce (rename, drop, cast, filter, ...).
+```rust
+use std::collections::HashMap;
+use pyo3::prelude::*;
+use rypipe_core::Pipeline;
+use rypipe_python::{
+    execution_plan_from_kwargs, py_err_from_rypipe, record_batches_to_pyarrow_table,
+};
+
 #[pyfunction]
-#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None, field_types=None, schema=None, auto_dict=false, use_mmap=false, prefault=false))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None,
+    field_types=None, dictionary_columns=None, schema=None, auto_dict=false,
+    auto_dict_threshold=None, auto_dict_max_size=None, strict_types=false,
+    max_split_chunks=None, observer=None, use_mmap=false, prefault=false))]
 fn read_log(
+    py: Python<'_>,
     path: String,
     field_mapping: Option<HashMap<String, String>>,
     drop_fields: Option<Vec<String>>,
-    filter: Option<HashMap<String, String>>,
+    filter: Option<Bound<'_, PyAny>>,
     field_types: Option<HashMap<String, String>>,
+    dictionary_columns: Option<Vec<String>>,
     schema: Option<Vec<String>>,
     auto_dict: bool,
+    auto_dict_threshold: Option<f64>,
+    auto_dict_max_size: Option<usize>,
+    strict_types: bool,
+    max_split_chunks: Option<usize>,
+    observer: Option<Bound<'_, PyAny>>,
     use_mmap: bool,
     prefault: bool,
 ) -> PyResult<Py<PyAny>> {
-    let mut plan = ExecutionPlan::new();
-    if let Some(map) = field_mapping {
-        plan.field_map = map.into_iter().collect();
-    }
-    if let Some(drop) = drop_fields {
-        plan.drop_fields = drop.into_iter().collect();
-    }
-    if let Some(s) = schema {
-        plan.schema_order = s;
-    }
-    plan.auto_dict = auto_dict;
-    if let Some(ft) = field_types {
-        for (name, type_str) in ft {
-            let ft = type_str.parse::<FieldType>().map_err(|_| {
-                PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
-            })?;
-            plan.field_types.insert(name, ft);
-        }
-    }
-    if let Some(f) = filter {
-        let field = f
-            .get("field")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'field' key"))?
-            .to_owned();
-        let op = f
-            .get("op")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'op' key"))?
-            .to_owned();
-        let value = f
-            .get("value")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'value' key"))?
-            .to_owned();
-        plan.filter = Some(match op.as_str() {
-            "==" | "eq" => FilterPredicate::Equal { field, value },
-            "!=" | "ne" => FilterPredicate::NotEqual { field, value },
-            other => return Err(PyValueError::new_err(format!("unsupported filter op {other:?}"))),
-        });
-    }
-
-    let batch = Pipeline::new(LogSplitter, LogParser)
-        .with_plan(plan)
-        .read_path(&path, use_mmap, prefault)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    // Export the RecordBatch to a pyarrow.Table over the C Data Interface.
-    Python::with_gil(|py| {
-        let pa = PyModule::import(py, "pyarrow")?;
-        let rb = batch.to_pyarrow(py)?;
-        let table = pa
-            .getattr("Table")?
-            .call_method1("from_batches", (vec![rb],))?;
-        Ok(table.into())
-    })
+    let plan = execution_plan_from_kwargs(
+        field_mapping, drop_fields, filter.as_ref(), field_types,
+        dictionary_columns, schema, auto_dict, auto_dict_threshold,
+        auto_dict_max_size, strict_types, max_split_chunks, observer.as_ref(),
+    )?;
+    let batch = py.detach(|| {
+        Pipeline::new(LogSplitter, LogParser)
+            .with_plan(plan)
+            .read_path(&path, use_mmap, prefault)
+    }).map_err(py_err_from_rypipe)?;
+    record_batches_to_pyarrow_table(py, &[batch]).map(|table| table.unbind())
 }
 
-// Python module definition
 #[pymodule]
 fn _rypipe_log(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_log, m)?)?;
@@ -382,31 +351,30 @@ fn _rypipe_log(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 ```
 
-This creates a Python module `rypipe_log._rypipe_log` with an internal
-`read_log` function. The user-facing API is `LogSource`, which calls
-`read_log` internally via `_read_arrow()`. The function must accept the
-full plan kwarg set: fused pipeline stages forward their pushdown options
-(rename, drop, cast, filter) as keyword arguments, and rejecting one
-breaks fusion.
+This creates `rypipe_log._rypipe_log.read_log`. The Python source calls it
+with construction options and fused pipeline options. The helper accepts 12
+plan arguments; `path`, `use_mmap`, and `prefault` belong to the reader.
 
-!!! warning "Missing kwargs = silent performance regression"
+!!! warning "Forward every plan option"
 
-    If your `read_log` signature is missing any of the9 kwargs (or you
-    forget to forward them), fused pipeline stages silently fall back to
-    Python execution. No error, no warning — just10-50x slower. The9 kwargs
-    must match exactly: `field_mapping`, `drop_fields`, `filter`,
-    `field_types`, `schema`, `auto_dict`, `use_mmap`, `prefault`, plus
-    `path`. This is the most common source of silent performance regression
-    in new adapters.
+    An unsupported keyword raises `TypeError`. Accepting `**kwargs` and
+    discarding options can silently change results. Use the shared helper
+    and test a pipeline with renaming, casting, dropping, and compound filters.
+    Stages outside the fusable prefix run after parsing in their original order.
 
-!!! note "Why is this80 lines of boilerplate?"
+!!! note "Local development before publication"
 
-    `rypipe-python` provides an `execution_plan_from_kwargs` helper that
-    eliminates this code, but it is **not published to crates.io** and its
-    lib name (`_rypipe`) causes a module path collision. Adapters depend on
-    `rypipe-core` only, so plan building is done manually. The80 lines are
-    stable — copy them once from the walkthrough and change only the function
-    name. The cargo-generate template includes this boilerplate pre-filled.
+    Use `rypipe_python = { package = "rypipe-python", version = "0.3.2" }`.
+    The dependency alias gives the helper a Rust name independent of its
+    Python extension name. Errors use the same Python classes across adapters.
+
+    Before matching crates are published, add local overrides:
+
+    ```toml
+    [patch.crates-io]
+    rypipe-core = { path = "/path/to/rypipe/crates/rypipe-core" }
+    rypipe-python = { path = "/path/to/rypipe/crates/rypipe-python" }
+    ```
 
 ## Step 5: Create the Python wrapper { #step-5-create-the-python-wrapper}
 
@@ -531,8 +499,8 @@ class LogSource(Source):
 !!! warning
 
     The `_read_arrow` method **must** forward `plan_overrides` to the
-    Rust reader. If you ignore them, fused pipeline stages silently fall back
-    to Python execution (10-50x slower than the Rust path).
+    Rust reader. If you ignore them, fused stage transformations are lost from
+    the plan. A reader that rejects the keywords raises `TypeError`.
 
 ### `rypipe_log/rypipe_adapter.py` { #adapter-py}
 
@@ -649,13 +617,14 @@ convenience for one-liner reads but does not support pipelines. Note that
 `age` came back as a real integer and only Alice survived the filter:
 both stages ran inside the Rust parse, not in Python afterward.
 
-## What just happened { #what-just-happened}
+## What the adapter did { #what-just-happened}
 
 1. **Splitter** found newline boundaries in the file.
 2. **RecordParser** parsed each chunk, calling `sink.put_field` for each
    field in each row.
 3. **Engine** accumulated values into Arrow columns.
-4. **Export** produced a `pyarrow.Table` with zero-copy.
+4. **Export** produced a `pyarrow.Table`; string and dictionary buffers move
+   without copying, while primitive arrays are copied into Arrow buffers.
 
 !!! tip
 
@@ -669,7 +638,7 @@ both stages ran inside the Rust parse, not in Python afterward.
 
 * [Python Adapter Wiring](python-wiring.md), stage and sink re-exports,
   adapter kwargs, engine selection, and streaming
-* [Rust Creation](rust-creation.md), deep dive into
+* [Rust Creation](rust-creation.md), details on
   Splitter, RecordParser, and ColumnarSink
 * [Schema](schema.md), declare columns for maximum
   performance
