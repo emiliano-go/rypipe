@@ -30,7 +30,7 @@ t1 = pipeline.to_pandas()
 t2 = pipeline.to_pandas()
 ```
 
-Pipelines do not cache: each sink re-runs the whole chain. Materialize once and reuse the result:
+Pipeline sinks cache their materialized result. Materialize once and reuse the result when sharing it across code paths:
 
 ```python
 df = pipeline.to_pandas()
@@ -38,8 +38,8 @@ t1 = df
 t2 = df
 ```
 
-Sources are different: `source.to_arrow()` caches the table, so repeated
-sinks on the same Source parse only once.
+The Pipeline cache is separate from the Source cache, so the original source
+table remains available for other pipelines.
 
 ## Ignoring `plan_overrides` { #ignoring-plan_overrides }
 
@@ -49,7 +49,9 @@ class MySource(Source):
         return my_rust_read(self.path, **kwargs)  # plan_overrides lost!
 ```
 
-If an adapter ignores `plan_overrides`, fused stages silently fall back to Python execution. Always forward `plan_overrides` to the Rust reader.
+If an adapter ignores `plan_overrides`, fused stage transformations are lost.
+Readers that reject the unexpected keywords raise `TypeError`. Always forward
+`plan_overrides` to the Rust reader.
 
 ## Wrong engine choice { #wrong-engine-choice }
 
@@ -214,7 +216,7 @@ source = MyAdapter("data.log", schema=["id", "ts", "amount", "status"])
 
 ## Summary { #summary }
 
-- Cache tables; do not re-run pipelines.
+- Reuse materialized tables; call `clear_cache()` when finished.
 - Forward `plan_overrides` in adapters.
 - Keep Python callables out of the hot path.
 - Match the engine mode to the file size and workload.
