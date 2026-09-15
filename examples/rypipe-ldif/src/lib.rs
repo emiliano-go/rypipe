@@ -1,10 +1,15 @@
 use std::borrow::Cow;
 
-use arrow::pyarrow::ToPyArrow;
-use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyModule;
-use rypipe_core::{ColumnarSink, ExecutionPlan, FieldType, FilterPredicate, Pipeline, RecordParser, Result, Splitter, Value};
+#[cfg(any(feature = "python", test))]
+use rypipe_core::Pipeline;
+use rypipe_core::{find_next_record_boundary, ColumnarSink, RecordParser, Result, Splitter, Value};
+#[cfg(feature = "python")]
+use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
+#[cfg(feature = "python")]
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -16,14 +21,7 @@ pub struct LdifSplitter;
 
 impl Splitter for LdifSplitter {
     fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
-        let rest = &bytes[from..];
-        // Scan for \n\n — the next record starts after the blank line.
-        for i in 0..rest.len().saturating_sub(1) {
-            if rest[i] == b'\n' && rest[i + 1] == b'\n' {
-                return Some(from + i + 2);
-            }
-        }
-        None
+        find_next_record_boundary(bytes, from, None, &[], true)
     }
 
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
@@ -36,11 +34,7 @@ impl Splitter for LdifSplitter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RecordParser: each line is "key: value", with continuation lines starting
-// with a single space.
-// ---------------------------------------------------------------------------
-
+/// Plain LDIF values; folded, base64, and URL values are unsupported.
 #[derive(Clone, Default)]
 pub struct LdifParser;
 
@@ -51,8 +45,8 @@ impl RecordParser for LdifParser {
     }
 
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
 
         let mut in_record = false;
 
@@ -65,9 +59,13 @@ impl RecordParser for LdifParser {
                 continue;
             }
 
-            // Continuation line (starts with single space) — skip for now
-            // (would append to previous value in a full implementation).
             if line.starts_with(' ') {
+                return Err(rypipe_core::Error::Parser(
+                    "LDIF folded continuation lines are unsupported".into(),
+                ));
+            }
+
+            if line.starts_with('#') {
                 continue;
             }
 
@@ -76,17 +74,20 @@ impl RecordParser for LdifParser {
                 in_record = true;
             }
 
-            // LDIF lines are "key: value" or "key:: base64value"
             if let Some(colon_pos) = line.find(':') {
                 let key = &line[..colon_pos];
                 let rest = &line[colon_pos + 1..];
-                // Skip base64-encoded values (key::) for simplicity
-                let value = if rest.starts_with(':') {
-                    &rest[1..]
-                } else {
-                    rest
-                };
-                let value = value.trim_start();
+                if rest.starts_with(':') {
+                    return Err(rypipe_core::Error::Parser(
+                        "LDIF base64 values are unsupported".into(),
+                    ));
+                }
+                if rest.starts_with('<') {
+                    return Err(rypipe_core::Error::Parser(
+                        "LDIF URL values are unsupported".into(),
+                    ));
+                }
+                let value = rest.trim_start_matches(' ');
 
                 if sink.wants(key) {
                     sink.put_field(key, Value::Str(Cow::Borrowed(value)));
@@ -106,73 +107,52 @@ impl RecordParser for LdifParser {
 // PyO3 bindings
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "python")]
 #[pyfunction]
-#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None, field_types=None, schema=None, auto_dict=false, use_mmap=false, prefault=false))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None, field_types=None, dictionary_columns=None, schema=None, auto_dict=false, auto_dict_threshold=None, auto_dict_max_size=None, strict_types=false, max_split_chunks=None, observer=None, use_mmap=false, prefault=false))]
 fn read_ldif(
+    py: Python<'_>,
     path: String,
     field_mapping: Option<HashMap<String, String>>,
     drop_fields: Option<Vec<String>>,
-    filter: Option<HashMap<String, String>>,
+    filter: Option<Bound<'_, PyAny>>,
     field_types: Option<HashMap<String, String>>,
+    dictionary_columns: Option<Vec<String>>,
     schema: Option<Vec<String>>,
     auto_dict: bool,
+    auto_dict_threshold: Option<f64>,
+    auto_dict_max_size: Option<usize>,
+    strict_types: bool,
+    max_split_chunks: Option<usize>,
+    observer: Option<Bound<'_, PyAny>>,
     use_mmap: bool,
     prefault: bool,
 ) -> PyResult<Py<PyAny>> {
-    let mut plan = ExecutionPlan::new();
-    if let Some(map) = field_mapping {
-        plan.field_map = map.into_iter().collect();
-    }
-    if let Some(drop) = drop_fields {
-        plan.drop_fields = drop.into_iter().collect();
-    }
-    if let Some(s) = schema {
-        plan.schema_order = s;
-    }
-    plan.auto_dict = auto_dict;
-    if let Some(ft) = field_types {
-        for (name, type_str) in ft {
-            let ft = type_str.parse::<FieldType>().map_err(|_| {
-                PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
-            })?;
-            plan.field_types.insert(name, ft);
-        }
-    }
-    if let Some(f) = filter {
-        let field = f
-            .get("field")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'field' key"))?
-            .to_owned();
-        let op = f
-            .get("op")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'op' key"))?
-            .to_owned();
-        let value = f
-            .get("value")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'value' key"))?
-            .to_owned();
-        plan.filter = Some(match op.as_str() {
-            "==" | "eq" => FilterPredicate::Equal { field, value },
-            "!=" | "ne" => FilterPredicate::NotEqual { field, value },
-            other => return Err(PyValueError::new_err(format!("unsupported filter op {other:?}"))),
-        });
-    }
-
-    let batch = Pipeline::new(LdifSplitter, LdifParser)
-        .with_plan(plan)
-        .read_path(&path, use_mmap, prefault)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    Python::with_gil(|py| {
-        let pa = PyModule::import(py, "pyarrow")?;
-        let rb = batch.to_pyarrow(py)?;
-        let table = pa
-            .getattr("Table")?
-            .call_method1("from_batches", (vec![rb],))?;
-        Ok(table.into())
-    })
+    let plan = execution_plan_from_kwargs(
+        field_mapping,
+        drop_fields,
+        filter.as_ref(),
+        field_types,
+        dictionary_columns,
+        schema,
+        auto_dict,
+        auto_dict_threshold,
+        auto_dict_max_size,
+        strict_types,
+        max_split_chunks,
+        observer.as_ref(),
+    )?;
+    let batch = py.detach(|| {
+        Pipeline::new(LdifSplitter, LdifParser)
+            .with_plan(plan)
+            .read_path(&path, use_mmap, prefault)
+            .map_err(rypipe_python::py_err_from_rypipe)
+    })?;
+    record_batches_to_pyarrow_table(py, &[batch]).map(|v| v.unbind())
 }
 
+#[cfg(feature = "python")]
 #[pymodule]
 fn _rypipe_ldif(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_ldif, m)?)?;
@@ -201,6 +181,33 @@ mod tests {
         assert_eq!(s.next_record_start(SAMPLE, first_boundary), None);
         // End of input
         assert_eq!(s.next_record_start(SAMPLE, SAMPLE.len()), None);
+    }
+
+    #[test]
+    fn splitter_handles_crlf_and_out_of_range_start() {
+        let input = b"dn: cn=one\r\ncn: one\r\n\r\ndn: cn=two\r\ncn: two\r\n";
+        assert_eq!(LdifSplitter.next_record_start(input, 0), Some(23));
+        assert_eq!(LdifSplitter.next_record_start(input, usize::MAX), None);
+    }
+
+    #[test]
+    fn parallel_matches_single_for_crlf_entries() {
+        let input = b"# header\r\ndn: cn=one\r\ncn: one\r\n\r\ndn: cn=two\r\ncn: two\r\n\r\ndn: cn=three\r\ncn: three\r\n";
+        let single = Pipeline::new(LdifSplitter, LdifParser)
+            .read_bytes(input)
+            .unwrap();
+        let parallel = Pipeline::new(LdifSplitter, LdifParser)
+            .read_bytes_par(input, 4)
+            .unwrap();
+        assert_eq!(single.num_rows(), 3);
+        assert_eq!(
+            parallel.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            3
+        );
+        let rendered = format!("{parallel:?}");
+        for value in ["cn=one", "cn=two", "cn=three"] {
+            assert!(rendered.contains(value));
+        }
     }
 
     #[test]

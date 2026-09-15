@@ -1,0 +1,21 @@
+[package]
+name = "rypipe-ldif"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "_rypipe_ldif"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["python"]
+python = ["dep:pyo3", "dep:rypipe_python"]
+
+[dependencies]
+rypipe-core = { path = "../../crates/rypipe-core", version = "0.3.2", features = ["mmap"] }
+rypipe_python = { package = "rypipe-python", path = "../../crates/rypipe-python", version = "0.3.2", optional = true }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], optional = true }
+memchr = "2"
+simdutf8 = "0.1"
