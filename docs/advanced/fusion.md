@@ -123,12 +123,19 @@ Fusable stages implement `_plan_kwargs()` and merge cleanly into an `ExecutionPl
 
 | Stage | Plan field | Notes |
 |-------|------------|-------|
-| `RenameFields` | `field_map` | Multiple renames merge into one map. |
+| `RenameFields` | `field_map` | A contiguous prefix merges into one map; repeated or out-of-order renames use the fallback path. |
 | `DropFields` | `drop_fields` | Merges as a set union. |
-| `CastTypes` | `field_types` | Later casts overwrite earlier ones for the same field. |
+| `CastTypes` | `field_types` | A contiguous prefix fuses; conflicting or mixed cast stages use the fallback path. |
 | `FilterRows` predicate | `filter` | Keyword form (`field`/`op`/`value` or `field_a`/`op`/`field_b`, including `op="regex"`), `is_null`, `is_type`, or an expression predicate built with the adapter's re-exported `col` (comparisons, `startswith`, `endswith`, `contains`, `matches`, `between`, `isin`, `not_in`, compound `&`/`|`/`~`); all are evaluated per-row during parse. |
 | `FilterRowsAny` / `FilterRowsAll` / `FilterRowsNot` | `filter` | `And`, `Or`, `Not` trees built from the same leaf shapes; evaluated per-row with short circuiting; fully fusable. |
 | `ObservedStage` (or any stage returning observer hooks) | `observer` | Hook dicts merge per-hook; callables for the same hook chain in stage order. |
+
+`CastTypes` treats `int`, `float`, `bool`, `date`, `datetime`, and `Decimal` as
+column types. Cached and direct execution reuse Rust's string conversions,
+so `"false"` becomes `False`, null values stay null, and decimal truncation
+matches a fresh read. Already typed Arrow columns use Arrow casts. Other
+callables, including `str`, run as Python functions. Mixed stages run outside
+the Rust plan without dropping their custom conversions.
 
 `FilterRows` is fusable when it uses a keyword-form predicate (`field`,
 `op`, `value` or `field_a`, `op`, `field_b`), or an expression predicate
@@ -145,7 +152,10 @@ Non-fusable stages still work, but they run over the Arrow table after the engin
 - `FilterRows` wrapping a plain lambda or named function (Python fallback only).
 - Custom stages that do not implement `_plan_kwargs()`.
 
-When non-fusable stages are present, `plan_split` still extracts every fusable stage (regardless of position) into the plan; the remaining stages run over the parsed Arrow batches in Python, with any trailing generic stages applied last over the dict stream.
+When non-fusable stages are present, only the valid contiguous fusable prefix is
+sent to the Rust plan. Out-of-order stages, repeated renames, and mixed
+`CastTypes` chains stop fusion at that point; remaining stages run over the
+materialized Arrow batches in Python.
 
 ## Inspecting `plan_overrides` in an adapter { #inspecting-plan_overrides-in-an-adapter }
 
@@ -181,7 +191,9 @@ let plan = ExecutionPlan::new()
     .filter_eq("status", "active");
 ```
 
-If an adapter ignores `plan_overrides`, fused stages silently fall back to Python execution over a full table. That is one of the most expensive anti-patterns.
+If an adapter ignores `plan_overrides`, fused stage transformations are absent
+from the Rust plan. A reader that rejects the unexpected keywords raises
+`TypeError`; forwarding the overrides preserves the requested transformations.
 
 ## Order of operations across the pipeline { #order-of-operations-across-the-pipeline }
 

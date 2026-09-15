@@ -100,7 +100,7 @@ submit chunk 3 ──────────► │ parse chunk │──► ch
 
 - **Backpressure**: the `sync_channel(max_in_flight)` blocks the main thread when the channel is full, preventing more than `threads × 2` chunks from being in flight at once.
 - **Ordering**: results arrive out of order (faster chunks finish first). The coordinator uses a `BTreeMap<u64, Result<RecordBatch>>` keyed by sequence number to deliver batches in file order.
-- **Memory**: each chunk's `TableBuilder` is dropped after its `RecordBatch` is sent. Peak memory is `budget + threads × 2 × chunk_size`, which stays near the configured budget.
+- **Memory**: active workers, queued batches, ordered results waiting for delivery, and input storage all contribute. The budget controls chunk sizing; it does not cap process RSS.
 - **Error handling**: if any chunk panics or returns an error, the entire stream is aborted. `catch_unwind` at the worker level prevents a single bad chunk from crashing the process.
 
 Use parallel streaming when:
