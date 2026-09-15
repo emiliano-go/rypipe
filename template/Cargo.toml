@@ -4,18 +4,14 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "{{description}}"
-repository = "https://github.com/user/{{project-name}}"
 
 [lib]
-name = "_{{project-name}}"
+name = "_{{crate_name}}"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rypipe-core = "0.3"
-arrow = { version = "=55.2.0", default-features = false, features = ["pyarrow", "ffi"] }
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
+rypipe-core = { version = "0.3.2", features = ["mmap"] }
+rypipe_python = { package = "rypipe-python", version = "0.3.2" }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
 simdutf8 = "0.1"
-
-[dev-dependencies]
-proptest = "1"
