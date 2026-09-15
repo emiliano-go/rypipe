@@ -1,10 +1,15 @@
 use std::borrow::Cow;
 
-use arrow::pyarrow::ToPyArrow;
-use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyModule;
-use rypipe_core::{ColumnarSink, ExecutionPlan, FieldType, FilterPredicate, Pipeline, RecordParser, Result, Splitter, Value};
+#[cfg(any(feature = "python", test))]
+use rypipe_core::Pipeline;
+use rypipe_core::{ColumnarSink, RecordParser, Result, Splitter, Value};
+#[cfg(feature = "python")]
+use rypipe_python::{execution_plan_from_kwargs, record_batches_to_pyarrow_table};
+#[cfg(feature = "python")]
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -16,7 +21,33 @@ pub struct IniSplitter;
 
 impl Splitter for IniSplitter {
     fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
-        memchr::memchr(b'\n', &bytes[from..]).map(|r| from + r + 1)
+        if from >= bytes.len() {
+            return None;
+        }
+        let mut start = bytes[..from]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |position| position + 1);
+        if start < from {
+            start = memchr::memchr(b'\n', &bytes[from..])
+                .map_or(bytes.len(), |position| from + position + 1);
+        }
+        while start < bytes.len() {
+            let end = memchr::memchr(b'\n', &bytes[start..])
+                .map_or(bytes.len(), |position| start + position);
+            if start != from
+                && bytes[start..end]
+                    .iter()
+                    .copied()
+                    .skip_while(|byte| byte.is_ascii_whitespace())
+                    .next()
+                    == Some(b'[')
+            {
+                return Some(start);
+            }
+            start = end.saturating_add(1);
+        }
+        None
     }
 
     fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
@@ -36,14 +67,13 @@ pub struct IniParser;
 
 impl RecordParser for IniParser {
     fn validate(&self, bytes: &[u8]) -> Result<()> {
-        simdutf8::basic::from_utf8(bytes)
-            .map_err(rypipe_core::Error::Utf8)?;
+        simdutf8::basic::from_utf8(bytes).map_err(rypipe_core::Error::Utf8)?;
         Ok(())
     }
 
     fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| rypipe_core::Error::Plan(e.to_string()))?;
 
         let mut current_section = String::new();
 
@@ -102,73 +132,52 @@ fn parse_kv(line: &str) -> Option<(&str, &str)> {
 // PyO3 bindings
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "python")]
 #[pyfunction]
-#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None, field_types=None, schema=None, auto_dict=false, use_mmap=false, prefault=false))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None, field_types=None, dictionary_columns=None, schema=None, auto_dict=false, auto_dict_threshold=None, auto_dict_max_size=None, strict_types=false, max_split_chunks=None, observer=None, use_mmap=false, prefault=false))]
 fn read_ini(
+    py: Python<'_>,
     path: String,
     field_mapping: Option<HashMap<String, String>>,
     drop_fields: Option<Vec<String>>,
-    filter: Option<HashMap<String, String>>,
+    filter: Option<Bound<'_, PyAny>>,
     field_types: Option<HashMap<String, String>>,
+    dictionary_columns: Option<Vec<String>>,
     schema: Option<Vec<String>>,
     auto_dict: bool,
+    auto_dict_threshold: Option<f64>,
+    auto_dict_max_size: Option<usize>,
+    strict_types: bool,
+    max_split_chunks: Option<usize>,
+    observer: Option<Bound<'_, PyAny>>,
     use_mmap: bool,
     prefault: bool,
 ) -> PyResult<Py<PyAny>> {
-    let mut plan = ExecutionPlan::new();
-    if let Some(map) = field_mapping {
-        plan.field_map = map.into_iter().collect();
-    }
-    if let Some(drop) = drop_fields {
-        plan.drop_fields = drop.into_iter().collect();
-    }
-    if let Some(s) = schema {
-        plan.schema_order = s;
-    }
-    plan.auto_dict = auto_dict;
-    if let Some(ft) = field_types {
-        for (name, type_str) in ft {
-            let ft = type_str.parse::<FieldType>().map_err(|_| {
-                PyValueError::new_err(format!("unknown field type '{type_str}' for '{name}'"))
-            })?;
-            plan.field_types.insert(name, ft);
-        }
-    }
-    if let Some(f) = filter {
-        let field = f
-            .get("field")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'field' key"))?
-            .to_owned();
-        let op = f
-            .get("op")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'op' key"))?
-            .to_owned();
-        let value = f
-            .get("value")
-            .ok_or_else(|| PyValueError::new_err("filter must include 'value' key"))?
-            .to_owned();
-        plan.filter = Some(match op.as_str() {
-            "==" | "eq" => FilterPredicate::Equal { field, value },
-            "!=" | "ne" => FilterPredicate::NotEqual { field, value },
-            other => return Err(PyValueError::new_err(format!("unsupported filter op {other:?}"))),
-        });
-    }
-
-    let batch = Pipeline::new(IniSplitter, IniParser)
-        .with_plan(plan)
-        .read_path(&path, use_mmap, prefault)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    Python::with_gil(|py| {
-        let pa = PyModule::import(py, "pyarrow")?;
-        let rb = batch.to_pyarrow(py)?;
-        let table = pa
-            .getattr("Table")?
-            .call_method1("from_batches", (vec![rb],))?;
-        Ok(table.into())
-    })
+    let plan = execution_plan_from_kwargs(
+        field_mapping,
+        drop_fields,
+        filter.as_ref(),
+        field_types,
+        dictionary_columns,
+        schema,
+        auto_dict,
+        auto_dict_threshold,
+        auto_dict_max_size,
+        strict_types,
+        max_split_chunks,
+        observer.as_ref(),
+    )?;
+    let batch = py.detach(|| {
+        Pipeline::new(IniSplitter, IniParser)
+            .with_plan(plan)
+            .read_path(&path, use_mmap, prefault)
+            .map_err(rypipe_python::py_err_from_rypipe)
+    })?;
+    record_batches_to_pyarrow_table(py, &[batch]).map(|v| v.unbind())
 }
 
+#[cfg(feature = "python")]
 #[pymodule]
 fn _rypipe_ini(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_ini, m)?)?;
@@ -193,6 +202,28 @@ mod tests {
         let first = s.next_record_start(SAMPLE, 0).unwrap();
         assert!(first > 0);
         assert_eq!(s.next_record_start(SAMPLE, SAMPLE.len()), None);
+    }
+
+    #[test]
+    fn splitter_rejects_out_of_range_start() {
+        assert_eq!(IniSplitter.next_record_start(SAMPLE, usize::MAX), None);
+    }
+
+    #[test]
+    fn parallel_sections_keep_their_declared_section() {
+        let input = b"; preface\r\n[one]\r\na = first\r\nb = second\r\n# gap\r\n[two]\r\na = third\r\nb: fourth\r\n";
+        let single = Pipeline::new(IniSplitter, IniParser)
+            .read_bytes(input)
+            .unwrap();
+        let parallel = Pipeline::new(IniSplitter, IniParser)
+            .read_bytes_par(input, 4)
+            .unwrap();
+        assert_eq!(single.num_rows(), 4);
+        assert_eq!(
+            parallel.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            4
+        );
+        assert!(!format!("{parallel:?}").contains("\"\""));
     }
 
     #[test]

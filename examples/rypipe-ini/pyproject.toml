@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "rypipe-ini"
+version = "0.1.0"
+dependencies = ["rypipe", "pyarrow>=15"]
+
+[tool.maturin]
+module-name = "rypipe_ini._rypipe_ini"
+python-source = "."
+features = ["pyo3/extension-module"]
