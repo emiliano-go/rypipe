@@ -22,6 +22,7 @@ classifiers = [
 pandas = ["pandas>=1.5"]
 polars = ["polars>=0.20"]
 all = ["rypipe[pandas,polars]"]
+docs = ["zensical", "seoslug>=2.0.1"]
 dev = [
     "pytest>=7",
     "maturin>=1.4,<2.0",
