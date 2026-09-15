@@ -102,8 +102,9 @@ for batch in source.iter_record_batches(memory="64MiB"):
   infrastructure. An adapter is two small traits, not a full engine.
   crxml (Crystal Reports XML) is the reference adapter that proved this model.
 
-- **Performance without compromise.** ~4.2 GB/s parallel, ~950 MB/s
-  single-threaded (Ryzen 7 5800X, crxml workloads). Zero-copy Arrow export.
+- **Measured performance.** On the documented 533 MB crxml workload, ~4.2 GB/s
+  parallel and ~950 MB/s single-threaded (Ryzen 7 5800X). Arrow export moves
+  string/dictionary buffers without copying; primitive arrays are copied.
   Predicate-first evaluation. Layout prediction via memcmp.
 
 - **Correctness by construction.** Differential testing, fuzz targets, property
