@@ -87,7 +87,9 @@ rypipe.read_batches(
 
 ## rypipe.iter_record_batches() { #rypipe-iter-record-batches }
 
-Stream a file into Arrow `RecordBatch` objects with constant memory.
+Stream a file into Arrow `RecordBatch` objects with bounded parser memory when
+the adapter supplies a streaming implementation. Otherwise the method warns
+and materializes the table before splitting it.
 
 ```python
 rypipe.iter_record_batches(
@@ -177,7 +179,8 @@ class Source(ABC):
         strict_types=False,            # bool: reject malformed data instead of nulling
         observer=None,                 # dict[str, callable] | None: row observer hooks
         use_mmap=True,                 # bool
-        batch_size=1024,               # int
+        batch_size=1024,               # int: Python-side batch size
+        **reader_options,              # adapter-specific reader options
     )
 ```
 
@@ -197,12 +200,17 @@ def _read_arrow(self, plan_overrides: dict | None = None) -> pyarrow.Table:
 | `.to_pandas(memory=None, dtype_backend="pyarrow", **kwargs)` | `pd.DataFrame` | Convert to pandas. Pass `memory=` for streaming, `threads` in `**kwargs`. |
 | `.to_polars(memory=None, **kwargs)` | `pl.DataFrame` | Convert to Polars. Pass `memory=` for streaming, `threads` in `**kwargs`. |
 | `.to_parquet(path, memory=None, **kwargs)` | `None` | Write to Parquet. Pass `memory=` for streaming, Parquet options in `**kwargs`. |
-| `.schema()` | `list[str]` | Column names from first row. |
+| `.schema()` | `list[str]` | Output column names from the materialized Arrow table; declared/projected schema is honored, including empty tables. |
 | `.clear_cache()` | `None` | Drop cached table. |
 | `.iter_arrow_batches(batch_size=None)` | `Iterator[RecordBatch]` | Yield batches. |
 | `.iter_record_batches(memory="64MiB", batch_size=None)` | `Iterator[RecordBatch]` | Stream batches. |
-| `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts. All values are strings; use `CastTypes` or `field_types` for real types. |
+| `.__iter__()` | `Iterator[dict]` | Iterate rows as dicts, preserving parsed Arrow/Python value types. |
 | `.__or__(stage)` | `Pipeline` | Pipe operator for stages. |
+
+Source options and stage mappings are copied at construction. Extra keyword
+arguments go to the adapter reader, for example `row_tag="Row"` for an XML
+adapter that supports it. Batch sizes and pandas `chunksize` must be positive
+integers; invalid values fail before reading the file.
 
 ### to_pandas() details { #to-pandas-details }
 
@@ -211,15 +219,15 @@ def _read_arrow(self, plan_overrides: dict | None = None) -> pyarrow.Table:
 source.to_pandas(dtype_backend="pyarrow")  # Arrow-backed dtypes (default)
 source.to_pandas(dtype_backend="numpy")    # NumPy-backed dtypes
 
-# Streaming (bounded memory)
+# Stream parsing; the returned DataFrame still holds all output
 source.to_pandas(memory="64MiB")
 source.to_pandas(memory="64MiB", threads=16)  # parallel streaming
 ```
 
-When `dtype_backend="pyarrow"` (default), string columns use
-`pd.ArrowDtype(pa.string())`, zero-copy from Arrow. When
-`dtype_backend="numpy"`, string columns use `pd.StringDtype()`, standard
-pandas strings.
+`dtype_backend="pyarrow"` passes `pd.ArrowDtype` to Arrow's pandas converter.
+`dtype_backend="numpy"` uses Arrow's default pandas conversion. Result dtypes
+follow the Arrow schema and installed pandas version. Other backend names
+raise `ValueError`.
 
 ### to_parquet() details { #to-parquet-details }
 
@@ -231,7 +239,7 @@ source.to_parquet("output.parquet", compression="snappy")
 source.to_parquet("output.parquet", compression="zstd", compression_level=9)
 source.to_parquet("output.parquet", row_group_size=100_000)
 
-# Streaming (bounded memory)
+# Stream when the adapter provides a streaming reader
 source.to_parquet("output.parquet", memory="64MiB")
 source.to_parquet("output.parquet", memory="64MiB", threads=16)  # parallel
 ```
@@ -242,7 +250,7 @@ Common options:
 |--------|------|---------|-------------|
 | `compression` | `str` | `"snappy"` | Compression codec: `"snappy"`, `"gzip"`, `"zstd"`, `"lz4"`, `"none"` |
 | `compression_level` | `int` | codec default | Compression level (codec-dependent) |
-| `row_group_size` | `int` | `64*1024` | Rows per row group |
+| `row_group_size` | `int` | Arrow writer default | Rows per row group |
 | `use_dictionary` | `bool \| list` | `True` | Enable/disable dictionary encoding |
 | `write_statistics` | `bool` | `True` | Write column statistics |
 
@@ -282,7 +290,7 @@ class CrystalXMLSource(Source):
         *,
         row_tag="Row",                   # str: XML element name for one row
         engine="auto",                   # "auto" | "stream" | "columnar" | "parallel"
-        threads=0,                       # int: parser threads (0 = all cores)
+        threads=None,                    # int | None: adapter default
         memory=None,                     # str | int | None: memory bound
         chunks=None,                     # int | None: number of parallel chunks
         max_split_chunks=None,           # int | None: max split chunks
@@ -323,11 +331,20 @@ class Pipeline:
     def __iter__(self) -> Iterator[dict]:
         """Iterate rows as dicts."""
 
+    def to_arrow(self) -> pyarrow.Table:
+        """Materialize and cache the transformed result."""
+
+    def schema(self) -> list[str]:
+        """Return output column names from the materialized Arrow result."""
+
+    def clear_cache(self) -> None:
+        """Drop the cached transformed result."""
+
     def iter_arrow_batches(self, batch_size=None) -> Iterator[RecordBatch]:
         """Yield Arrow RecordBatch objects."""
 
     def iter_record_batches(self, memory="64MiB", batch_size=None) -> Iterator[RecordBatch]:
-        """Stream batches with constant memory."""
+        """Stream batches with bounded parser memory when supported."""
 
     def to_pandas(self, memory=None, dtype_backend="pyarrow", **kwargs) -> pd.DataFrame:
         """Convert to pandas. Pass memory= for streaming."""
@@ -395,6 +412,17 @@ These are only available via the `col()` expression API, not via keyword args.
     - Nested filter specs (via `and`/`or`/`not`) are limited to **128 levels** of nesting.
 
 **Comparison operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`
+
+Comparisons reject null values and do not match numeric `NaN`. Typed columns compare
+literal values using the column type. String columns use lexical ordering.
+Mixed integer/float comparisons promote both values to `float64`, which can
+lose precision for large integers. This type coercion also applies to `==` and `!=`.
+
+`is_null` and `is_not_null` test presence explicitly. Negation and `not_in`
+can retain null rows, so use an explicit null check when null exclusion is
+required. Predicate and expression objects do not support Python `and`/`or`;
+compose them with `&`, `|`, and `~`, adding parentheses around each expression.
+String `length` counts Unicode code points.
 
 **Type check values:** `string`, `int64`, `float64`, `bool`, `date32`, `timestamp`, `decimal128`
 

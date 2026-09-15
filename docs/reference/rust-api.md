@@ -309,6 +309,9 @@ pub enum ArithOp { Add, Sub, Mul, Div }
 
 ## FilterPredicate { #filterpredicate }
 
+`Strip` requires `mode: TrimMode::Both`, `TrimMode::Start`, or `TrimMode::End`.
+Use `Both` for the previous behavior of trimming both ends.
+
 ```rust
 pub enum FilterPredicate {
     // Value comparison
@@ -321,7 +324,7 @@ pub enum FilterPredicate {
     StartsWith { field: String, value: String },
     EndsWith { field: String, value: String },
     Contains { field: String, value: String },
-    Strip { field: String, op: CompareOp, value: String },
+    Strip { field: String, mode: TrimMode, op: CompareOp, value: String },
     Lower { field: String, op: CompareOp, value: String },
     Upper { field: String, op: CompareOp, value: String },
     Replace { field: String, old: String, new: String, op: CompareOp, value: String },
@@ -481,7 +484,8 @@ where
 
 ## MemoryBudget { #memorybudget }
 
-Budget for bounded-memory streaming reads.
+Batch-sizing target for streaming reads. Input storage, buffer capacity, worker
+queues, and retained output add memory; this value does not cap process RSS.
 
 ```rust
 pub struct MemoryBudget {
@@ -561,6 +565,9 @@ pub fn execution_plan_from_kwargs(
     auto_dict: bool,
     auto_dict_threshold: Option<f64>,
     auto_dict_max_size: Option<usize>,
+    strict_types: bool,
+    max_split_chunks: Option<usize>,
+    observer: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ExecutionPlan>;
 ```
 
