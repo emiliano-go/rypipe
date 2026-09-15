@@ -32,9 +32,10 @@ separate packages. Install the engine plus the adapters you need.
   format share the same parallel scheduler, memory-bounded executor, Arrow
   export, and pushdown infrastructure. An adapter is two small traits, not a
   full engine.
-- **Performance without compromise.** Single-thread ~950 MB/s, parallel ~4.2 GB/s
-  (par128), streaming with explicit schema ~5 GB/s bounded. Zero-copy Arrow
-  export. Predicate first evaluation. Layout prediction via memcmp.
+- **Measured performance.** On documented workloads, single-thread ~950 MB/s,
+  parallel ~4.2 GB/s (par128), streaming with explicit schema ~5 GB/s bounded.
+  String/dictionary Arrow buffers move without copying; primitive exports copy.
+  Predicate first evaluation. Layout prediction via memcmp.
 - **Correctness by construction.** Differential testing, fuzz targets, property
   tests, and a tier-ladder profiler that decomposes every nanosecond of the hot
   path.
