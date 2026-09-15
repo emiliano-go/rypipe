@@ -26,13 +26,13 @@ pub use py_observer::PyObserver;
 // `ParseError`: malformed/unparseable input (including invalid UTF-8).
 // `PlanError`: invalid pushdown plan kwargs (bad ops, unknown types).
 // `MergeError`: chunk-merge conflict (e.g. type mismatch across chunks).
-pyo3::create_exception!(_rypipe, ParseError, pyo3::exceptions::PyException);
+pyo3::import_exception!(_rypipe.errors, ParseError);
 // Backward-compatible alias kept for consumers that previously caught
 // `XmlError` from crxml-style adapters.
-pyo3::create_exception!(_rypipe, XmlError, ParseError);
-pyo3::create_exception!(_rypipe, PlanError, pyo3::exceptions::PyException);
-pyo3::create_exception!(_rypipe, MergeError, pyo3::exceptions::PyException);
-pyo3::create_exception!(_rypipe, ParserError, pyo3::exceptions::PyException);
+pyo3::import_exception!(_rypipe.errors, XmlError);
+pyo3::import_exception!(_rypipe.errors, PlanError);
+pyo3::import_exception!(_rypipe.errors, MergeError);
+pyo3::import_exception!(_rypipe.errors, ParserError);
 
 /// Convert a `rypipe_core::Error` into an appropriate Python exception.
 pub fn py_err_from_rypipe(err: rypipe_core::Error) -> PyErr {
@@ -47,6 +47,85 @@ pub fn py_err_from_rypipe(err: rypipe_core::Error) -> PyErr {
             pyo3::exceptions::PyException::new_err(format!("Arrow error: {e}"))
         }
     }
+}
+
+#[pyfunction]
+fn _cast_strings(
+    py: Python<'_>,
+    table: &Bound<'_, PyAny>,
+    field_type: &str,
+) -> PyResult<Py<PyAny>> {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::DataType;
+    use arrow::pyarrow::{FromPyArrow, Table};
+    use rypipe_core::{ColumnarSink, ExecutionPlan, TableBuilder, Value};
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    let table = Table::from_pyarrow_bound(table)?;
+    if table.schema().fields().len() != 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "_cast_strings expects a one-column Arrow table",
+        ));
+    }
+    match table.schema().field(0).data_type() {
+        DataType::Utf8 | DataType::LargeUtf8 => {}
+        data_type => {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "_cast_strings expects string or large_string input, got {data_type}"
+            )));
+        }
+    }
+
+    let mut plan = ExecutionPlan::new();
+    plan.field_types.insert(
+        "value".into(),
+        field_type.parse().map_err(PlanError::new_err)?,
+    );
+    plan.schema_order = vec!["value".into()];
+    plan.strict_types = true;
+    let batch = py
+        .detach(move || {
+            let rows = table
+                .record_batches()
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum();
+            let mut builder = TableBuilder::with_plan(rows, Arc::new(plan));
+            for batch in table.record_batches() {
+                let column = batch.column(0);
+                match column.data_type() {
+                    DataType::Utf8 => {
+                        let values = column.as_string::<i32>();
+                        for i in 0..values.len() {
+                            builder.begin_row();
+                            if !values.is_null(i) {
+                                builder
+                                    .put_field("value", Value::Str(Cow::Borrowed(values.value(i))));
+                            }
+                            builder.end_row();
+                        }
+                    }
+                    DataType::LargeUtf8 => {
+                        let values = column.as_string::<i64>();
+                        for i in 0..values.len() {
+                            builder.begin_row();
+                            if !values.is_null(i) {
+                                builder
+                                    .put_field("value", Value::Str(Cow::Borrowed(values.value(i))));
+                            }
+                            builder.end_row();
+                        }
+                    }
+                    _ => unreachable!("validated one-column string table"),
+                }
+            }
+            builder.finish()
+        })
+        .map_err(py_err_from_rypipe)?;
+    record_batch_to_pyarrow(py, &batch)?
+        .call_method1("column", (0,))
+        .map(Bound::unbind)
 }
 
 /// Resolve the best engine mode based on file characteristics and user options.
@@ -189,7 +268,9 @@ fn _rypipe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("XmlError", m.py().get_type::<XmlError>())?;
     m.add("PlanError", m.py().get_type::<PlanError>())?;
     m.add("MergeError", m.py().get_type::<MergeError>())?;
+    m.add("ParserError", m.py().get_type::<ParserError>())?;
     m.add_function(wrap_pyfunction!(resolve_engine, m)?)?;
+    m.add_function(wrap_pyfunction!(_cast_strings, m)?)?;
     // Build provenance: the git SHA this .so was compiled from.
     m.add("__build_sha__", env!("RYPIPE_BUILD_SHA"))?;
     Ok(())

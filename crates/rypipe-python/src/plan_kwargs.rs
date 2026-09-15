@@ -52,7 +52,7 @@ pub fn execution_plan_from_kwargs(
     plan.auto_dict = auto_dict;
 
     if let Some(t) = auto_dict_threshold {
-        if !t.is_finite() || t < 0.0 || t > 1.0 {
+        if !(0.0..=1.0).contains(&t) {
             return Err(crate::PlanError::new_err(format!(
                 "auto_dict_threshold must be between 0.0 and 1.0, got {t}"
             )));
@@ -169,11 +169,6 @@ fn combine_list(
 /// comparison (`field_a`/`op`/`field_b`). Error messages match the original
 /// flat-kwarg implementation.
 fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
-    let op = f
-        .get_item("op")?
-        .ok_or_else(|| PlanError::new_err("filter must include 'op' key"))?
-        .extract::<String>()?;
-
     // Always-true / always-false
     if f.contains("always")? {
         let val: bool = f
@@ -190,6 +185,40 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             .ok_or_else(|| PlanError::new_err("filter 'not_field' key missing"))?
             .extract()?;
         return Ok(FilterPredicate::NotField { field });
+    }
+
+    let op = f
+        .get_item("op")?
+        .ok_or_else(|| PlanError::new_err("filter must include 'op' key"))?
+        .extract::<String>()?;
+
+    if let Some(arith_op) = f.get_item("arith_op")? {
+        let arith_op = arith_op.extract::<String>()?;
+        let arith_op = arith_op
+            .parse::<rypipe_core::plan::ArithOp>()
+            .map_err(|_| PlanError::new_err(format!("unsupported arithmetic op {arith_op:?}")))?;
+        let field = f
+            .get_item("field")?
+            .ok_or_else(|| PlanError::new_err("arithmetic filter requires 'field'"))?
+            .extract::<String>()?;
+        let arith_value = f
+            .get_item("arith_value")?
+            .ok_or_else(|| PlanError::new_err("arithmetic filter requires 'arith_value'"))?
+            .extract::<f64>()?;
+        let cmp_value = f
+            .get_item("value")?
+            .ok_or_else(|| PlanError::new_err("arithmetic filter requires 'value'"))?
+            .extract::<String>()?;
+        let cmp_op = op
+            .parse::<CompareOp>()
+            .map_err(|_| PlanError::new_err(format!("unsupported compare op {op:?}")))?;
+        return Ok(FilterPredicate::ArithmeticCompare {
+            field,
+            arith_op,
+            arith_value,
+            cmp_op,
+            cmp_value,
+        });
     }
 
     // Column-to-column filter: field_a + op + field_b
@@ -336,8 +365,6 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
         .ok_or_else(|| PlanError::new_err("filter must include 'value' key"))?
         .extract::<String>()?;
     Ok(match op.as_str() {
-        "!=" | "ne" => FilterPredicate::NotEqual { field, value },
-        "==" | "eq" => FilterPredicate::Equal { field, value },
         "starts_with" => FilterPredicate::StartsWith { field, value },
         "ends_with" => FilterPredicate::EndsWith { field, value },
         "contains" => FilterPredicate::Contains { field, value },
@@ -345,7 +372,7 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
             let cmp_op_str = if let Some(cmp) = f.get_item("cmp_op")? {
                 cmp.extract::<String>()?
             } else {
-                "=".to_string()
+                "==".to_string()
             };
             let cop = cmp_op_str.parse::<CompareOp>().map_err(|_| {
                 let valid = "==, eq, !=, ne, >, gt, <, lt, >=, ge, <=, le";
@@ -358,6 +385,12 @@ fn parse_leaf_spec(f: &Bound<'_, PyDict>) -> PyResult<FilterPredicate> {
                     field,
                     op: cop,
                     value,
+                    mode: match op.as_str() {
+                        "strip" => rypipe_core::TrimMode::Both,
+                        "lstrip" => rypipe_core::TrimMode::Start,
+                        "rstrip" => rypipe_core::TrimMode::End,
+                        _ => unreachable!(),
+                    },
                 },
                 "lower" => FilterPredicate::Lower {
                     field,
