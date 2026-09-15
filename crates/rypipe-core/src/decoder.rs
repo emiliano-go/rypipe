@@ -31,8 +31,8 @@ pub enum SplitMode {
 pub fn plan_chunk_count(bytes: usize, threads: usize, mode: SplitMode) -> usize {
     let by_size = bytes / MIN_CHUNK_BYTES.max(1);
     let cap = match mode {
-        SplitMode::Parallel => 16 * threads,
-        SplitMode::Streaming => 8 * threads,
+        SplitMode::Parallel => 16usize.saturating_mul(threads),
+        SplitMode::Streaming => 8usize.saturating_mul(threads),
     };
     by_size.min(cap).max(threads).min(MAX_SPLIT_CHUNKS)
 }
@@ -64,6 +64,9 @@ pub trait SkipRegionFinder: Send + Sync {
 /// Returns `false` immediately when the file contains none of the openers;
 /// check that once per chunk, not per candidate.
 pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) -> bool {
+    if at > bytes.len() {
+        return false;
+    }
     let openers = finder.openers();
     if openers.is_empty() {
         return false;
@@ -231,7 +234,19 @@ pub trait Splitter: Send + Sync {
 /// ```
 #[inline]
 pub fn is_continued_newline(bytes: &[u8], pos: usize) -> bool {
-    pos > 0 && bytes[pos - 1] == b'\\'
+    if pos == 0 || bytes.get(pos) != Some(&b'\n') {
+        return false;
+    }
+    let mut run = 0;
+    let mut cursor = pos;
+    if bytes[cursor - 1] == b'\r' {
+        cursor -= 1;
+    }
+    while cursor > 0 && bytes[cursor - 1] == b'\\' {
+        run += 1;
+        cursor -= 1;
+    }
+    run % 2 == 1
 }
 
 /// Scan forward from `from` to find the next record boundary.
@@ -239,7 +254,7 @@ pub fn is_continued_newline(bytes: &[u8], pos: usize) -> bool {
 /// This is the declarative counterpart to manual byte scanning. It handles:
 /// - **Continuations**: skips `\n` preceded by `continuation` (e.g. `b'\\'`)
 /// - **Comments**: skips lines starting with any prefix in `comment_prefixes`
-/// - **Blank-line mode**: splits on `\n\n` instead of every `\n`
+/// - **Blank-line mode**: splits after an empty LF or CRLF line
 ///
 /// Returns the byte position after the boundary newline, or `None` if no
 /// more boundaries exist.
@@ -263,27 +278,34 @@ pub fn find_next_record_boundary(
     comment_prefixes: &[&[u8]],
     blank_line_mode: bool,
 ) -> Option<usize> {
+    if continuation.is_none() && comment_prefixes.is_empty() && !blank_line_mode {
+        return memchr::memchr(b'\n', bytes.get(from..)?).map(|offset| from + offset + 1);
+    }
     let mut pos = from;
     while pos < bytes.len() {
         let rel = memchr::memchr(b'\n', &bytes[pos..])?;
         let nl_pos = pos + rel;
 
         // Skip continued newlines (preceded by continuation character)
-        if continuation.is_some() && is_continued_newline(bytes, nl_pos) {
+        let continued = |newline: usize| {
+            continuation.is_some_and(|character| {
+                let end = if newline > 0 && bytes[newline - 1] == b'\r' {
+                    newline - 1
+                } else {
+                    newline
+                };
+                end > 0
+                    && bytes[end - 1] == character
+                    && (character != b'\\' || is_continued_newline(bytes, newline))
+            })
+        };
+        if continued(nl_pos) {
             pos = nl_pos + 1;
             continue;
         }
 
         // Compute line start for comment check
-        let line_start = if nl_pos == 0 {
-            0
-        } else {
-            bytes[..nl_pos]
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map(|p| p + 1)
-                .unwrap_or(0)
-        };
+        let line_start = memchr::memrchr(b'\n', &bytes[..nl_pos]).map_or(0, |p| p + 1);
 
         // Skip comment lines
         if !comment_prefixes.is_empty() {
@@ -299,9 +321,16 @@ pub fn find_next_record_boundary(
 
         // Blank-line mode: split on empty lines
         if blank_line_mode {
-            let next = nl_pos + 1;
-            if next < bytes.len() && bytes[next] == b'\n' {
-                return Some(next + 1);
+            let line = &bytes[line_start..nl_pos];
+            if line_start > 0 && (line.is_empty() || line == b"\r") && !continued(line_start - 1) {
+                let previous_start =
+                    memchr::memrchr(b'\n', &bytes[..line_start - 1]).map_or(0, |p| p + 1);
+                if !comment_prefixes
+                    .iter()
+                    .any(|prefix| bytes[previous_start..line_start - 1].starts_with(prefix))
+                {
+                    return Some(nl_pos + 1);
+                }
             }
             pos = nl_pos + 1;
             continue;
