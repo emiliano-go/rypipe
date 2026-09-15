@@ -1,5 +1,6 @@
 #[cfg(test)]
 use std::borrow::Cow;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 #[cfg(feature = "profile")]
@@ -408,6 +409,36 @@ impl TableBuilder {
     /// This is also available as the `ColumnarSink::finish` trait method.
     pub fn finish(&mut self) -> Result<RecordBatch> {
         ColumnarSink::finish(self)
+    }
+
+    pub(crate) fn prepare_finish(&mut self) -> Result<()> {
+        if let Some(err) = self.unknown_error.take() {
+            return Err(crate::Error::Merge(err));
+        }
+        if let Some(err) = self.strict_error.take() {
+            return Err(err);
+        }
+        if let Some(ref observer) = self.plan.observer {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                observer.on_chunk_finished(
+                    self.rows_accepted + self.rows_rejected,
+                    self.rows_accepted,
+                    self.rows_rejected,
+                );
+            }));
+            if let Err(payload) = result {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                return Err(crate::Error::Parser(format!(
+                    "observer panicked at chunk completion: {message}"
+                )));
+            }
+        }
+        self.normalize();
+        Ok(())
     }
 
     /// Reset all data while preserving the plan and estimated rows.
@@ -900,13 +931,49 @@ impl TableBuilder {
     }
 
     fn get_buffered_str(&self, field: &str) -> Option<String> {
-        match self.get_buffered_value(field) {
-            Some(Value::Str(s)) => Some(s.to_string()),
-            Some(Value::Int64(i)) => Some(i.to_string()),
-            Some(Value::Float64(f)) => Some(f.to_string()),
-            Some(Value::Bool(b)) => Some(b.to_string()),
-            Some(v) => Some(format!("{:?}", v)),
-            None => None,
+        let value = self.get_buffered_value(field)?;
+        let resolved = self.plan.resolve_field(field)?;
+        match self.plan.column_type(resolved) {
+            FieldType::Int64 => match value {
+                Value::Str(v) => v.parse::<i64>().ok().map(|v| v.to_string()),
+                Value::Int64(v) => Some(v.to_string()),
+                _ => None,
+            },
+            FieldType::Float64 => match value {
+                Value::Str(v) => v.parse::<f64>().ok().map(|v| v.to_string()),
+                Value::Int64(v) => Some(v.to_string()),
+                Value::Float64(v) => Some(v.to_string()),
+                _ => None,
+            },
+            FieldType::Boolean => match value {
+                Value::Str(v) => v.parse::<bool>().ok().map(|v| v.to_string()),
+                Value::Bool(v) => Some(v.to_string()),
+                _ => None,
+            },
+            FieldType::Decimal128(scale) => match value {
+                Value::Str(v) => crate::columnar::parse_decimal128(v, scale),
+                _ => None,
+            }
+            .map(|v| crate::columnar::format_decimal128(v, scale)),
+            FieldType::Date32 => match value {
+                Value::Str(v) => crate::columnar::parse_date32(v),
+                Value::Date32(v) => Some(*v),
+                _ => None,
+            }
+            .map(crate::columnar::format_date32),
+            FieldType::Timestamp(unit, format) => match value {
+                Value::Str(v) => crate::columnar::parse_timestamp(v, unit, format.as_deref()),
+                Value::Timestamp(v) => Some(*v),
+                _ => None,
+            }
+            .map(|v| crate::columnar::format_timestamp(v, unit)),
+            FieldType::String | FieldType::Dictionary => match value {
+                Value::Str(s) => Some(s.to_string()),
+                Value::Int64(i) => Some(i.to_string()),
+                Value::Float64(f) => Some(f.to_string()),
+                Value::Bool(b) => Some(b.to_string()),
+                v => Some(format!("{v:?}")),
+            },
         }
     }
 
@@ -959,6 +1026,57 @@ impl TableBuilder {
                 op,
                 field_b,
             } => {
+                let type_a = tb
+                    .plan
+                    .column_type(tb.plan.resolve_field(field_a).unwrap_or(field_a.as_str()));
+                let type_b = tb
+                    .plan
+                    .column_type(tb.plan.resolve_field(field_b).unwrap_or(field_b.as_str()));
+                let compatible = match (&type_a, &type_b) {
+                    (
+                        FieldType::Int64 | FieldType::Float64,
+                        FieldType::Int64 | FieldType::Float64,
+                    )
+                    | (FieldType::Decimal128(_), FieldType::Decimal128(_)) => true,
+                    (FieldType::Timestamp(a, _), FieldType::Timestamp(b, _)) => a == b,
+                    _ => type_a == type_b,
+                };
+                if !compatible {
+                    return PredicateState::Fail;
+                }
+                let decimal_scale = |field: &str| {
+                    let field = tb.plan.resolve_field(field).unwrap_or(field);
+                    match tb.plan.column_type(field) {
+                        FieldType::Decimal128(scale) => Some(scale),
+                        _ => None,
+                    }
+                };
+                if let (Some(a_scale), Some(b_scale)) =
+                    (decimal_scale(field_a), decimal_scale(field_b))
+                {
+                    return match (tb.get_buffered_str(field_a), tb.get_buffered_str(field_b)) {
+                        (Some(a), Some(b)) => {
+                            let order = crate::columnar::parse_decimal128(&a, a_scale)
+                                .zip(crate::columnar::parse_decimal128(&b, b_scale))
+                                .map(|(a, b)| {
+                                    crate::plan::compare_decimal128(a, a_scale, b, b_scale)
+                                });
+                            if order.is_some_and(|order| match op {
+                                crate::plan::CompareOp::Gt => order == std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Lt => order == std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Ge => order != std::cmp::Ordering::Less,
+                                crate::plan::CompareOp::Le => order != std::cmp::Ordering::Greater,
+                                crate::plan::CompareOp::Eq => order == std::cmp::Ordering::Equal,
+                                crate::plan::CompareOp::Ne => order != std::cmp::Ordering::Equal,
+                            }) {
+                                PredicateState::Pass
+                            } else {
+                                PredicateState::Fail
+                            }
+                        }
+                        _ => PredicateState::Undecided,
+                    };
+                }
                 let normalize = |field: &str, value: &Value<'static>| {
                     let field = tb.plan.resolve_field(field).unwrap_or(field);
                     match tb.plan.column_type(field) {
@@ -988,12 +1106,7 @@ impl TableBuilder {
                             _ => Some(value.clone()),
                         },
                         FieldType::String | FieldType::Dictionary => Some(value.clone()),
-                        FieldType::Decimal128(_) => value.as_str().and_then(|s| {
-                            s.trim()
-                                .parse::<i128>()
-                                .ok()
-                                .map(|n| Value::Int64(n as i64))
-                        }),
+                        FieldType::Decimal128(_) => None,
                     }
                 };
                 let va = tb
@@ -1125,11 +1238,14 @@ impl TableBuilder {
                             (crate::value::Value::Bool(a), crate::value::Value::Bool(b)) => {
                                 Some(a.cmp(b))
                             }
-                            _ => {
-                                let av = format!("{:?}", a);
-                                let bv = format!("{:?}", b);
-                                Some(av.cmp(&bv))
+                            (crate::value::Value::Date32(a), crate::value::Value::Date32(b)) => {
+                                Some(a.cmp(b))
                             }
+                            (
+                                crate::value::Value::Timestamp(a),
+                                crate::value::Value::Timestamp(b),
+                            ) => Some(a.cmp(b)),
+                            _ => None,
                         };
                         let pass = ord.is_some_and(|ord| match op {
                             crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
@@ -1332,10 +1448,19 @@ impl TableBuilder {
                 }
                 None => PredicateState::Undecided,
             },
-            FilterPredicate::Strip { field, op, value } => match tb.get_buffered_str(field) {
+            FilterPredicate::Strip {
+                field,
+                op,
+                value,
+                mode,
+            } => match tb.get_buffered_str(field) {
                 Some(actual) => {
-                    let transformed = actual.trim().to_string();
-                    match transformed.as_str().partial_cmp(value.as_str()) {
+                    let transformed = match mode {
+                        crate::plan::TrimMode::Both => actual.trim(),
+                        crate::plan::TrimMode::Start => actual.trim_start(),
+                        crate::plan::TrimMode::End => actual.trim_end(),
+                    };
+                    match transformed.partial_cmp(value.as_str()) {
                         Some(ord) => {
                             let pass = match op {
                                 crate::plan::CompareOp::Gt => ord == std::cmp::Ordering::Greater,
@@ -1436,7 +1561,7 @@ impl TableBuilder {
             },
             FilterPredicate::Length { field, op, value } => match tb.get_buffered_str(field) {
                 Some(actual) => {
-                    let len = actual.len() as f64;
+                    let len = actual.chars().count() as f64;
                     let cmp_val = match value.parse::<f64>() {
                         Ok(v) => v,
                         Err(_) => return PredicateState::Fail,
@@ -2230,20 +2355,7 @@ impl ColumnarSink for TableBuilder {
 
     #[inline]
     fn finish(&mut self) -> Result<RecordBatch> {
-        if let Some(err) = self.unknown_error.take() {
-            return Err(crate::Error::Merge(err));
-        }
-        if let Some(err) = self.strict_error.take() {
-            return Err(err);
-        }
-        if let Some(ref obs) = self.plan.observer {
-            obs.on_chunk_finished(
-                self.rows_accepted + self.rows_rejected,
-                self.rows_accepted,
-                self.rows_rejected,
-            );
-        }
-        self.normalize();
+        self.prepare_finish()?;
 
         if self.column_order.is_empty() {
             let schema = Arc::new(Schema::empty());
