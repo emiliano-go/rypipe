@@ -229,7 +229,7 @@ unsafe fn mask64_sse2(p: *const u8, needle: u8) -> u64 {
     mask
 }
 
-#[expect(dead_code, reason = "fallback for non-x86_64 targets")]
+#[cfg(any(not(target_arch = "x86_64"), test))]
 /// # Safety
 ///
 /// `p` must point to at least 64 readable bytes.
@@ -376,12 +376,26 @@ mod tests {
 
     #[test]
     fn avx2_sse2_scalar_parity() {
-        // Force scalar vs avx2 parity via direct mask64 calls are internal;
-        // equivalence test already covers. This just ensures tail handling same.
-        let delims: &'static [u8] = b"=";
-        let buf = b"a=b=c";
-        let mut bm = BlockMasks::new(buf, delims);
-        assert_eq!(bm.next(0, b'='), Some(1));
-        assert_eq!(bm.next(2, b'='), Some(3));
+        let mut bytes = [0u8; 128];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = (i % 17) as u8;
+        }
+        for offset in 0..64 {
+            for needle in 0..=17 {
+                // Every pointer has at least 64 readable bytes, including unaligned offsets.
+                unsafe {
+                    let ptr = bytes.as_ptr().add(offset);
+                    let expected = mask64_scalar(ptr, needle);
+                    assert_eq!(mask64(ptr, needle), expected);
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        assert_eq!(mask64_sse2(ptr, needle), expected);
+                        if has_avx2() {
+                            assert_eq!(mask64_avx2(ptr, needle), expected);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
