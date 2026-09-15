@@ -2,8 +2,9 @@
 
 By default, `to_arrow()` parses the whole file into memory. For files
 larger than your RAM, stream instead: **rypipe** reads the file in bounded
-chunks and yields one Arrow `RecordBatch` at a time, so peak memory stays
-roughly constant no matter how big the file is.
+chunks and yields one Arrow `RecordBatch` at a time. Parser memory stays within
+the configured budget when the adapter supplies a streaming implementation;
+fallback adapters materialize the table first.
 
 The entry point is `iter_record_batches()`:
 
@@ -16,8 +17,9 @@ for batch in src.iter_record_batches(memory="64MB"):
     print(batch.num_rows)
 ```
 
-The examples below run on `report.xml` unchanged; the patterns are
-identical for a 50 GB file.
+The examples below run on `report.xml`; the same iterator pattern applies to
+larger inputs when the adapter supports streaming. Collected output still uses
+memory proportional to its size.
 
 ## The memory parameter { #memory-parameter }
 
@@ -32,8 +34,8 @@ src.iter_record_batches(memory=67_108_864)  # 64 MB in bytes
 
 Supported units: `B`, `KB`, `MB`, `GB`, `TB` (1024-based, case-insensitive,
 no space between the number and the unit). The `KiB`/`MiB` binary forms are
-not accepted; `"64MiB"` raises `invalid memory`. Peak memory is
-approximately the budget plus one batch and the export buffer.
+not accepted; `"64MiB"` raises `invalid memory`. The budget guides batch sizing;
+input storage, worker queues, export buffers, and Python allocations add memory.
 
 !!! note
 
@@ -154,9 +156,9 @@ for batch in src.iter_record_batches(memory="64MB"):
 
 !!! note
 
-    You can also pass `memory=` to the `CrystalXMLSource` constructor. Then
-    even `to_arrow()` stays within the budget. See
-    [Configuration](configuration.md#source-constructor-options).
+    Adapter-specific constructor options may select a streaming reader, but
+    `to_arrow()` still returns and caches a complete table. Use
+    `iter_record_batches()` when the final result must not be materialized.
 
 ## Recap { #recap }
 

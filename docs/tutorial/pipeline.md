@@ -148,7 +148,7 @@ With fusion:     Parse (rename + filter + cast in Rust) → Table
 Fused stages run at parsing speed and never touch Python. You do not
 have to do anything: the pipeline splits fusable from non-fusable stages
 automatically every time you materialize it. See
-[Pushdown Fusion](../advanced/fusion.md) for the deep dive.
+[Pushdown Fusion](../advanced/fusion.md) for implementation details.
 
 </details>
 

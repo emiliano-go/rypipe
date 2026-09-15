@@ -9,36 +9,34 @@ with sink *functions*. This page shows one short example of each.
 | Goal | Call |
 |------|------|
 | Get a `pyarrow.Table` | `src.to_arrow()` |
+| Get a pipeline `pyarrow.Table` | `pipeline.to_arrow()` |
 | Get a pandas DataFrame | `src.to_pandas()` |
 | Get a Polars DataFrame | `src.to_polars()` |
 | Write a Parquet file | `src.to_parquet(path)` |
 | Get rows from a pipeline | `collect(pipeline)` |
 | Get a DataFrame from a pipeline | `to_pandas(pipeline)` |
 | Write a pipeline to CSV | `to_csv(pipeline, path)` |
+| Write a pipeline to Parquet | `to_parquet(pipeline, path)` |
 | Free the cached table | `src.clear_cache()` |
+| Free a cached pipeline result | `pipeline.clear_cache()` |
 
-Source methods and pipeline functions differ in what they re-run. Source
-methods parse the file once and cache the Arrow table, so repeated calls
-are cheap; they are the right choice when you do several things with the
-same file. Pipeline functions re-run the pipeline on every call, which is
-fine for small filtered subsets but wasteful in a loop. Between the
-DataFrame sinks, pick the library your downstream code already uses:
-`to_arrow()` is the zero-copy baseline, while `to_pandas()` and
+Ordinary materializing Source and Pipeline sink methods cache their Arrow
+result, so repeated calls are cheap. Iteration and `memory=` streaming consume
+the pipeline without creating that cache. A Pipeline keeps its transformed
+result separately from the Source cache. Function-style materializing sinks
+use the same cache when given a Pipeline.
+For DataFrames, pick the library your downstream code already uses:
+`to_arrow()` is the lowest-copy baseline (primitive arrays still copy), while `to_pandas()` and
 `to_polars()` pay a conversion. For files too large to hold in memory,
 skip all of these and stream with `iter_record_batches()` (see
 [Streaming](streaming.md#streaming)).
 
-!!! warning "Pipeline vs Source: why `pipeline.to_arrow()` does not exist"
+!!! note "Pipeline vs Source"
 
-    Source methods (`.to_arrow()`, `.to_pandas()`, `.to_polars()`) parse the
-    file once and cache the result. A Pipeline is a lazy chain of stages —
-    it has not parsed anything yet. Giving it `.to_arrow()` would
-    implicitly materialize the full table on every call, which defeats the
-    purpose of lazy evaluation and caching. Instead, pipeline sinks are
-    *functions*: `to_pandas(pipeline)`, `to_arrow(pipeline)`,
-    `collect(pipeline)`. They run the pipeline and return the result, but do
-    not cache it. If you call the same pipeline twice, it re-parses both
-    times. Collect first if you need the result more than once.
+    Ordinary materializing sinks parse once and cache the result. A Pipeline
+    caches its transformed table; subsequent sinks reuse it. Iteration reuses
+    an existing cache but does not create one. Use `to_arrow(pipeline)`,
+    `to_pandas(pipeline)`, or `collect(pipeline)` for function-style sinks.
 
 All examples assume:
 
@@ -152,8 +150,9 @@ to_csv(pipeline, "active.csv")
 
 !!! tip
 
-    Reading the same pipeline twice re-runs it. If you need the rows more
-    than once, `collect()` them into a list first.
+    After a materializing sink creates the cache, later ordinary sinks reuse it.
+    Iteration and streaming may run again. Call `clear_cache()` when the result
+    is no longer needed.
 
 !!! tip "Streaming sinks"
 
@@ -165,8 +164,11 @@ to_csv(pipeline, "active.csv")
 
 * Source methods: `.to_arrow()`, `.to_pandas()`,
   `.to_polars()`, `.to_parquet(path)`, `.clear_cache()`.
-* Pipeline functions: `collect()`, `to_pandas()`, `to_csv()`.
-* Source results are cached; pipelines re-run each time you consume them.
+* Pipeline methods: `.to_arrow()`, `.to_pandas()`, `.to_polars()`,
+  `.to_parquet(path)`, `.clear_cache()`.
+* Pipeline functions: `collect()`, `to_pandas()`, `to_csv()`, `to_parquet()`.
+* Source and Pipeline results are cached separately; call `.clear_cache()` to
+  release either materialized result.
 * In ETL loops over many files, call `.clear_cache()` after each file's
   final sink to free its table.
 * Parameter details live in the

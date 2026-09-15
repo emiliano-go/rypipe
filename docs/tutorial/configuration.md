@@ -14,7 +14,7 @@ src = CrystalXMLSource(
     "report.xml",
     row_tag="Details",          # str: which XML element is one row
     engine="auto",              # "auto", "stream", "columnar", "parallel"
-    threads=0,                  # int: parser threads (0 = all cores)
+    threads=None,               # int | None: adapter default; use os.cpu_count() for all cores
     memory=None,                # str | int: bound memory, e.g. "512MB"
     field_mapping=None,         # dict[str, str]: rename columns
     drop_fields=None,           # list[str]: skip columns entirely
@@ -24,7 +24,7 @@ src = CrystalXMLSource(
     schema=None,                # list[str]: project exactly these columns, in this order
     auto_dict=False,            # bool: auto dictionary-encode low-cardinality strings
     use_mmap=True,              # bool: memory-mapped file I/O
-    batch_size=1024,            # int: rows per internal batch
+    batch_size=1024,            # int: Python-side batch size for iteration/export
 )
 ```
 
