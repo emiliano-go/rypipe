@@ -7,6 +7,7 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 
 use crate::arrow_export::apply_compare_filter;
+use crate::budget::{BudgetLedger, StreamStats};
 use crate::consumer::CollectingConsumer;
 use crate::decoder::{split_points_to_ranges, RecordParser, Splitter};
 use crate::engine::TableBuilder;
@@ -92,6 +93,13 @@ impl BoundedExecutor {
         self
     }
 
+    /// Payload bytes the executor targets per emitted batch. Exported
+    /// batches are exact-sized, so a single-record batch larger than this
+    /// is a flagged oversize batch (see [`StreamStats::oversize_batches`]).
+    fn batch_target_bytes(&self) -> usize {
+        (self.budget.bytes() / 64).max(1)
+    }
+
     /// Derive chunk ranges and batch sizing from an in-memory sample of the
     /// input. Returns `(chunk_ranges, rows_per_batch, bytes_per_row)`.
     fn plan_chunks(
@@ -103,7 +111,7 @@ impl BoundedExecutor {
             .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
             .max(1);
         // Input, growing columns, merge buffers and Arrow output overlap.
-        let batch_bytes = (self.budget.bytes() / 64).max(1);
+        let batch_bytes = self.batch_target_bytes();
         let total_rows_est = bytes.len() / bytes_per_row;
         let rows_per_batch = (batch_bytes / bytes_per_row)
             .max(1)
@@ -155,13 +163,26 @@ impl BoundedExecutor {
         mut engine: TableBuilder,
         plan: &ExecutionPlan,
         consumer: &mut C,
+        ledger: &mut BudgetLedger,
+        stats: &mut StreamStats,
     ) -> Result<()> {
         let mut batch = engine.finish()?;
         if let Some(ref filter) = plan.filter {
             batch = apply_compare_filter(batch, filter)?;
         }
-        self.budget.share(4).check(batch.get_array_memory_size())?;
-        consumer.consume(batch)
+        let batch_bytes = batch.get_array_memory_size();
+        self.budget.share(4).check(batch_bytes)?;
+        if batch.num_rows() == 1 && batch_bytes > self.batch_target_bytes() {
+            stats.oversize_batches += 1;
+        }
+        let rows = batch.num_rows();
+        ledger.charge_in_flight(batch_bytes);
+        let res = consumer.consume(batch);
+        ledger.release_in_flight(batch_bytes);
+        res?;
+        stats.batches += 1;
+        stats.rows += rows;
+        Ok(())
     }
 
     fn consume_chunks<I, C>(
@@ -170,6 +191,8 @@ impl BoundedExecutor {
         rows_per_batch: usize,
         plan: Arc<ExecutionPlan>,
         consumer: &mut C,
+        ledger: &mut BudgetLedger,
+        stats: &mut StreamStats,
     ) -> Result<()>
     where
         I: IntoIterator<Item = Result<TableBuilder>>,
@@ -181,6 +204,11 @@ impl BoundedExecutor {
         for chunk_engine in chunks {
             let chunk_engine = chunk_engine?;
             let chunk_rows = chunk_engine.num_rows();
+            ledger.set_builders(
+                batch_engine
+                    .capacity_bytes()
+                    .saturating_add(chunk_engine.capacity_bytes()),
+            );
             let rows_per_batch = rows_per_batch.min(
                 (self.budget.bytes() / 8)
                     .saturating_mul(chunk_rows)
@@ -195,11 +223,13 @@ impl BoundedExecutor {
                     > self.budget.bytes() / 4
             {
                 let batch = batch_engine.split_off(batch_engine.num_rows());
-                self.consume_batch(batch, &plan, consumer)?;
+                self.consume_batch(batch, &plan, consumer, ledger, stats)?;
+                ledger.set_builders(batch_engine.capacity_bytes());
                 rows_in_batch = 0;
             }
             batch_engine.extend(chunk_engine)?;
             batch_engine.check_memory_budget()?;
+            ledger.set_builders(batch_engine.capacity_bytes());
             rows_in_batch += chunk_rows;
             while rows_in_batch >= rows_per_batch
                 || batch_engine.bytes_used() >= self.budget.bytes()
@@ -217,7 +247,8 @@ impl BoundedExecutor {
                 } else {
                     n
                 };
-                self.consume_batch(batch_engine.split_off(n), &plan, consumer)?;
+                self.consume_batch(batch_engine.split_off(n), &plan, consumer, ledger, stats)?;
+                ledger.set_builders(batch_engine.capacity_bytes());
                 rows_in_batch = rows_in_batch.saturating_sub(n);
             }
         }
@@ -228,7 +259,7 @@ impl BoundedExecutor {
             return Err(err);
         }
         if batch_engine.num_rows() > 0 {
-            self.consume_batch(batch_engine, &plan, consumer)?;
+            self.consume_batch(batch_engine, &plan, consumer, ledger, stats)?;
         }
         Ok(())
     }
@@ -246,6 +277,57 @@ impl BoundedExecutor {
         parser: P,
         plan: Arc<ExecutionPlan>,
         consumer: &mut C,
+    ) -> Result<()>
+    where
+        P: RecordParser + Clone + Send + Sync,
+        C: crate::consumer::BatchConsumer,
+    {
+        self.run_bytes_stream_with_stats(bytes, splitter, parser, plan, consumer)
+            .map(|_| ())
+    }
+
+    /// Like [`BoundedExecutor::run_bytes_stream`], but reports a
+    /// [`StreamStats`] summary including the peak tracked engine memory.
+    ///
+    /// The input slice is caller-owned, so it is not charged to the ledger;
+    /// `peak_tracked_bytes` covers builders and in-flight batches only.
+    pub fn run_bytes_stream_with_stats<P, C>(
+        &self,
+        bytes: &[u8],
+        splitter: &dyn Splitter,
+        parser: P,
+        plan: Arc<ExecutionPlan>,
+        consumer: &mut C,
+    ) -> Result<StreamStats>
+    where
+        P: RecordParser + Clone + Send + Sync,
+        C: crate::consumer::BatchConsumer,
+    {
+        let mut ledger = BudgetLedger::new(self.budget);
+        let mut stats = StreamStats::default();
+        self.run_bytes_stream_inner(
+            bytes,
+            splitter,
+            parser,
+            plan,
+            consumer,
+            &mut ledger,
+            &mut stats,
+        )?;
+        stats.peak_tracked_bytes = ledger.peak();
+        Ok(stats)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_bytes_stream_inner<P, C>(
+        &self,
+        bytes: &[u8],
+        splitter: &dyn Splitter,
+        parser: P,
+        plan: Arc<ExecutionPlan>,
+        consumer: &mut C,
+        ledger: &mut BudgetLedger,
+        stats: &mut StreamStats,
     ) -> Result<()>
     where
         P: RecordParser + Clone + Send + Sync,
@@ -274,7 +356,7 @@ impl BoundedExecutor {
                 budget,
             )
         });
-        self.consume_chunks(chunks, rows_per_batch, plan, consumer)
+        self.consume_chunks(chunks, rows_per_batch, plan, consumer, ledger, stats)
     }
 
     /// Parse an in-memory byte slice in bounded batches, returning one
@@ -316,16 +398,58 @@ impl BoundedExecutor {
         P: RecordParser + Clone + Send + Sync,
         C: crate::consumer::BatchConsumer,
     {
+        self.run_stream_with_stats(path, splitter, parser, plan, prefault, consumer)
+            .map(|_| ())
+    }
+
+    /// Like [`BoundedExecutor::run_stream`], but reports a [`StreamStats`]
+    /// summary including the peak tracked engine memory.
+    pub fn run_stream_with_stats<P, C>(
+        &self,
+        path: &Path,
+        splitter: &dyn Splitter,
+        parser: P,
+        plan: Arc<ExecutionPlan>,
+        prefault: bool,
+        consumer: &mut C,
+    ) -> Result<StreamStats>
+    where
+        P: RecordParser + Clone + Send + Sync,
+        C: crate::consumer::BatchConsumer,
+    {
+        let mut ledger = BudgetLedger::new(self.budget);
+        let mut stats = StreamStats::default();
         let use_mmap = cfg!(feature = "mmap");
         let input = InputBuffer::open(path, use_mmap, prefault)?;
 
         #[cfg(feature = "mmap")]
         if matches!(input, InputBuffer::Mmap(_)) {
-            return self.run_mapped_stream(input, splitter, parser, plan, consumer);
+            self.run_mapped_stream(
+                input,
+                splitter,
+                parser,
+                plan,
+                consumer,
+                &mut ledger,
+                &mut stats,
+            )?;
+            stats.peak_tracked_bytes = ledger.peak();
+            return Ok(stats);
         }
 
         self.budget.share(4).check(input.len())?;
-        self.run_bytes_stream(input.as_slice(), splitter, parser, plan, consumer)
+        ledger.set_input(input.len());
+        self.run_bytes_stream_inner(
+            input.as_slice(),
+            splitter,
+            parser,
+            plan,
+            consumer,
+            &mut ledger,
+            &mut stats,
+        )?;
+        stats.peak_tracked_bytes = ledger.peak();
+        Ok(stats)
     }
 
     /// Parse `path` in batches, returning one `RecordBatch` per batch.
@@ -358,6 +482,7 @@ impl BoundedExecutor {
     /// Streaming path for mapped inputs: plan against the mapping, drop it,
     /// then read each chunk with a reusable buffer.
     #[cfg(feature = "mmap")]
+    #[allow(clippy::too_many_arguments)]
     fn run_mapped_stream<P, C>(
         &self,
         input: InputBuffer,
@@ -365,6 +490,8 @@ impl BoundedExecutor {
         parser: P,
         plan: Arc<ExecutionPlan>,
         consumer: &mut C,
+        ledger: &mut BudgetLedger,
+        stats: &mut StreamStats,
     ) -> Result<()>
     where
         P: RecordParser + Clone + Send + Sync,
@@ -395,6 +522,7 @@ impl BoundedExecutor {
             max_chunk.saturating_add(chunks.capacity() * std::mem::size_of::<Range<usize>>()),
         )?;
         let mut chunk_buf = Vec::with_capacity(max_chunk);
+        ledger.set_input(chunk_buf.capacity());
 
         let parse_plan = Arc::clone(&plan);
         let parsed_chunks = chunks.into_iter().map(move |chunk| {
@@ -410,7 +538,7 @@ impl BoundedExecutor {
                 budget,
             )
         });
-        self.consume_chunks(parsed_chunks, rows_per_batch, plan, consumer)
+        self.consume_chunks(parsed_chunks, rows_per_batch, plan, consumer, ledger, stats)
     }
 }
 

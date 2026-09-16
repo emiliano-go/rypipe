@@ -307,4 +307,45 @@ mod tests {
         let streamed_rows: usize = streamed.iter().map(|b| b.num_rows()).sum();
         assert_eq!(streamed_rows, expected_rows);
     }
+
+    #[test]
+    fn test_run_bytes_stream_with_stats_counts_batches_rows_and_peak() {
+        let data = b"A=1 B=2\nA=3 B=4\n".repeat(200);
+        let budget = MemoryBudget::new(64 * 1024);
+        let executor = BoundedExecutor::new(budget);
+        let stats = executor
+            .run_bytes_stream_with_stats(
+                &data,
+                &LineSplitter,
+                LineParser,
+                Arc::new(ExecutionPlan::new()),
+                &mut crate::consumer::DiscardingConsumer,
+            )
+            .unwrap();
+        assert_eq!(stats.rows, 400);
+        assert!(stats.batches >= 2, "expected several batches: {stats:?}");
+        assert!(stats.peak_tracked_bytes > 0);
+        assert_eq!(stats.oversize_batches, 0);
+    }
+
+    #[test]
+    fn test_run_bytes_stream_with_stats_flags_oversize_single_record() {
+        // One record far larger than the batch target forces a lone
+        // oversize batch; the small records around it are not flagged.
+        let big = format!("K={}\n", "x".repeat(64 * 1024));
+        let data = format!("A=1\n{big}B=2\n");
+        let budget = MemoryBudget::new(1024 * 1024);
+        let executor = BoundedExecutor::new(budget);
+        let stats = executor
+            .run_bytes_stream_with_stats(
+                data.as_bytes(),
+                &LineSplitter,
+                LineParser,
+                Arc::new(ExecutionPlan::new()),
+                &mut crate::consumer::DiscardingConsumer,
+            )
+            .unwrap();
+        assert_eq!(stats.rows, 3);
+        assert_eq!(stats.oversize_batches, 1, "{stats:?}");
+    }
 }

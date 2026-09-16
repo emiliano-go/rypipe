@@ -19,6 +19,7 @@ pub mod auto;
 pub mod bench;
 pub mod block_masks;
 pub mod bounded;
+pub mod budget;
 pub mod columnar;
 pub mod consumer;
 pub mod decoder;
@@ -40,6 +41,7 @@ pub mod value;
 pub use arrow_export::apply_compare_filter;
 pub use auto::{resolve_engine, AutoConfig, EngineMode};
 pub use bounded::{MemoryBudget, MAX_SPLIT_CHUNKS};
+pub use budget::{BudgetLedger, BudgetPartition, StreamStats};
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 pub use decoder::{
     find_next_record_boundary, is_continued_newline, split_points_to_ranges, ColumnarSink,
