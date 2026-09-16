@@ -7,10 +7,17 @@ description: Release notes for rypipe, newest first. Tracks features, fixes, and
 
 All notable changes to rypipe, newest first. Versions follow semantic versioning and are tagged in the repository.
 
-## [0.3.2] - 2026-09-11
+## [0.4.0] - 2026-09-16
 
 ### Added
 
+- **`budget` module: `BudgetPartition`, `BudgetLedger`, `StreamStats`.** New public module for memory-budget accounting. `BudgetPartition` derives per-component limits from a `MemoryBudget` with proof tests that the worst case sums within budget; `BudgetLedger` tracks capacity-accurate live bytes and their peak; `StreamStats` reports batches, rows, `oversize_batches`, and `peak_tracked_bytes` per streaming run. `BoundedExecutor` gains `run_stream_with_stats` and `run_bytes_stream_with_stats`; sizing and enforcement are unchanged.
+- **Strict memory budget contract.** `MemoryBudget.with_strict(true)` makes the budget a hard limit: capacity-accurate per-builder checks via `TableBuilder::set_memory_budget` error with `Error::Memory { used, limit }` when an allowance is exceeded. Parallel streaming derives per-worker chunk size and slot allowances from the budget.
+- **Memory errors map to Python `MemoryError`.** The engine memory error now surfaces as `MemoryError` in the bindings instead of a generic exception.
+- **Declarative stateful parsing.** `Splitter` gains `RecordBoundary`, `continuation_char`, and `comment_prefixes` for multi-line record formats (line continuations, comment lines), plus `find_next_record_boundary` and `is_continued_newline` helpers.
+- **`_rypipe.errors` module.** Typed exception module for the Python bindings.
+- **Fuzz targets and seed corpora.** cargo-fuzz targets with documented seeds and CI smoke campaigns.
+- **`engine_probe` example and benchmark harness update.** Probe binary for engine internals, with recorded memory and boundary benchmark results.
 - **Expression API string transforms.** Added `strip`, `lstrip`, `rstrip`, `lower`, `upper`, `replace`, and `length` methods to the `col()` expression API. These produce fusable filter spec dicts that run in the Rust parse loop.
 - **Partial pushdown in CastTypes.** Non-pushable type casts (e.g. custom Python types) are skipped during plan fusion instead of falling back to a full Python pass over the table.
 - **Fused `is_type`, `is_null`, `contains` ops.** `_fuse_filter_spec` now handles `is_type`, `is_null`, and `contains` operators, keeping them in the Rust parse loop instead of falling back to Python.
@@ -56,6 +63,20 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **Dead code removed.** Legacy `run_mapped` and `apply_plan_filter` functions deleted from `bounded.rs`. Dead `_arrow_iter` removed from `fusion.py`.
 - **Dictionary unification performance.** Removed unnecessary `clone` of `column_order` during per-chunk dictionary unification in `parallel.rs`.
 - **FFI error propagation.** `unwrap()` at the Python FFI boundary in `plan_kwargs` replaced with `PlanError` for actionable error messages.
+
+### Documentation
+
+- **Docs overhaul.** Reworked tutorial, building-adapters, advanced, and architecture sections; compact top-level nav with dropdowns.
+- **Integrations section.** New guides for Arrow, DuckDB, Polars, pandas, Parquet, Delta Lake, Iceberg, Spark, direct SQL databases, and Excel.
+- **Examples section.** Benchmark pages, engine probe walkthrough, report fixture, and three example adapters (INI, LDIF, Properties).
+- **Memory contract documented.** What the budget covers, what it does not, and how strict mode behaves.
+- **Page titles fixed.** Front-matter titles across all pages; the homepage no longer shows a code comment as its browser tab title.
+
+### CI
+
+- **Adapter and template job.** Native example adapters are built and tested as wheels; the cargo-generate template is generated and smoke-tested.
+- **Linux ARM64 regression job.** Native Rust tests now also run on ARM64.
+- **Publishing workflows.** Fixed the pinned `rust-toolchain` invocation to pass the now-required `toolchain` input.
 
 ## [0.3.1] - 2026-09-11
 
@@ -190,7 +211,7 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **Zensical docs site.** Tutorial, building-adapters guide, architecture, advanced topics, reference pages.
 - **Benchmark harness.** Throughput benchmarks for the columnar engine.
 
-[0.3.2]: https://github.com/emiliano-go/rypipe/releases
+[0.4.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.4.0
 [0.3.1]: https://github.com/emiliano-go/rypipe/releases
 [0.3.0]: https://github.com/emiliano-go/rypipe/releases
 [0.2.2]: https://github.com/emiliano-go/rypipe/releases/tag/v0.2.2
