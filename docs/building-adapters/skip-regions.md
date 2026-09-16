@@ -1,3 +1,7 @@
+---
+title: "Skip Regions"
+---
+
 # Skip Regions { #skip-regions }
 
 When splitting input into chunks, some byte ranges must not be split on.

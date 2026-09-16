@@ -1,3 +1,7 @@
+---
+title: "Rust Adapter Creation"
+---
+
 # Rust Adapter Creation { #rust-adapter-creation }
 
 This page covers the Rust side of writing a rypipe adapter: implementing

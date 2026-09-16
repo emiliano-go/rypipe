@@ -1,3 +1,7 @@
+---
+title: "I/O tuning"
+---
+
 # I/O tuning { #io-tuning }
 
 Parsing cannot outrun the I/O subsystem. `rypipe` supports memory-mapped and buffered input, plus prefault options. Choosing the right combination depends on file size, RAM, and storage class.

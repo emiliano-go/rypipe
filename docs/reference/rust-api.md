@@ -1,3 +1,7 @@
+---
+title: "Rust API Reference"
+---
+
 # Rust API Reference { #rust-api }
 
 This page is a reference for the **rypipe-core** Rust API. For a tutorial,

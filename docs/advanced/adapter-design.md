@@ -1,3 +1,7 @@
+---
+title: "Adapter design"
+---
+
 # Adapter design { #adapter-design }
 
 A high-performance adapter does as little work as possible per record. This page covers the `Splitter` and `RecordParser` design patterns that keep rypipe fast.

@@ -1,3 +1,7 @@
+---
+title: "Adapter design patterns"
+---
+
 # Adapter design patterns { #adapter-design-patterns }
 
 **rypipe** has one adapter API that scales in complexity. You start with a

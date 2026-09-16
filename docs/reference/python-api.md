@@ -1,3 +1,7 @@
+---
+title: "Python API Reference"
+---
+
 # Python API Reference { #python-api }
 
 This page is a reference for the **rypipe** Python API. For a tutorial,

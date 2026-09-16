@@ -1,3 +1,7 @@
+---
+title: "Contributing"
+---
+
 # Contributing { #contributing }
 
 Thank you for your interest in contributing to **rypipe**!

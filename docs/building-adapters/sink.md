@@ -1,3 +1,7 @@
+---
+title: "The ColumnarSink Trait"
+---
+
 # The ColumnarSink Trait { #the-columnarsink-trait }
 
 `ColumnarSink` is the bridge between your parser and the engine. The parser

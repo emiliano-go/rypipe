@@ -1,3 +1,7 @@
+---
+title: "The Splitter Trait"
+---
+
 # The Splitter Trait { #the-splitter-trait }
 
 The `Splitter` trait decides where it is safe to divide an input byte stream

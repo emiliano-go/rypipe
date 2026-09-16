@@ -1,3 +1,7 @@
+---
+title: "Schema and types"
+---
+
 # Schema and types { #schema-and-types }
 
 This is the single largest performance lever for adapters with known schemas.

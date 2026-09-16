@@ -1,3 +1,7 @@
+---
+title: "Performance Techniques"
+---
+
 # Performance Techniques { #performance-techniques }
 
 This page covers the highest-impact optimizations for adapter authors. For

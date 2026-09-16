@@ -1,3 +1,7 @@
+---
+title: "Pushdown fusion"
+---
+
 # Pushdown fusion { #pushdown-fusion }
 
 `rypipe` splits ingestion into two layers:

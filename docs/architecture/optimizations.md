@@ -1,3 +1,7 @@
+---
+title: "Optimizations"
+---
+
 # Optimizations { #optimizations }
 
 Every optimization in `rypipe-core`, why it matters, and what it replaces.

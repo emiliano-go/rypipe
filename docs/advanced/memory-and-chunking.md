@@ -1,3 +1,7 @@
+---
+title: "Memory and chunking"
+---
+
 # Memory and chunking { #memory-and-chunking }
 
 `rypipe` uses a memory budget to size batches and in-flight work. The default

@@ -1,3 +1,7 @@
+---
+title: "Architecture Overview"
+---
+
 # Architecture Overview { #architecture-overview }
 
 `rypipe` is built around one idea: **separate the parts of parsing that depend

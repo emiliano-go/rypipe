@@ -1,3 +1,7 @@
+---
+title: "Real-world adapter: crxml"
+---
+
 # Real-world adapter: crxml { #real-world-adapter-crxml }
 
 `crxml` is a high-throughput adapter for Crystal Reports XML exports. It is a good example of what a production `rypipe` adapter looks like: a small Rust crate that implements `rypipe-core`'s `Splitter` and `RecordParser` traits, plus a thin Python layer that registers the adapter with `rypipe`.

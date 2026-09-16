@@ -1,3 +1,7 @@
+---
+title: "Decoder API"
+---
+
 # Decoder API { #decoder-api }
 
 `decoder.rs` defines the boundary between format-specific and format-agnostic

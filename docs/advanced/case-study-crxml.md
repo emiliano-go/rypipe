@@ -1,3 +1,7 @@
+---
+title: "Case study: crxml"
+---
+
 # Case study: crxml { #case-study-crxml }
 
 `crxml` is a high-throughput adapter for Crystal Reports XML exports. It is a concrete example of how the techniques from the other advanced pages combine to reach ~7.6 GB/s on a single workstation.

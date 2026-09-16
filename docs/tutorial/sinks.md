@@ -1,3 +1,7 @@
+---
+title: "Sinks"
+---
+
 # Sinks { #sinks }
 
 A sink is where your data ends up: an Arrow table, a DataFrame, a file, or

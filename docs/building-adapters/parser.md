@@ -1,3 +1,7 @@
+---
+title: "The RecordParser Trait"
+---
+
 # The RecordParser Trait { #the-recordparser-trait }
 
 The `RecordParser` trait turns a byte chunk into field/value events fed to a

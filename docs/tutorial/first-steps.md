@@ -1,3 +1,7 @@
+---
+title: "First Steps"
+---
+
 # First Steps { #first-steps }
 
 By the end of this page you will read `report.xml` into a DataFrame,

@@ -1,3 +1,7 @@
+---
+title: "Tutorial"
+---
+
 # Tutorial { #tutorial }
 
 This tutorial teaches you how to use **rypipe** to read files into Arrow

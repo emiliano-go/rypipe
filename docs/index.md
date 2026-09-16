@@ -1,3 +1,8 @@
+---
+title: rypipe documentation
+description: Format-agnostic columnar ingestion engine. Rust core, Python bindings, parallel scheduling, memory-bounded execution, and Arrow export.
+---
+
 <div align="center">
   <img src="overrides/badge.png" alt="rypipe badge" width="128"/>
 </div>

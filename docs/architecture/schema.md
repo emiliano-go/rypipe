@@ -1,3 +1,7 @@
+---
+title: "Schema Architecture"
+---
+
 # Schema Architecture { #schema-architecture }
 
 This page documents the internal architecture of schema handling in rypipe.

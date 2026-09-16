@@ -1,3 +1,7 @@
+---
+title: "Engine: TableBuilder"
+---
+
 # Engine: TableBuilder { #engine-tablebuilder }
 
 `TableBuilder` (`engine/table_builder.rs`) is the central structure. It implements

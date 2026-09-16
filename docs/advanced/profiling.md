@@ -1,3 +1,7 @@
+---
+title: "Profiling"
+---
+
 # Profiling { #profiling }
 
 Optimization without measurement is guessing. This page describes how to profile rypipe pipelines and interpret the results.

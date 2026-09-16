@@ -1,3 +1,7 @@
+---
+title: "Schema for Adapter Authors"
+---
+
 # Schema for Adapter Authors { #schema-for-adapter-authors }
 
 When your format has a known set of columns, declaring them upfront with

@@ -1,3 +1,7 @@
+---
+title: "Worked Examples"
+---
+
 # Worked Examples { #worked-examples }
 
 ## CSV Adapter { #csv-adapter }

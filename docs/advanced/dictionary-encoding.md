@@ -1,3 +1,7 @@
+---
+title: "Dictionary encoding"
+---
+
 # Dictionary encoding { #dictionary-encoding }
 
 Arrow dictionaries store string values as integer indices into a separate value table. In `rypipe`, this can reduce memory 5-20x for low-cardinality string columns such as status codes, country codes, or enums. This page explains how dictionaries work in the engine, when they help, and when they force the merge path and hurt throughput.

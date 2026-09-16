@@ -1,3 +1,7 @@
+---
+title: "Columnar storage"
+---
+
 # Columnar storage { #columnar-storage }
 
 This page documents `columnar.rs` in depth. It is the storage layer that makes

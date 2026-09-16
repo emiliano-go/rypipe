@@ -1,3 +1,7 @@
+---
+title: "rypipe examples"
+---
+
 # rypipe examples { #rypipe-examples }
 
 This page shows common patterns in Python and Rust. All Python examples assume a registered adapter is installed (for example `pip install crxml` for XML). `rypipe` itself does not ship format parsers.

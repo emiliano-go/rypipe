@@ -1,3 +1,7 @@
+---
+title: "Building an Adapter"
+---
+
 # Building an Adapter { #writing-adapters }
 
 This track teaches you how to write a **rypipe** adapter, a package that

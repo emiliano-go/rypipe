@@ -1,3 +1,7 @@
+---
+title: "Configuration"
+---
+
 # Configuration { #configuration }
 
 This page collects the options you will use day to day: the Source

@@ -1,3 +1,7 @@
+---
+title: "Python Adapter Wiring"
+---
+
 # Python Adapter Wiring { #python-wiring }
 
 This page explains how to wire your Rust adapter to Python: the Source

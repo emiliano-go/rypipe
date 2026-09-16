@@ -1,3 +1,7 @@
+---
+title: "Stages"
+---
+
 # Stages { #stages }
 
 Stages are the building blocks of pipelines. Each stage transforms the data

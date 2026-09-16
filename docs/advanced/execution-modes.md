@@ -1,3 +1,7 @@
+---
+title: "Execution modes"
+---
+
 # Execution modes { #execution-modes }
 
 `rypipe` adapters can expose up to four execution strategies. Choosing the right one is the biggest single decision for memory and throughput.

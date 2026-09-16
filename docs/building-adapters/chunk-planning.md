@@ -1,3 +1,7 @@
+---
+title: "Chunk Planning"
+---
+
 # Chunk Planning { #chunk-planning }
 
 The engine decides how many chunks to create based on file size, thread count,

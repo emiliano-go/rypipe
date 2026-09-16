@@ -1,3 +1,7 @@
+---
+title: "Why Python, not pure Rust?"
+---
+
 # Why Python, not pure Rust? { #why-python-not-pure-rust }
 
 `rypipe` is *Rust where it counts, Python where it ships*. The core is pure Rust for speed and memory safety; the surface is Python for reach and productivity. This page explains why that split is intentional, not a compromise.

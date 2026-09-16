@@ -1,3 +1,7 @@
+---
+title: "Advanced rypipe"
+---
+
 # Advanced rypipe { #advanced-rypipe }
 
 This section is for adapter authors and power users who want to understand why rypipe is fast and how to keep it fast. It assumes you have read the Python API, Rust API, and Architecture pages.

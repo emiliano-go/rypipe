@@ -1,3 +1,7 @@
+---
+title: "Performance"
+---
+
 # Performance { #performance }
 
 `rypipe` is designed to keep parsing fast: arena string storage, SIMD UTF-8

@@ -1,3 +1,7 @@
+---
+title: "Building an Adapter"
+---
+
 # Building an Adapter { #building-an-adapter }
 
 The [track overview](index.md) showed what an adapter is and how the engine

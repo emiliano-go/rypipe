@@ -1,3 +1,7 @@
+---
+title: "Stage Protocol"
+---
+
 # Stage Protocol { #stage-protocol }
 
 This page explains the stage protocol: how stages integrate with the

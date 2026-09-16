@@ -1,3 +1,7 @@
+---
+title: "Pipeline"
+---
+
 # Pipeline { #pipeline }
 
 The `|` operator chains transformation **stages** on a Source, like a Unix

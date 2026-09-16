@@ -1,3 +1,7 @@
+---
+title: "Execution Plan"
+---
+
 # Execution Plan { #execution-plan }
 
 `plan.rs` defines the compiled execution plan that controls all pipeline

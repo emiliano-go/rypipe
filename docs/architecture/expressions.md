@@ -1,3 +1,7 @@
+---
+title: "Expression filters"
+---
+
 # Expression filters { #expression-filters }
 
 `FilterRows` accepts an expression predicate built with `col`.

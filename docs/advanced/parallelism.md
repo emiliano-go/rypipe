@@ -1,3 +1,7 @@
+---
+title: "Parallelism"
+---
+
 # Parallelism { #parallelism }
 
 Parallel mode uses `rayon` to parse chunks concurrently. Understanding how `rayon` schedules work and how `num_chunks` maps to hardware helps avoid the common mistake of over-parallelizing.

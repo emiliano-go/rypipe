@@ -1,3 +1,7 @@
+---
+title: "Scan Primitives"
+---
+
 # Scan Primitives { #scan-primitives }
 
 The `rypipe_core::scan` module provides portable byte-search primitives that

@@ -1,3 +1,7 @@
+---
+title: "Anti-patterns"
+---
+
 # Anti-patterns { #anti-patterns }
 
 These patterns are common, legal, and expensive. Avoid them when throughput or memory matters.

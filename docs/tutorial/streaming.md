@@ -1,3 +1,7 @@
+---
+title: "Streaming"
+---
+
 # Streaming { #streaming }
 
 By default, `to_arrow()` parses the whole file into memory. For files

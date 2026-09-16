@@ -1,3 +1,7 @@
+---
+title: "Anti-Patterns"
+---
+
 # Anti-Patterns { #anti-patterns }
 
 Common mistakes in rypipe adapters. Avoiding these is the difference

@@ -1,3 +1,7 @@
+---
+title: "Execution: Pipeline, Parallel, Bounded, Input"
+---
+
 # Execution: Pipeline, Parallel, Bounded, Input { #execution-pipeline-parallel-bounded-input }
 
 This page covers how bytes become batches. The same `Splitter` plus

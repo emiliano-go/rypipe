@@ -1,3 +1,7 @@
+---
+title: "Streaming batches"
+---
+
 # Streaming batches { #streaming-with-constant-memory }
 
 `rypipe`'s streaming iterator yields `RecordBatch` objects and releases each

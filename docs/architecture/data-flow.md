@@ -1,3 +1,7 @@
+---
+title: "Data flow"
+---
+
 # Data flow { #data-flow }
 
 This page shows how bytes move through the system in each execution mode.

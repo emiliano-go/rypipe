@@ -1,3 +1,7 @@
+---
+title: "Storage and export"
+---
+
 # Storage and export { #storage-and-export }
 
 This page covers Arrow type mapping, null handling, the string arena,
