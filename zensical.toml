@@ -69,38 +69,50 @@ name = "rypipe on PyPI"
 [[project.nav]]
 "Building an Adapter" = [
     "building-adapters/index.md",
-    { "Walkthrough" = "building-adapters/walkthrough.md" },
-    { "Python wiring" = "building-adapters/python-wiring.md" },
-    { "Rust creation" = "building-adapters/rust-creation.md" },
-    { "Splitter" = "building-adapters/splitter.md" },
-    { "Parser" = "building-adapters/parser.md" },
-    { "Sink" = "building-adapters/sink.md" },
-    { "Schema" = "building-adapters/schema.md" },
-    { "Scan primitives" = "building-adapters/scan.md" },
-    { "Skip regions" = "building-adapters/skip-regions.md" },
-    { "Chunk planning" = "building-adapters/chunk-planning.md" },
-    { "Techniques" = "building-adapters/techniques.md" },
-    { "Anti-patterns" = "building-adapters/anti-patterns.md" },
-    { "Examples" = "building-adapters/examples.md" },
+    { "Core" = [
+        { "Walkthrough" = "building-adapters/walkthrough.md" },
+        { "Python wiring" = "building-adapters/python-wiring.md" },
+        { "Rust creation" = "building-adapters/rust-creation.md" },
+        { "Splitter" = "building-adapters/splitter.md" },
+        { "Parser" = "building-adapters/parser.md" },
+        { "Sink" = "building-adapters/sink.md" },
+        { "Schema" = "building-adapters/schema.md" },
+    ] },
+    { "Performance" = [
+        { "Scan primitives" = "building-adapters/scan.md" },
+        { "Skip regions" = "building-adapters/skip-regions.md" },
+        { "Chunk planning" = "building-adapters/chunk-planning.md" },
+        { "Techniques" = "building-adapters/techniques.md" },
+    ] },
+    { "Quality" = [
+        { "Anti-patterns" = "building-adapters/anti-patterns.md" },
+        { "Examples" = "building-adapters/examples.md" },
+    ] },
 ]
 
 [[project.nav]]
 "Advanced" = [
     "advanced/index.md",
-    { "Pushdown fusion" = "advanced/fusion.md" },
-    { "Stage protocol" = "advanced/stage-protocol.md" },
-    { "Execution modes" = "advanced/execution-modes.md" },
-    { "Streaming" = "advanced/streaming.md" },
-    { "Memory and chunking" = "advanced/memory-and-chunking.md" },
-    { "Parallelism" = "advanced/parallelism.md" },
-    { "Dictionary encoding" = "advanced/dictionary-encoding.md" },
-    { "Schema and types" = "advanced/schema-and-types.md" },
-    { "I/O tuning" = "advanced/io-tuning.md" },
-    { "Adapter design" = "advanced/adapter-design.md" },
-    { "Adapter design patterns" = "advanced/source-pattern.md" },
-    { "Profiling" = "advanced/profiling.md" },
-    { "Anti-patterns" = "advanced/anti-patterns.md" },
-    { "Case study: crxml" = "advanced/case-study-crxml.md" },
+    { "Execution" = [
+        { "Pushdown fusion" = "advanced/fusion.md" },
+        { "Stage protocol" = "advanced/stage-protocol.md" },
+        { "Execution modes" = "advanced/execution-modes.md" },
+        { "Streaming" = "advanced/streaming.md" },
+        { "Memory and chunking" = "advanced/memory-and-chunking.md" },
+        { "Parallelism" = "advanced/parallelism.md" },
+    ] },
+    { "Data" = [
+        { "Dictionary encoding" = "advanced/dictionary-encoding.md" },
+        { "Schema and types" = "advanced/schema-and-types.md" },
+        { "I/O tuning" = "advanced/io-tuning.md" },
+    ] },
+    { "Design" = [
+        { "Adapter design" = "advanced/adapter-design.md" },
+        { "Adapter design patterns" = "advanced/source-pattern.md" },
+        { "Anti-patterns" = "advanced/anti-patterns.md" },
+        { "Profiling" = "advanced/profiling.md" },
+        { "Case study: crxml" = "advanced/case-study-crxml.md" },
+    ] },
 ]
 
 [[project.nav]]
@@ -122,41 +134,37 @@ name = "rypipe on PyPI"
 "Reference" = [
     { "Python API" = "reference/python-api.md" },
     { "Rust API" = "reference/rust-api.md" },
-]
-
-[[project.nav]]
-"Integrations" = [
     { "DuckDB" = "integrations/duckdb.md" },
 ]
 
 [[project.nav]]
 "Examples" = [
     "examples.md",
-    { "BlockMasks microbenchmark" = "examples/bench-blockmasks.md" },
-    { "Push-tier benchmark" = "examples/bench-push-tier.md" },
-    { "Six-tier scanner benchmark" = "examples/bench-scanner-single.md" },
-    { "Throughput benchmark" = "examples/bench-throughput.md" },
-    { "Engine probe" = "examples/engine-probe.md" },
-    { "XML report fixture" = "examples/report-fixture.md" },
-    { "INI adapter" = "examples/rypipe-ini.md" },
-    { "LDIF adapter" = "examples/rypipe-ldif.md" },
-    { "Properties adapter" = "examples/rypipe-properties.md" },
+    { "crxml (Crystal Reports XML)" = "crxml-adapter.md" },
+    { "Benchmarks" = [
+        { "BlockMasks microbenchmark" = "examples/bench-blockmasks.md" },
+        { "Push-tier benchmark" = "examples/bench-push-tier.md" },
+        { "Six-tier scanner benchmark" = "examples/bench-scanner-single.md" },
+        { "Throughput benchmark" = "examples/bench-throughput.md" },
+    ] },
+    { "Probes and fixtures" = [
+        { "Engine probe" = "examples/engine-probe.md" },
+        { "XML report fixture" = "examples/report-fixture.md" },
+    ] },
+    { "Adapters" = [
+        { "INI adapter" = "examples/rypipe-ini.md" },
+        { "LDIF adapter" = "examples/rypipe-ldif.md" },
+        { "Properties adapter" = "examples/rypipe-properties.md" },
+    ] },
 ]
 
 [[project.nav]]
-"crxml Adapter" = "crxml-adapter.md"
-
-[[project.nav]]
-"Why Python?" = "why-python.md"
-
-[[project.nav]]
-"Changelog" = "changelog.md"
-
-[[project.nav]]
-"Performance" = "performance.md"
-
-[[project.nav]]
-"Contributing" = "contributing.md"
+"About" = [
+    { "Why Python?" = "why-python.md" },
+    { "Performance" = "performance.md" },
+    { "Changelog" = "changelog.md" },
+    { "Contributing" = "contributing.md" },
+]
 
 [project.markdown_extensions]
 "seoslug.contrib.zensical" = {

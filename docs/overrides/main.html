@@ -32,6 +32,35 @@
       }
     });
   }
+
+  /* Desktop tab dropdowns: tap toggles, tap-elsewhere and Escape close. */
+  var openDropdown = null;
+  function closeDropdown() {
+    if (openDropdown) {
+      openDropdown.classList.remove('md-tabs__item--open');
+      openDropdown = null;
+    }
+  }
+  document.querySelectorAll('.md-tabs__item--has-dropdown > .md-tabs__link').forEach(function(link) {
+    link.addEventListener('click', function(e) {
+      var item = link.parentElement;
+      if (window.matchMedia('(hover: hover)').matches) return;
+      e.preventDefault();
+      if (openDropdown === item) {
+        closeDropdown();
+      } else {
+        closeDropdown();
+        item.classList.add('md-tabs__item--open');
+        openDropdown = item;
+      }
+    });
+  });
+  document.addEventListener('click', function(e) {
+    if (openDropdown && !openDropdown.contains(e.target)) closeDropdown();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeDropdown();
+  });
 })();
 </script>
 {% endblock %}
