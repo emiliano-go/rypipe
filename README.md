@@ -50,14 +50,21 @@ Add a new format by implementing two small traits: `Splitter` and
 `RecordParser`.
 
 > rypipe was originally developed as the ingestion engine for
-> [crxml](https://github.com/emiliano-go/crxml), a Crystal Reports XML
-> adapter. The engine's design, performance characteristics, and API were
+> [crxml](https://github.com/emiliano-go/crxml), a Crystal Reports XML parser,
+> and was later extracted and abstracted. The engine's design, performance
+> characteristics, and API were
 > shaped by real-world production use with crxml. We use crxml as the primary
 > example throughout the documentation because it demonstrates the full power
 > of the framework: complex nested schemas, large files, parallel processing,
 > and advanced filtering.
 
 ## Quick start
+
+Any parser you build on rypipe (or any adapter package you install)
+gets this same API: a small Rust crate behind a clean, chainable Python
+interface with fused filtering, parallel parsing, and bounded-memory
+streaming. The quick start below shows crxml as a concrete example;
+your format's adapter would look and behave the same.
 
 ```bash
 pip install crxml
