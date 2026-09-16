@@ -134,7 +134,20 @@ name = "rypipe on PyPI"
 "Reference" = [
     { "Python API" = "reference/python-api.md" },
     { "Rust API" = "reference/rust-api.md" },
+]
+
+[[project.nav]]
+"Integrations" = [
+    { "Arrow ecosystem" = "integrations/arrow.md" },
     { "DuckDB" = "integrations/duckdb.md" },
+    { "Polars" = "integrations/polars.md" },
+    { "pandas" = "integrations/pandas.md" },
+    { "Parquet files" = "integrations/parquet.md" },
+    { "Delta Lake" = "integrations/delta-lake.md" },
+    { "Apache Iceberg" = "integrations/iceberg.md" },
+    { "Apache Spark" = "integrations/spark.md" },
+    { "Direct SQL databases" = "integrations/sql.md" },
+    { "Excel" = "integrations/excel.md" },
 ]
 
 [[project.nav]]
