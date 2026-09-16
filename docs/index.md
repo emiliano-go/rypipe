@@ -60,6 +60,9 @@ separate packages. Install the engine plus the adapters you need.
 
 ## Quick start { #quick-start }
 
+Any parser you build on rypipe (or any adapter package you install) gets this same API: a small Rust crate behind a clean, chainable Python interface with fused filtering, parallel parsing, and bounded-memory streaming. The quick start below shows crxml as a concrete example; your format's adapter would look and behave the same.
+
+
 [Download sample report.xml](examples/report.xml)
 
 ### From Python { #from-python }
