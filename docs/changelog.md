@@ -189,3 +189,12 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **aarch64 manylinux cross-compilation** with zig.
 - **Zensical docs site.** Tutorial, building-adapters guide, architecture, advanced topics, reference pages.
 - **Benchmark harness.** Throughput benchmarks for the columnar engine.
+
+[0.3.2]: https://github.com/emiliano-go/rypipe/releases
+[0.3.1]: https://github.com/emiliano-go/rypipe/releases
+[0.3.0]: https://github.com/emiliano-go/rypipe/releases
+[0.2.2]: https://github.com/emiliano-go/rypipe/releases/tag/v0.2.2
+[0.2.1]: https://github.com/emiliano-go/rypipe/releases/tag/v0.2.1
+[0.2.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.2.0
+[0.1.1]: https://github.com/emiliano-go/rypipe/releases/tag/v0.1.1
+[0.1.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.1.0
