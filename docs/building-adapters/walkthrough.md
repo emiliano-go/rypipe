@@ -69,7 +69,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rypipe-core = "0.3"
-rypipe_python = { package = "rypipe-python", version = "0.3.2" }
+rypipe_python = { package = "rypipe-python", version = "0.4.0" }
 arrow = { version = "=59.3.0", default-features = false, features = ["pyarrow", "ffi"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
@@ -368,7 +368,7 @@ plan arguments; `path`, `use_mmap`, and `prefault` belong to the reader.
 
 !!! note "Local development before publication"
 
-    Use `rypipe_python = { package = "rypipe-python", version = "0.3.2" }`.
+    Use `rypipe_python = { package = "rypipe-python", version = "0.4.0" }`.
     The dependency alias gives the helper a Rust name independent of its
     Python extension name. Errors use the same Python classes across adapters.
 

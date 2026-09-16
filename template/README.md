@@ -16,7 +16,7 @@ maturin develop --release
 python -m pytest tests
 ```
 
-Template requires matching `rypipe-core` and `rypipe-python` 0.3.2 releases.
+Template requires matching `rypipe-core` and `rypipe-python` 0.4.0 releases.
 Before they are published, add local overrides to `Cargo.toml` and install
 the Python engine from that checkout with `maturin develop --release`:
 
