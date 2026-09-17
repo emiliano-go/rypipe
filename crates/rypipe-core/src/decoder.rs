@@ -205,6 +205,11 @@ pub trait Splitter: Send + Sync {
 
         points.sort_unstable();
         points.dedup();
+        // Drop candidates at 0: the prepend below already supplies the
+        // leading split point, and keeping them would duplicate it (this
+        // happens when bytes.len() < n, where bytes.len() / n == 0 puts
+        // every nominal offset at 0).
+        points.retain(|&p| p > 0);
         points.insert(0, 0);
         if *points.last().unwrap_or(&0) != bytes.len() {
             points.push(bytes.len());
@@ -567,4 +572,40 @@ pub fn split_points_to_ranges(points: &[usize], len: usize) -> Vec<Range<usize>>
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Records start at every multiple of 4, including 0.
+    struct FixedWidthSplitter;
+
+    impl Splitter for FixedWidthSplitter {
+        fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+            (from..bytes.len()).find(|&p| p % 4 == 0)
+        }
+
+        fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    fn find_split_points_no_duplicate_leading_zero() {
+        // Input shorter than the planned chunk count: bytes.len() / n == 0
+        // puts every nominal offset at 0, so without the guard the prepended
+        // 0 duplicates the candidate at 0.
+        let bytes = vec![0u8; 8];
+        let splitter = FixedWidthSplitter;
+        for max_chunks in [2, 8, 64, 1024] {
+            let points = splitter.find_split_points(&bytes, max_chunks);
+            assert_eq!(points.first(), Some(&0), "must start at 0");
+            assert_eq!(points.last(), Some(&bytes.len()), "must end at len");
+            assert!(
+                points.windows(2).all(|w| w[0] < w[1]),
+                "duplicate or unsorted points for max_chunks={max_chunks}: {points:?}"
+            );
+        }
+    }
 }
