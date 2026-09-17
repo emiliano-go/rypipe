@@ -71,6 +71,12 @@ impl MemoryBudget {
 /// ≈ 800k batches); still bounded by file scan cost.
 pub const MAX_SPLIT_CHUNKS: usize = 100_000;
 
+/// Minimum rows per emitted batch when the memory budget cannot hold a
+/// single row. Batches are oversize in that regime regardless (ordinary
+/// mode permits this), and per-row batches would let batch count — and
+/// consumer cost — grow linearly with row count.
+pub const MIN_ROWS_OVERSIZE_BATCH: usize = 64;
+
 /// Parse an input in bounded batches to stay within a memory budget.
 pub struct BoundedExecutor {
     budget: MemoryBudget,
@@ -106,22 +112,31 @@ impl BoundedExecutor {
         &self,
         bytes: &[u8],
         splitter: &dyn Splitter,
-    ) -> (Vec<Range<usize>>, usize, usize) {
+    ) -> (Vec<Range<usize>>, usize, usize, bool) {
         let bytes_per_row = splitter
             .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
             .max(1);
         // Input, growing columns, merge buffers and Arrow output overlap.
         let batch_bytes = self.batch_target_bytes();
         let total_rows_est = bytes.len() / bytes_per_row;
+        // When the budget cannot hold even one row, every batch is oversize
+        // anyway (permitted in ordinary mode), so per-row batches only
+        // explode the batch count — consumers concatenating thousands of
+        // single-row batches degrade quadratically. Floor at a minimum
+        // batch size in that regime, and report the regime so consume_chunks
+        // does not adapt it back down (the capacity-based adaptive estimate
+        // is inflated by builder preallocation and collapses to 1).
+        let oversize = batch_bytes < bytes_per_row;
+        let min_rows = if oversize { MIN_ROWS_OVERSIZE_BATCH } else { 1 };
         let rows_per_batch = (batch_bytes / bytes_per_row)
-            .max(1)
+            .max(min_rows)
             .min(total_rows_est.max(1));
 
         let num_batches = bytes.len().div_ceil(batch_bytes).max(1);
         let capped = num_batches.min(self.split_cap);
         let split_points = splitter.find_split_points(bytes, capped);
         let chunks = split_points_to_ranges(&split_points, bytes.len());
-        (chunks, rows_per_batch, bytes_per_row)
+        (chunks, rows_per_batch, bytes_per_row, oversize)
     }
 
     fn parse_chunk<P>(
@@ -189,6 +204,7 @@ impl BoundedExecutor {
         &self,
         chunks: I,
         rows_per_batch: usize,
+        oversize: bool,
         plan: Arc<ExecutionPlan>,
         consumer: &mut C,
         ledger: &mut BudgetLedger,
@@ -209,14 +225,24 @@ impl BoundedExecutor {
                     .capacity_bytes()
                     .saturating_add(chunk_engine.capacity_bytes()),
             );
-            let rows_per_batch = rows_per_batch.min(
-                (self.budget.bytes() / 8)
-                    .saturating_mul(chunk_rows)
-                    .checked_div(chunk_engine.capacity_bytes().max(1))
-                    .unwrap_or(1)
-                    .max(1),
-            );
-            if rows_in_batch > 0
+            let adaptive = (self.budget.bytes() / 8)
+                .saturating_mul(chunk_rows)
+                .checked_div(chunk_engine.capacity_bytes().max(1))
+                .unwrap_or(1)
+                .max(1);
+            // Oversize regime (budget cannot hold one input row): every
+            // batch is oversize regardless (permitted in ordinary mode), so
+            // keep the planned minimum batch size instead of adapting to
+            // per-row splits, and do not flush early — accumulation across
+            // chunks is what keeps the batch count (and consumer cost)
+            // sub-linear.
+            let rows_per_batch = if oversize {
+                rows_per_batch
+            } else {
+                rows_per_batch.min(adaptive)
+            };
+            if !oversize
+                && rows_in_batch > 0
                 && batch_engine
                     .capacity_bytes()
                     .saturating_add(chunk_engine.capacity_bytes())
@@ -232,13 +258,14 @@ impl BoundedExecutor {
             ledger.set_builders(batch_engine.capacity_bytes());
             rows_in_batch += chunk_rows;
             while rows_in_batch >= rows_per_batch
-                || batch_engine.bytes_used() >= self.budget.bytes()
+                || (!oversize && batch_engine.bytes_used() >= self.budget.bytes())
             {
                 if batch_engine.num_rows() == 0 {
                     break;
                 }
                 let n = rows_per_batch.min(batch_engine.num_rows());
-                let n = if batch_engine.bytes_used() >= self.budget.bytes()
+                let n = if !oversize
+                    && batch_engine.bytes_used() >= self.budget.bytes()
                     && batch_engine.num_rows() > 1
                 {
                     let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
@@ -337,7 +364,8 @@ impl BoundedExecutor {
             return Ok(());
         }
 
-        let (mut chunks, rows_per_batch, bytes_per_row) = self.plan_chunks(bytes, splitter);
+        let (mut chunks, rows_per_batch, bytes_per_row, oversize) =
+            self.plan_chunks(bytes, splitter);
 
         // Guard against degenerate splitter output that produces no ranges.
         if chunks.is_empty() {
@@ -356,7 +384,7 @@ impl BoundedExecutor {
                 budget,
             )
         });
-        self.consume_chunks(chunks, rows_per_batch, plan, consumer, ledger, stats)
+        self.consume_chunks(chunks, rows_per_batch, oversize, plan, consumer, ledger, stats)
     }
 
     /// Parse an in-memory byte slice in bounded batches, returning one
@@ -502,7 +530,8 @@ impl BoundedExecutor {
             return Ok(());
         }
 
-        let (mut chunks, rows_per_batch, bytes_per_row) = self.plan_chunks(bytes, splitter);
+        let (mut chunks, rows_per_batch, bytes_per_row, oversize) =
+            self.plan_chunks(bytes, splitter);
 
         // Guard against degenerate splitter output that produces no ranges.
         if chunks.is_empty() {
@@ -538,7 +567,7 @@ impl BoundedExecutor {
                 budget,
             )
         });
-        self.consume_chunks(parsed_chunks, rows_per_batch, plan, consumer, ledger, stats)
+        self.consume_chunks(parsed_chunks, rows_per_batch, oversize, plan, consumer, ledger, stats)
     }
 }
 
@@ -597,6 +626,82 @@ mod tests {
                 chunks.len()
             );
         }
+    }
+
+    /// Newline-delimited `key=value` rows, for bounded-path tests.
+    #[derive(Clone)]
+    struct KeyValueParser;
+
+    impl crate::decoder::RecordParser for KeyValueParser {
+        fn validate(&self, bytes: &[u8]) -> crate::Result<()> {
+            simdutf8::basic::from_utf8(bytes)?;
+            Ok(())
+        }
+
+        fn parse_chunk(
+            &self,
+            bytes: &[u8],
+            sink: &mut dyn crate::decoder::ColumnarSink,
+        ) -> crate::Result<()> {
+            let text =
+                std::str::from_utf8(bytes).map_err(|e| crate::Error::Plan(e.to_string()))?;
+            for line in text.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                sink.begin_row();
+                for token in line.split_whitespace() {
+                    if let Some((k, v)) = token.split_once('=') {
+                        sink.put_field(k, crate::value::Value::Str(std::borrow::Cow::Borrowed(v)));
+                    }
+                }
+                sink.end_row();
+            }
+            Ok(())
+        }
+    }
+
+    /// Records start exactly at every multiple of 12, so chunk boundaries
+    /// never land mid-record (unlike NewlineSplitter, which is off-by-one
+    /// for this purpose).
+    struct AlignedSplitter;
+
+    impl Splitter for AlignedSplitter {
+        fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+            let start = if from == 0 { 0 } else { ((from + 11) / 12) * 12 };
+            (start < bytes.len()).then_some(start)
+        }
+
+        fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+            12
+        }
+    }
+
+    #[test]
+    fn tiny_budget_below_row_size_keeps_batch_count_bounded() {
+        // Budget (8 bytes) smaller than a single row (~11 bytes): without the
+        // oversize floor this emits one batch per row (10_000 batches), which
+        // degrades quadratically for consumers concatenating batches.
+        // ~12 bytes/row; budget (8 bytes) cannot hold a single row. Without
+        // the oversize floor this emits one batch per row (100_000 batches),
+        // which degrades quadratically for consumers concatenating batches.
+        let data = "a=1 b=2 c=3\n".repeat(100_000).into_bytes();
+        let mut consumer = crate::consumer::CollectingConsumer(Vec::new());
+        let stats = BoundedExecutor::new(MemoryBudget::new(8))
+            .run_bytes_stream_with_stats(
+                &data,
+                &AlignedSplitter,
+                KeyValueParser,
+                std::sync::Arc::new(ExecutionPlan::new()),
+                &mut consumer,
+            )
+            .unwrap();
+        assert_eq!(stats.rows, 100_000, "all rows must be delivered");
+        assert!(
+            stats.batches <= 2048,
+            "batch count must stay far below row count for pathological              budgets, got {}",
+            stats.batches
+        );
     }
 
     #[test]

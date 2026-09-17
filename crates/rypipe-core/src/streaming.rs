@@ -278,8 +278,14 @@ mod tests {
         let batches: Vec<_> = iter.collect::<Result<Vec<_>>>().unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 3);
-        // With 6B budget and ~6B/row, we expect 1 row per batch
-        assert!(batches.len() >= 2);
+        // Budget (6B) cannot hold a row, so every batch is oversize;
+        // oversize rows are batched together (MIN_ROWS_OVERSIZE_BATCH)
+        // instead of emitting one batch per row.
+        assert!(
+            !batches.is_empty() && batches.len() <= 2,
+            "got {} batches",
+            batches.len()
+        );
     }
 
     #[test]
