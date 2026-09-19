@@ -15,6 +15,6 @@ crate-type = ["cdylib", "rlib"]
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 # Keep Arrow aligned with rypipe-core so downstream adapter crates share one
 # Arrow ABI and can reuse export helpers directly.
-arrow = { version = "59.2", default-features = false, features = ["pyarrow", "ffi"] }
+arrow = { version = "60.0", default-features = false, features = ["pyarrow", "ffi"] }
 rypipe-core = { path = "../rypipe-core", version = "0.4.0", features = ["compress-all"] }
 mimalloc = { version = "0.1", default-features = false }
