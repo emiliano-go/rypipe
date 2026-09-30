@@ -23,6 +23,10 @@ pub mod budget;
 pub mod columnar;
 pub mod consumer;
 pub mod decoder;
+#[cfg(feature = "streaming-parser")]
+pub mod diagnostics;
+#[cfg(feature = "streaming-parser")]
+pub mod streaming_parser;
 pub mod dict;
 pub mod engine;
 pub mod error;
@@ -43,6 +47,10 @@ pub use auto::{resolve_engine, AutoConfig, EngineMode};
 pub use bounded::{MemoryBudget, MAX_SPLIT_CHUNKS};
 pub use budget::{BudgetLedger, BudgetPartition, StreamStats};
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
+#[cfg(feature = "streaming-parser")]
+pub use diagnostics::{NoopDiagnostics, ParseDiagnostics};
+#[cfg(feature = "streaming-parser")]
+pub use streaming_parser::{RecordStream, StreamState, StreamingRecordParser};
 pub use decoder::{
     find_next_record_boundary, is_continued_newline, split_points_to_ranges, ColumnarSink,
     RecordBoundary, RecordParser, Splitter,
