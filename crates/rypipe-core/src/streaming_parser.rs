@@ -7,10 +7,11 @@
 //! the adapter consumes whatever bytes are available and reports how many it
 //! used; `RecordStream` owns the buffer, compaction and EOF handshake.
 //!
-//! Records are emitted through the same `ColumnarSink` the batch parsers use,
-//! so an adapter can share one field-extraction path between both engines.
+//! Unlike the batch `RecordParser`, the emit callback carries an
+//! adapter-defined `Record`, so formats whose records are not a flat bag of
+//! columns (raw bytes, per-record metadata) are not forced through a
+//! `ColumnarSink`.
 
-use crate::decoder::ColumnarSink;
 use crate::diagnostics::ParseDiagnostics;
 use crate::Result;
 
@@ -27,27 +28,32 @@ pub enum StreamState {
 
 /// A parser that consumes complete records from an already-buffered prefix.
 ///
-/// `parse_available` must emit every complete record in `bytes` to `sink` and
-/// return the number of bytes consumed (a prefix of `bytes`). A trailing
-/// partial record is not consumed: the driver keeps it for the next call.
-/// When `finish()` was called on the driver, the final call sees the truncated
-/// tail and decides what it means (drop it, or report a diagnostic).
-pub trait StreamingRecordParser: Send + Sync {
+/// `parse_available` must emit every complete record in `bytes` through
+/// `emit`, and return the number of bytes consumed (a prefix of `bytes`). A
+/// trailing partial record is not consumed unless the parser retains it
+/// internally; `eof` tells the parser that no more bytes are coming, so it can
+/// flush or report truncated damage.
+pub trait StreamingRecordParser: Send {
+    /// The record type the adapter emits. May borrow nothing, so the callback
+    /// owns its data.
+    type Record;
+
     /// Validate the bytes seen so far (e.g. UTF-8). Called once per fed chunk.
     fn validate(&self, bytes: &[u8]) -> Result<()>;
 
     /// Parse complete records from `bytes`, returning bytes consumed.
     fn parse_available(
-        &self,
+        &mut self,
         bytes: &[u8],
-        sink: &mut dyn ColumnarSink,
+        eof: bool,
+        emit: &mut dyn FnMut(Self::Record),
         diag: &dyn ParseDiagnostics,
     ) -> Result<usize>;
 }
 
 /// Owns the input buffer, compaction and the EOF handshake around a
 /// [`StreamingRecordParser`].
-pub struct RecordStream<P> {
+pub struct RecordStream<P: StreamingRecordParser> {
     parser: P,
     buffer: Vec<u8>,
     start: usize,
@@ -87,24 +93,32 @@ impl<P: StreamingRecordParser> RecordStream<P> {
         self.eof
     }
 
-    /// Parse whatever complete records the buffer holds.
+    pub fn pending(&self) -> usize {
+        self.buffer.len() - self.start
+    }
+
+    /// Parse whatever complete records the buffer holds, emitting each.
     pub fn parse(
         &mut self,
-        sink: &mut dyn ColumnarSink,
+        emit: &mut dyn FnMut(P::Record),
         diag: &dyn ParseDiagnostics,
     ) -> Result<StreamState> {
-        let consumed = self
-            .parser
-            .parse_available(&self.buffer[self.start..], sink, diag)?;
-        self.start += consumed;
-        debug_assert_eq!(self.start, self.start.min(self.buffer.len()));
+        // Split borrows so the parser can read the buffer.
+        let RecordStream {
+            parser,
+            buffer,
+            start,
+            eof,
+        } = self;
+        let consumed = parser.parse_available(&buffer[*start..], *eof, emit, diag)?;
+        *start += consumed;
 
-        if self.start >= self.buffer.len() || self.start >= COMPACT_AFTER {
-            self.buffer.drain(..self.start);
-            self.start = 0;
+        if *start >= buffer.len() || *start >= COMPACT_AFTER {
+            buffer.drain(..*start);
+            *start = 0;
         }
 
-        if self.eof {
+        if *eof {
             return Ok(StreamState::Eof);
         }
         if consumed == 0 {
@@ -113,124 +127,84 @@ impl<P: StreamingRecordParser> RecordStream<P> {
             Ok(StreamState::Rows)
         }
     }
-
-    /// Bytes currently buffered but not yet consumed.
-    pub fn pending(&self) -> usize {
-        self.buffer.len() - self.start
-    }
-}
-
-#[cfg(test)]
-pub mod test_support {
-    use super::*;
-
-    /// Accumulates emitted rows as `(name, value)` pairs for assertions.
-    #[derive(Default)]
-    pub struct RowBuffer {
-        pub rows: Vec<Vec<(String, String)>>,
-        current: Vec<(String, String)>,
-    }
-
-    impl ColumnarSink for RowBuffer {
-        fn begin_row(&mut self) {
-            self.current.clear();
-        }
-        fn put_field(&mut self, name: &str, value: crate::Value<'_>) {
-            let text = match value {
-                crate::Value::Str(s) => s.into_owned(),
-                other => format!("{other:?}"),
-            };
-            self.current.push((name.to_string(), text));
-        }
-        fn end_row(&mut self) {
-            self.rows.push(std::mem::take(&mut self.current));
-        }
-        fn finish(&mut self) -> Result<arrow::record_batch::RecordBatch> {
-            Ok(arrow::record_batch::RecordBatch::new_empty(
-                std::sync::Arc::new(arrow::datatypes::Schema::empty()),
-            ))
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::RowBuffer;
     use super::*;
     use crate::diagnostics::NoopDiagnostics;
-    use crate::Value;
-    use std::borrow::Cow;
 
+    /// Emits one `String` per `\n`-terminated line.
     struct LineParser;
 
     impl StreamingRecordParser for LineParser {
+        type Record = String;
+
         fn validate(&self, bytes: &[u8]) -> Result<()> {
             simdutf8::basic::from_utf8(bytes).map_err(crate::Error::Utf8)?;
             Ok(())
         }
 
         fn parse_available(
-            &self,
+            &mut self,
             bytes: &[u8],
-            sink: &mut dyn ColumnarSink,
+            _eof: bool,
+            emit: &mut dyn FnMut(String),
             _diag: &dyn ParseDiagnostics,
         ) -> Result<usize> {
             let mut consumed = 0usize;
             for (idx, &b) in bytes.iter().enumerate() {
-                if b != b'\n' {
-                    continue;
-                }
-                let text = std::str::from_utf8(&bytes[consumed..idx]).unwrap_or("");
-                if !text.is_empty() {
-                    sink.begin_row();
-                    for token in text.split_whitespace() {
-                        if let Some((k, v)) = token.split_once('=') {
-                            sink.put_field(k, Value::Str(Cow::Borrowed(v)));
-                        }
+                if b == b'\n' {
+                    let line = std::str::from_utf8(&bytes[consumed..idx]).unwrap_or("");
+                    if !line.is_empty() {
+                        emit(line.to_string());
                     }
-                    sink.end_row();
+                    consumed = idx + 1;
                 }
-                consumed = idx + 1;
             }
             Ok(consumed)
         }
     }
 
     #[test]
-    fn emits_rows_across_chunks_and_drops_the_trailing_partial() {
+    fn emits_records_across_chunks_and_drops_the_trailing_partial() {
         let mut stream = RecordStream::new(LineParser);
         let diag = NoopDiagnostics;
-        let mut sink = RowBuffer::default();
+        let mut rows: Vec<String> = Vec::new();
         let data = b"A=1 B=2\nA=3 B=4\nA=5";
 
         stream.feed(&data[..10]).unwrap();
-        assert_eq!(stream.parse(&mut sink, &diag).unwrap(), StreamState::Rows);
-        assert_eq!(stream.pending(), 2); // "A=" kept
+        assert_eq!(
+            stream.parse(&mut |r| rows.push(r), &diag).unwrap(),
+            StreamState::Rows
+        );
+        assert_eq!(stream.pending(), 2);
 
         stream.feed(&data[10..]).unwrap();
-        assert_eq!(stream.parse(&mut sink, &diag).unwrap(), StreamState::Rows);
-        assert_eq!(stream.pending(), 3); // "A=5" is not a record yet
+        assert_eq!(
+            stream.parse(&mut |r| rows.push(r), &diag).unwrap(),
+            StreamState::Rows
+        );
+        assert_eq!(stream.pending(), 3);
 
         stream.finish();
-        assert_eq!(stream.parse(&mut sink, &diag).unwrap(), StreamState::Eof);
-        assert_eq!(stream.pending(), 3); // truncated tail discarded
-
-        assert_eq!(sink.rows.len(), 2);
         assert_eq!(
-            sink.rows[0],
-            vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+            stream.parse(&mut |r| rows.push(r), &diag).unwrap(),
+            StreamState::Eof
         );
+        assert_eq!(rows, vec!["A=1 B=2".to_string(), "A=3 B=4".to_string()]);
     }
 
     #[test]
     fn empty_feed_is_eof() {
         let mut stream = RecordStream::new(LineParser);
         stream.finish();
-        let mut sink = RowBuffer::default();
+        let mut n = 0;
         assert_eq!(
-            stream.parse(&mut sink, &NoopDiagnostics).unwrap(),
+            stream.parse(&mut |_| n += 1, &NoopDiagnostics).unwrap(),
             StreamState::Eof
         );
+        assert_eq!(n, 0);
     }
 
     #[test]
