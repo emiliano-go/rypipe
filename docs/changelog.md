@@ -9,6 +9,17 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-01
+
+### Fixed
+
+- **`rypipe-python` crate README.** The crate shipped without a `README.md`, so its crates.io page reported a missing file. Added the README plus the manifest `readme`, `homepage`, `documentation`, `keywords`, and `categories` fields.
+- **Stale `rypipe-core` README references.** The dependency example now reads `0.5`, and the pinned Arrow version was corrected from `=59.2.0` to `=59.3.0`.
+
+### CI
+
+- **`rypipe-python` trusted publishing.** `rypipe-python` now publishes to crates.io through OIDC trusted publishing, like `rypipe-core`; this is the first release to use it.
+
 ## [0.5.0] - 2026-10-01
 
 ### Added
@@ -235,6 +246,7 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **Zensical docs site.** Tutorial, building-adapters guide, architecture, advanced topics, reference pages.
 - **Benchmark harness.** Throughput benchmarks for the columnar engine.
 
+[0.5.1]: https://github.com/emiliano-go/rypipe/releases/tag/v0.5.1
 [0.5.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.5.0
 [0.4.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.4.0
 [0.3.1]: https://github.com/emiliano-go/rypipe/releases

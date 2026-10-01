@@ -26,7 +26,7 @@ and the engine handles the rest.
 
 ```toml
 [dependencies]
-rypipe-core = "0.1"
+rypipe-core = "0.5"
 ```
 
 ```rust
@@ -69,7 +69,7 @@ let batch = Pipeline::new(MySplitter::new(), MyDecoder::new())
 
 ## Arrow and PyO3 version pins
 
-`arrow` is pinned exactly (`=59.2.0`). The Arrow C Data Interface is not stable
+`arrow` is pinned exactly (`=59.3.0`). The Arrow C Data Interface is not stable
 across minor versions, and this crate exports through it. Bump only after
 testing both directions.
 
