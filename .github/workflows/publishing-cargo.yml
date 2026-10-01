@@ -58,7 +58,7 @@ jobs:
         run: cargo publish --dry-run -p rypipe-core
 
       - name: Authenticate with crates.io
-        uses: rust-lang/crates-io-auth-action@82864bf380abd3e242c564a5ba58dd29d6265b00 # v1
+        uses: rust-lang/crates-io-auth-action@9c067fc5d5c254b33978fed918cb50c032549d0e # v1
         id: auth
 
       - name: Publish rypipe-core
@@ -103,7 +103,7 @@ jobs:
 
       - name: Authenticate with crates.io
         if: steps.check.outputs.published != 'true'
-        uses: rust-lang/crates-io-auth-action@82864bf380abd3e242c564a5ba58dd29d6265b00 # v1
+        uses: rust-lang/crates-io-auth-action@9c067fc5d5c254b33978fed918cb50c032549d0e # v1
         id: auth
 
       # rypipe-python depends on rypipe-core by version. The core job runs
