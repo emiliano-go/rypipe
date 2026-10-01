@@ -32,7 +32,13 @@
     <img src="https://img.shields.io/badge/Docs-rypipe.emiliano--go.com-8A2BE2?style=for-the-badge&logo=readthedocs" alt="Docs">
   </a>
   <a href="https://pypi.org/project/rypipe/">
-    <img src="https://img.shields.io/badge/PyPI-rypipe-006DAD?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI">
+    <img src="https://img.shields.io/pypi/v/rypipe?logo=pypi&logoColor=white&style=for-the-badge" alt="PyPI">
+  </a>
+  <a href="https://crates.io/crates/rypipe-core">
+    <img src="https://img.shields.io/crates/v/rypipe-core?logo=rust&logoColor=white&style=for-the-badge" alt="rypipe-core on crates.io">
+  </a>
+  <a href="https://crates.io/crates/rypipe-python">
+    <img src="https://img.shields.io/crates/v/rypipe-python?logo=rust&logoColor=white&style=for-the-badge" alt="rypipe-python on crates.io">
   </a>
 </p>
 
