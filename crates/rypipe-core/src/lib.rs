@@ -25,8 +25,6 @@ pub mod consumer;
 pub mod decoder;
 #[cfg(feature = "streaming-parser")]
 pub mod diagnostics;
-#[cfg(feature = "streaming-parser")]
-pub mod streaming_parser;
 pub mod dict;
 pub mod engine;
 pub mod error;
@@ -41,6 +39,8 @@ pub mod profiling;
 pub mod scan;
 pub mod schema;
 pub mod streaming;
+#[cfg(feature = "streaming-parser")]
+pub mod streaming_parser;
 pub mod value;
 
 pub use arrow_export::apply_compare_filter;
@@ -48,14 +48,12 @@ pub use auto::{resolve_engine, AutoConfig, EngineMode};
 pub use bounded::{MemoryBudget, MAX_SPLIT_CHUNKS};
 pub use budget::{BudgetLedger, BudgetPartition, StreamStats};
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
-#[cfg(feature = "streaming-parser")]
-pub use diagnostics::{CollectingDiagnostics, NoopDiagnostics, ParseDiagnostics};
-#[cfg(feature = "streaming-parser")]
-pub use streaming_parser::{RecordStream, StreamState, StreamingRecordParser};
 pub use decoder::{
     find_next_record_boundary, is_continued_newline, split_points_to_ranges, ColumnarSink,
     RecordBoundary, RecordParser, Splitter,
 };
+#[cfg(feature = "streaming-parser")]
+pub use diagnostics::{CollectingDiagnostics, NoopDiagnostics, ParseDiagnostics};
 pub use engine::{LocateOnly, TableBuilder};
 #[cfg(feature = "profile")]
 pub use engine::{
@@ -74,4 +72,6 @@ pub use pipeline::Pipeline;
 pub use plan::{CompareOp, ExecutionPlan, FieldType, FilterPredicate, RegexSpec, TrimMode};
 pub use schema::{DiscoveryOpts, FrozenSchema, UnknownFieldPolicy};
 pub use streaming::StreamingBatchIterator;
+#[cfg(feature = "streaming-parser")]
+pub use streaming_parser::{RecordStream, StreamState, StreamingRecordParser};
 pub use value::Value;

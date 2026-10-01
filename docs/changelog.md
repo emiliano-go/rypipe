@@ -9,12 +9,27 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-01
+
 ### Added
 
-- **Incremental streaming parsers (`streaming-parser` feature).** `StreamingRecordParser` + `RecordStream` let an adapter consume arbitrarily chunked input (including non-seekable feeds) and emit adapter-defined records one at a time, with a `ParseDiagnostics` channel for recoverable events (malformed record, truncated input). This surface was added to support the xmlstreamer adapter, whose streaming engine previously lived outside rypipe; the engine now owns the buffer, compaction, EOF handshake and diagnostics, while the adapter keeps format-specific framing.
-- **Collecting diagnostics sink.** `CollectingDiagnostics` implements `ParseDiagnostics`, collecting warnings and counters behind a `has_events()` cheap poll and a `take_events()` drain, so streaming drivers do not allocate a list per record. `ParseDiagnostics` gains a default `has_events()`.
+- **Incremental streaming parsers (`streaming-parser` feature).** `StreamingRecordParser` + `RecordStream` let an adapter consume arbitrarily chunked input (including non-seekable feeds) and emit adapter-defined records one at a time, with a `ParseDiagnostics` channel for recoverable events (malformed record, truncated input). This surface was extracted from the xmlstreamer adapter, whose streaming engine previously lived outside rypipe; the engine now owns the buffer, compaction, EOF handshake and diagnostics, while the adapter keeps its format-specific scanner (section policy, delimiter validation, item isolation).
+- **Collecting diagnostics sink.** `CollectingDiagnostics` implements `ParseDiagnostics`, collecting warnings and counters behind a `has_events()` cheap poll and a `take_events()` drain, so streaming drivers do not allocate a list per record. `ParseDiagnostics` gains a default `has_events()`. The callback signature and the cheap-poll-and-drain shape were taken from the xmlstreamer adapter's diagnostics sink (`has_logs()`), promoted into core so every streaming adapter gets the same low-overhead path.
 - **Stage profiler.** `rypipe_core::profiling` records per-stage timing (split, validate, parse, export, merge) across all workers; disabled by default (a relaxed atomic load per stage). Exposed to Python as `rypipe.reset_stage_profile()`, `rypipe.disable_stage_profile()`, and `rypipe.stage_profile()`, so adapter authors can see where a read spends its time without a system profiler.
-- **Chunk-size floor knob.** `ExecutionPlan` gains an opt-in `min_chunk_bytes` (and `with_min_chunk_bytes`), with a matching `min_chunk_bytes` plan kwarg in the Python bindings and adapter readers. It overrides the default 2 MiB split-planning floor so adapters can tune the chunk count for heterogeneous CPUs and small/large files; the default is unchanged. Engines call the new `Splitter::find_split_points_with`, which defers to an adapter's `find_split_points` at the default floor. Added while optimizing the xmlstreamer adapter (2 performance cores + 8 efficiency cores).
+- **Chunk-size floor knob.** `ExecutionPlan` gains an opt-in `min_chunk_bytes` (and `with_min_chunk_bytes`), with a matching `min_chunk_bytes` plan kwarg in the Python bindings and adapter readers. It overrides the default 2 MiB split-planning floor so adapters can tune the chunk count for heterogeneous CPUs and small/large files; the default is unchanged. Engines call the new `Splitter::find_split_points_with`, which defers to an adapter's `find_split_points` at the default floor. Requested by the xmlstreamer adapter while tuning a laptop CPU with 2 performance cores and 8 efficiency cores; xmlstreamer now forwards the kwarg through every read entry point.
+
+### Fixed
+
+- **Duplicate leading split point on tiny inputs.** When `bytes.len()` was smaller than the requested chunk count, every nominal offset collapsed to `0` and the prepended leading split point duplicated it, violating the documented split contract (sorted, unique, first `0`, last `bytes.len()`). Zero candidates are now dropped before the prepend.
+- **Unbounded batch count under budgets smaller than one row.** A budget below a single input row collapsed `rows_per_batch` to `1`, so the bounded executor emitted one batch per row and consumers that concatenate batches (such as `arrow::ConcatenateTables`) degraded quadratically (10 MB at a 1 KB budget took about 12 s versus 0.4 s unbounded). The oversize regime now floors `rows_per_batch` at 64, skips the early flush, and only emits on the row-count condition; the same workload runs in about 0.03 s.
+
+### Documentation
+
+- **Plan and API references updated for `min_chunk_bytes`.** The plan architecture, adapter walkthrough, fusion notes, memory and chunking guide, and the Python and Rust API references document the new floor, its default, and the Python kwarg mapping.
+
+### CI
+
+- **crates.io publishing for `rypipe-python`.** The release workflow now publishes `rypipe-python` after `rypipe-core`, so adapter crates can depend on the bindings as a registry dependency instead of a local path. `rypipe-python` is still the PyO3 source of the `rypipe` PyPI wheel, not a separate Python distribution.
 
 ## [0.4.0] - 2026-09-16
 
@@ -220,6 +235,7 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **Zensical docs site.** Tutorial, building-adapters guide, architecture, advanced topics, reference pages.
 - **Benchmark harness.** Throughput benchmarks for the columnar engine.
 
+[0.5.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.5.0
 [0.4.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.4.0
 [0.3.1]: https://github.com/emiliano-go/rypipe/releases
 [0.3.0]: https://github.com/emiliano-go/rypipe/releases

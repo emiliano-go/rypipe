@@ -102,10 +102,7 @@ impl ParallelExecutor {
                     );
                     let t = Instant::now();
                     parser.parse_chunk_generic(&bytes[range.clone()], &mut sink)?;
-                    crate::profiling::add(
-                        crate::profiling::PARSE,
-                        t.elapsed().as_nanos() as u64,
-                    );
+                    crate::profiling::add(crate::profiling::PARSE, t.elapsed().as_nanos() as u64);
                     Ok(sink)
                 }))
                 .unwrap_or_else(|payload| {
@@ -166,10 +163,7 @@ impl ParallelExecutor {
         if !plan.auto_dict && schemas_consistent(&engines) {
             let t = Instant::now();
             let out = engines_to_record_batches(engines, &plan);
-            crate::profiling::add(
-                crate::profiling::EXPORT,
-                t.elapsed().as_nanos() as u64,
-            );
+            crate::profiling::add(crate::profiling::EXPORT, t.elapsed().as_nanos() as u64);
             return out;
         }
 
@@ -286,10 +280,7 @@ impl ParallelExecutor {
             merged.extend(engine)?;
         }
         let batch = merged.finish()?;
-        crate::profiling::add(
-            crate::profiling::MERGE,
-            t_merge.elapsed().as_nanos() as u64,
-        );
+        crate::profiling::add(crate::profiling::MERGE, t_merge.elapsed().as_nanos() as u64);
         if let Some(ref filter) = plan.filter {
             return Ok(vec![apply_compare_filter(batch, filter)?]);
         }

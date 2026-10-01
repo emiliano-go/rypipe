@@ -233,39 +233,39 @@ fn default_find_split_points<S: Splitter + ?Sized>(
     min_chunk_bytes: usize,
 ) -> Vec<usize> {
     if max_chunks <= 1 || bytes.is_empty() {
-            return vec![0, bytes.len()];
-        }
-        let n = plan_chunk_count_with(
-            bytes.len(),
-            max_chunks,
-            SplitMode::Parallel,
-            min_chunk_bytes,
-        );
-        let skip = splitter.skip_regions();
-        // Planning must not start a global worker pool for bounded readers.
-        let mut points: Vec<usize> = (1..n)
-            .filter_map(|i| {
-                let approx = bytes.len() / n * i;
-                let pos = splitter.next_record_start(bytes, approx)?;
-                // Reject candidates inside skip regions.
-                if skip.is_some_and(|finder| in_skip_region(bytes, pos, finder)) {
-                    return None;
-                }
-                Some(pos)
-            })
-            .collect();
+        return vec![0, bytes.len()];
+    }
+    let n = plan_chunk_count_with(
+        bytes.len(),
+        max_chunks,
+        SplitMode::Parallel,
+        min_chunk_bytes,
+    );
+    let skip = splitter.skip_regions();
+    // Planning must not start a global worker pool for bounded readers.
+    let mut points: Vec<usize> = (1..n)
+        .filter_map(|i| {
+            let approx = bytes.len() / n * i;
+            let pos = splitter.next_record_start(bytes, approx)?;
+            // Reject candidates inside skip regions.
+            if skip.is_some_and(|finder| in_skip_region(bytes, pos, finder)) {
+                return None;
+            }
+            Some(pos)
+        })
+        .collect();
 
-        points.sort_unstable();
-        points.dedup();
-        // Drop candidates at 0: the prepend below already supplies the
-        // leading split point, and keeping them would duplicate it (this
-        // happens when bytes.len() < n, where bytes.len() / n == 0 puts
-        // every nominal offset at 0).
-        points.retain(|&p| p > 0);
-        points.insert(0, 0);
-        if *points.last().unwrap_or(&0) != bytes.len() {
-            points.push(bytes.len());
-        }
+    points.sort_unstable();
+    points.dedup();
+    // Drop candidates at 0: the prepend below already supplies the
+    // leading split point, and keeping them would duplicate it (this
+    // happens when bytes.len() < n, where bytes.len() / n == 0 puts
+    // every nominal offset at 0).
+    points.retain(|&p| p > 0);
+    points.insert(0, 0);
+    if *points.last().unwrap_or(&0) != bytes.len() {
+        points.push(bytes.len());
+    }
     points
 }
 
@@ -637,7 +637,7 @@ mod tests {
             (from..bytes.len()).find(|&p| p % 4 == 0)
         }
 
-        fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+        fn estimate_bytes_per_row(&self, _sample: &[u8]) -> usize {
             4
         }
     }
@@ -669,7 +669,9 @@ mod chunk_floor_tests {
     struct FixedSplitter;
     impl Splitter for FixedSplitter {
         fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
-            (from..bytes.len()).find(|&p| bytes[p] == b'\n').map(|p| p + 1)
+            (from..bytes.len())
+                .find(|&p| bytes[p] == b'\n')
+                .map(|p| p + 1)
         }
         fn estimate_bytes_per_row(&self, _sample: &[u8]) -> usize {
             4

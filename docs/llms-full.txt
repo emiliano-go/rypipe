@@ -1,7 +1,7 @@
 # rypipe Documentation
 > Full documentation for rypipe: format-agnostic columnar ingestion engine with Rust core and Python bindings
 > Source: https://rypipe.emiliano-go.com
-> Pages: 66
+> Pages: 75
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/advanced/adapter-design/
@@ -1394,7 +1394,8 @@ file size and execution mode.
 4. Splits the file into batches sized to fit the memory budget, capped at 100,000
    split points by default. This executor cap is separate from the default
    splitter's 1024-point cap and is configurable via `max_split_chunks` on the
-   plan. A batch can still exceed the allowance when one record or either cap
+   plan. The split-planning chunk-size floor (default 2 MiB) is overridable via
+   `min_chunk_bytes` on the plan. A batch can still exceed the allowance when one record or either cap
    prevents finer splitting.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates.
@@ -4773,6 +4774,9 @@ pub struct ExecutionPlan {
   declared type instead of silently storing null (builder: `with_strict_types`).
 - **`max_split_chunks`**: Cap on bounded-streaming chunks (default 100,000;
   builder: `with_max_split_chunks`).
+- **`min_chunk_bytes`**: Opt-in split-planning chunk-size floor (default 2 MiB;
+  builder: `with_min_chunk_bytes`). Lower it for many small cores, raise it for
+  fewer/larger chunks.
 - **`observer`**: Optional `RowObserver` whose hooks fire from parse threads
   (builder: `with_observer`).
 
@@ -10648,8 +10652,8 @@ name = "_rypipe_log"
 crate-type = ["cdylib"]
 
 [dependencies]
-rypipe-core = "0.3"
-rypipe_python = { package = "rypipe-python", version = "0.3.2" }
+rypipe-core = "0.5"
+rypipe_python = { package = "rypipe-python", version = "0.5.0" }
 arrow = { version = "=59.3.0", default-features = false, features = ["pyarrow", "ffi"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 memchr = "2"
@@ -10949,7 +10953,7 @@ plan arguments; `path`, `use_mmap`, and `prefault` belong to the reader.
 
 !!! note "Local development before publication"
 
-    Use `rypipe_python = { package = "rypipe-python", version = "0.3.2" }`.
+    Use `rypipe_python = { package = "rypipe-python", version = "0.5.0" }`.
     The dependency alias gives the helper a Rust name independent of its
     Python extension name. Errors use the same Python classes across adapters.
 
@@ -11249,10 +11253,32 @@ PAGE: https://rypipe.emiliano-go.com/changelog/
 
 All notable changes to rypipe, newest first. Versions follow semantic versioning and are tagged in the repository.
 
-## [0.3.2] - 2026-09-11
+## [Unreleased]
+
+## [0.5.0] - 2026-10-01
 
 ### Added
 
+- **Incremental streaming parsers (`streaming-parser` feature).** `StreamingRecordParser` + `RecordStream` let an adapter consume arbitrarily chunked input (including non-seekable feeds) and emit adapter-defined records one at a time, with a `ParseDiagnostics` channel for recoverable events (malformed record, truncated input). This surface was added to support the xmlstreamer adapter, whose streaming engine previously lived outside rypipe; the engine now owns the buffer, compaction, EOF handshake and diagnostics, while the adapter keeps format-specific framing.
+- **Collecting diagnostics sink.** `CollectingDiagnostics` implements `ParseDiagnostics`, collecting warnings and counters behind a `has_events()` cheap poll and a `take_events()` drain, so streaming drivers do not allocate a list per record. `ParseDiagnostics` gains a default `has_events()`.
+- **Stage profiler.** `rypipe_core::profiling` records per-stage timing (split, validate, parse, export, merge) across all workers; disabled by default (a relaxed atomic load per stage). Exposed to Python as `rypipe.reset_stage_profile()`, `rypipe.disable_stage_profile()`, and `rypipe.stage_profile()`, so adapter authors can see where a read spends its time without a system profiler.
+- **Chunk-size floor knob.** `ExecutionPlan` gains an opt-in `min_chunk_bytes` (and `with_min_chunk_bytes`), with a matching `min_chunk_bytes` plan kwarg in the Python bindings and adapter readers. It overrides the default 2 MiB split-planning floor so adapters can tune the chunk count for heterogeneous CPUs and small/large files; the default is unchanged. Engines call the new `Splitter::find_split_points_with`, which defers to an adapter's `find_split_points` at the default floor. Added while optimizing the xmlstreamer adapter (2 performance cores + 8 efficiency cores).
+
+### CI
+
+- **crates.io publishing for `rypipe-python`.** The release workflow now publishes `rypipe-python` after `rypipe-core`, so adapter crates can depend on the bindings as a registry dependency instead of a local path. `rypipe-python` is still the PyO3 source of the `rypipe` PyPI wheel, not a separate Python distribution.
+
+## [0.4.0] - 2026-09-16
+
+### Added
+
+- **`budget` module: `BudgetPartition`, `BudgetLedger`, `StreamStats`.** New public module for memory-budget accounting. `BudgetPartition` derives per-component limits from a `MemoryBudget` with proof tests that the worst case sums within budget; `BudgetLedger` tracks capacity-accurate live bytes and their peak; `StreamStats` reports batches, rows, `oversize_batches`, and `peak_tracked_bytes` per streaming run. `BoundedExecutor` gains `run_stream_with_stats` and `run_bytes_stream_with_stats`; sizing and enforcement are unchanged.
+- **Strict memory budget contract.** `MemoryBudget.with_strict(true)` makes the budget a hard limit: capacity-accurate per-builder checks via `TableBuilder::set_memory_budget` error with `Error::Memory { used, limit }` when an allowance is exceeded. Parallel streaming derives per-worker chunk size and slot allowances from the budget.
+- **Memory errors map to Python `MemoryError`.** The engine memory error now surfaces as `MemoryError` in the bindings instead of a generic exception.
+- **Declarative stateful parsing.** `Splitter` gains `RecordBoundary`, `continuation_char`, and `comment_prefixes` for multi-line record formats (line continuations, comment lines), plus `find_next_record_boundary` and `is_continued_newline` helpers.
+- **`_rypipe.errors` module.** Typed exception module for the Python bindings.
+- **Fuzz targets and seed corpora.** cargo-fuzz targets with documented seeds and CI smoke campaigns.
+- **`engine_probe` example and benchmark harness update.** Probe binary for engine internals, with recorded memory and boundary benchmark results.
 - **Expression API string transforms.** Added `strip`, `lstrip`, `rstrip`, `lower`, `upper`, `replace`, and `length` methods to the `col()` expression API. These produce fusable filter spec dicts that run in the Rust parse loop.
 - **Partial pushdown in CastTypes.** Non-pushable type casts (e.g. custom Python types) are skipped during plan fusion instead of falling back to a full Python pass over the table.
 - **Fused `is_type`, `is_null`, `contains` ops.** `_fuse_filter_spec` now handles `is_type`, `is_null`, and `contains` operators, keeping them in the Rust parse loop instead of falling back to Python.
@@ -11298,6 +11324,20 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **Dead code removed.** Legacy `run_mapped` and `apply_plan_filter` functions deleted from `bounded.rs`. Dead `_arrow_iter` removed from `fusion.py`.
 - **Dictionary unification performance.** Removed unnecessary `clone` of `column_order` during per-chunk dictionary unification in `parallel.rs`.
 - **FFI error propagation.** `unwrap()` at the Python FFI boundary in `plan_kwargs` replaced with `PlanError` for actionable error messages.
+
+### Documentation
+
+- **Docs overhaul.** Reworked tutorial, building-adapters, advanced, and architecture sections; compact top-level nav with dropdowns.
+- **Integrations section.** New guides for Arrow, DuckDB, Polars, pandas, Parquet, Delta Lake, Iceberg, Spark, direct SQL databases, and Excel.
+- **Examples section.** Benchmark pages, engine probe walkthrough, report fixture, and three example adapters (INI, LDIF, Properties).
+- **Memory contract documented.** What the budget covers, what it does not, and how strict mode behaves.
+- **Page titles fixed.** Front-matter titles across all pages; the homepage no longer shows a code comment as its browser tab title.
+
+### CI
+
+- **Adapter and template job.** Native example adapters are built and tested as wheels; the cargo-generate template is generated and smoke-tested.
+- **Linux ARM64 regression job.** Native Rust tests now also run on ARM64.
+- **Publishing workflows.** Fixed the pinned `rust-toolchain` invocation to pass the now-required `toolchain` input.
 
 ## [0.3.1] - 2026-09-11
 
@@ -11431,6 +11471,16 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 - **aarch64 manylinux cross-compilation** with zig.
 - **Zensical docs site.** Tutorial, building-adapters guide, architecture, advanced topics, reference pages.
 - **Benchmark harness.** Throughput benchmarks for the columnar engine.
+
+[0.5.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.5.0
+[0.4.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.4.0
+[0.3.1]: https://github.com/emiliano-go/rypipe/releases
+[0.3.0]: https://github.com/emiliano-go/rypipe/releases
+[0.2.2]: https://github.com/emiliano-go/rypipe/releases/tag/v0.2.2
+[0.2.1]: https://github.com/emiliano-go/rypipe/releases/tag/v0.2.1
+[0.2.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.2.0
+[0.1.1]: https://github.com/emiliano-go/rypipe/releases/tag/v0.1.1
+[0.1.0]: https://github.com/emiliano-go/rypipe/releases/tag/v0.1.0
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/contributing/
@@ -12404,6 +12454,9 @@ separate packages. Install the engine plus the adapters you need.
 
 ## Quick start { #quick-start }
 
+Any parser you build on rypipe (or any adapter package you install) gets this same API: a small Rust crate behind a clean, chainable Python interface with fused filtering, parallel parsing, and bounded-memory streaming. The quick start below shows crxml as a concrete example; your format's adapter would look and behave the same.
+
+
 [Download sample report.xml](examples/report.xml)
 
 ### From Python { #from-python }
@@ -12487,6 +12540,139 @@ rypipe/
 </div>
 
 ========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/arrow/
+========================================================================
+
+# Apache Arrow ecosystem { #arrow-ecosystem }
+
+rypipe's output is an Arrow table. Any library that speaks the Arrow C
+Data Interface or the Arrow PyCapsule protocol can consume it directly:
+DuckDB, Polars, pandas, DataFusion, ADBC drivers, Delta Lake, Iceberg,
+Ray, Dask, and more.
+
+## The handoff pattern { #handoff-pattern }
+
+```python
+from crxml import CrystalXMLSource
+
+table = CrystalXMLSource("report.xml", row_tag="Details").to_arrow()
+```
+
+From there:
+
+```python
+import duckdb
+duckdb.sql("SELECT * FROM table").df()          # SQL
+
+import polars as pl
+pl.from_arrow(table)                             # Polars
+
+import pandas as pd
+table.to_pandas(types_mapper=pd.ArrowDtype)      # pandas
+
+import pyarrow.dataset as ds
+ds.dataset(table)                                # Arrow datasets
+```
+
+## Streaming batches { #streaming-batches }
+
+When a consumer accepts record batches rather than a whole table, use
+`iter_record_batches` to stay within a memory budget:
+
+```python
+source = CrystalXMLSource("big-report.xml", row_tag="Details")
+
+for batch in source.iter_record_batches(memory="64MiB"):
+    ...  # hand each batch to the consumer
+```
+
+ADBC drivers and `pyarrow.parquet.ParquetWriter` both work this way;
+see the Direct SQL and Parquet pages for complete examples.
+
+## Interchange with other DataFrames { #interchange }
+
+For DataFrame libraries without direct Arrow support, the dataframe
+interchange protocol (`__dataframe__`) is a fallback:
+
+```python
+from rypipe import to_polars
+
+df = to_polars(pipeline)
+other = some_lib.from_dataframe(df)   # via the interchange protocol
+```
+
+Prefer the Arrow route where available; it is zero-copy and better
+specified for nested types.
+
+## Why this works { #why-this-works }
+
+Arrow is designed as a common in-memory language for columnar data.
+Because rypipe never leaves Arrow, integration with the broader
+ecosystem is usually a single function call, and often zero copies.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/delta-lake/
+========================================================================
+
+# Delta Lake { #delta-lake }
+
+Delta Lake tables are Parquet files plus a transaction log. The
+`deltalake` Python package accepts Arrow tables directly, so rypipe
+output can be written without Spark.
+
+## Setup { #setup }
+
+```bash
+pip install "crxml[all]" deltalake
+```
+
+## Basic usage { #basic-usage }
+
+```python
+from crxml import CrystalXMLSource, CastTypes
+from deltalake import write_deltalake
+
+table = (
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float})
+).to_arrow()
+
+write_deltalake("s3://bucket/sales", table, mode="append")
+```
+
+Modes are `"append"`, `"overwrite"`, and `"error"` (default). The table
+can live on local disk, S3, GCS, or Azure Blob Storage.
+
+## Creating a partitioned table { #partitioned }
+
+```python
+write_deltalake(
+    "s3://bucket/sales",
+    table,
+    mode="overwrite",
+    partition_by=["Department"],
+)
+```
+
+## Reading back { #reading-back }
+
+```python
+from deltalake import DeltaTable
+
+dt = DeltaTable("s3://bucket/sales")
+df = dt.to_pandas()
+```
+
+`DeltaTable.to_pyarrow_table()` and `.to_polars()` are also available,
+and the table can be registered with DuckDB or Spark for SQL queries.
+
+## Why this works { #why-this-works }
+
+`write_deltalake` consumes any Arrow-compatible object through the Arrow
+C Data Interface. rypipe produces Arrow tables, so the data moves into
+the Delta writer as columnar batches with no intermediate format.
+
+========================================================================
 PAGE: https://rypipe.emiliano-go.com/integrations/duckdb/
 ========================================================================
 
@@ -12563,6 +12749,520 @@ rypipe produces Arrow tables. DuckDB's Python client accepts any
 Arrow-compatible object (`pyarrow.Table`, `pandas.DataFrame`,
 `polars.DataFrame`) as a table reference in SQL. The data never leaves
 Arrow's columnar format until DuckDB materializes a result.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/excel/
+========================================================================
+
+# Excel { #excel }
+
+Excel export goes through pandas: convert the pipeline with `to_pandas`,
+then write with `DataFrame.to_excel`.
+
+## Setup { #setup }
+
+```bash
+pip install "crxml[all]" openpyxl
+```
+
+`openpyxl` handles `.xlsx` files. Use `xlsxwriter` instead if you need
+charts or heavy formatting.
+
+## Basic usage { #basic-usage }
+
+```python
+from crxml import CrystalXMLSource, CastTypes, to_pandas
+
+df = to_pandas(
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float})
+)
+
+df.to_excel("sales.xlsx", sheet_name="Details", index=False)
+```
+
+## Multiple sheets { #multiple-sheets }
+
+```python
+import pandas as pd
+
+summary = df.groupby("Department", as_index=False)["Amount"].sum()
+
+with pd.ExcelWriter("sales.xlsx") as writer:
+    df.to_excel(writer, sheet_name="Details", index=False)
+    summary.to_excel(writer, sheet_name="Summary", index=False)
+```
+
+## Notes { #notes }
+
+- Excel caps sheets at 1,048,576 rows. For larger outputs, write Parquet
+  or CSV instead (see the Parquet integration).
+- Arrow-backed dtypes are converted by pandas on export; `CastTypes` in
+  the pipeline ensures numbers arrive as numbers, not text.
+
+## Why this works { #why-this-works }
+
+`to_excel` is a pandas feature, and `to_pandas` is rypipe's native sink.
+The pipeline handles parsing and typing; pandas handles the workbook
+serialization.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/iceberg/
+========================================================================
+
+# Apache Iceberg { #iceberg }
+
+PyIceberg accepts Arrow tables for appends and overwrites, so rypipe
+output loads into an Iceberg table directly.
+
+## Setup { #setup }
+
+```bash
+pip install "crxml[all]" "pyiceberg[sql-sqlite]"
+```
+
+The example below uses a local SQLite-backed catalog; swap the catalog
+config for REST, Glue, Hive, or Nessie in production.
+
+## Basic usage { #basic-usage }
+
+```python
+from crxml import CrystalXMLSource, CastTypes
+from pyiceberg.catalog import load_catalog
+
+table = (
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float})
+).to_arrow()
+
+catalog = load_catalog(
+    "default",
+    **{
+        "type": "sql",
+        "uri": "sqlite:///catalog.db",
+        "warehouse": "file:///tmp/warehouse",
+    },
+)
+
+catalog.create_namespace_if_not_exists("sales")
+tbl = catalog.create_table_if_not_exists("sales.details", schema=table.schema)
+tbl.append(table)
+```
+
+## Overwrites and upserts { #overwrites }
+
+```python
+tbl.overwrite(table)                    # replace all data
+tbl.upsert(df, join_cols=["Id"])        # merge on key columns
+```
+
+## Reading back { #reading-back }
+
+```python
+arrow_table = tbl.scan().to_arrow()
+```
+
+Iceberg tables are also readable by DuckDB, Polars, Spark, and Trino, so
+the same table can serve SQL queries without extra connectors.
+
+## Why this works { #why-this-works }
+
+PyIceberg's `append`, `overwrite`, and `upsert` take `pyarrow.Table`
+input and write Parquet data files through Arrow's columnar layout.
+rypipe already produces Arrow, so ingestion is a schema-checked transfer,
+not a conversion.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/pandas/
+========================================================================
+
+# pandas { #pandas }
+
+`to_pandas` is rypipe's primary Python sink. It converts a pipeline into
+a pandas DataFrame, Arrow-backed by default.
+
+## Setup { #setup }
+
+```bash
+pip install "crxml[all]"
+```
+
+The `all` extra includes pandas and pyarrow.
+
+## Basic usage { #basic-usage }
+
+```python
+from crxml import CrystalXMLSource, CastTypes, to_pandas
+
+df = to_pandas(
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float})
+)
+
+df.groupby("Department")["Amount"].sum()
+```
+
+## Dtype backends { #dtype-backends }
+
+By default, columns use Arrow-backed dtypes (`pd.ArrowDtype`), which
+preserve nulls and avoid the object-dtype fallback of NumPy conversion.
+Pass `dtype_backend="numpy"` for classic NumPy-backed columns:
+
+```python
+df = to_pandas(pipeline, dtype_backend="numpy")
+```
+
+## Chunked construction { #chunked-construction }
+
+Two knobs control how the DataFrame is built:
+
+- `chunksize=` splits the finished Arrow table into batches and
+  concatenates DataFrames incrementally; useful when
+  `table.to_pandas()` on the full table spikes memory.
+- `memory=` (e.g. `"64MiB"`) uses the adapter's streaming reader via
+  `iter_record_batches`, so parsing itself stays within the budget.
+
+```python
+df = to_pandas(
+    CrystalXMLSource("big-report.xml", row_tag="Details"),
+    memory="64MiB",
+)
+```
+
+All output remains in memory; the budget bounds the parsing side only.
+
+## Why this works { #why-this-works }
+
+pandas ≥ 2.0 converts Arrow tables efficiently and can back columns with
+Arrow memory directly. rypipe's parser already produces Arrow, so the
+conversion is a columnar transfer rather than row-by-row Python object
+materialization.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/parquet/
+========================================================================
+
+# Parquet files { #parquet }
+
+Parquet is Arrow's on-disk companion format. `to_parquet` writes a
+pipeline directly, with optional streaming for large inputs.
+
+## Setup { #setup }
+
+```bash
+pip install "crxml[all]"
+```
+
+The `all` extra includes pyarrow.
+
+## Basic usage { #basic-usage }
+
+```python
+from crxml import CrystalXMLSource, CastTypes
+from rypipe import to_parquet
+
+to_parquet(
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float}),
+    "sales.parquet",
+)
+```
+
+Extra keyword arguments are forwarded to
+`pyarrow.parquet.ParquetWriter`, for example `compression="zstd"` or
+`row_group_size=100_000`.
+
+## Streaming writes { #streaming-writes }
+
+Pass a `memory` budget to parse and write incrementally through a
+`ParquetWriter`, so neither parsing nor writing holds the whole dataset:
+
+```python
+to_parquet(
+    CrystalXMLSource("big-report.xml", row_tag="Details"),
+    "sales.parquet",
+    memory="64MiB",
+    compression="zstd",
+)
+```
+
+Each parsed batch becomes one or more row groups, bounded by the budget.
+Adapters without streaming support materialize the input table first.
+
+## Reading back { #reading-back }
+
+```python
+import pyarrow.parquet as pq
+
+table = pq.read_table("sales.parquet")
+```
+
+For multi-file datasets, use `pyarrow.dataset` or any Parquet-aware
+engine (DuckDB, Polars, Spark); see the other integration pages.
+
+## Why this works { #why-this-works }
+
+rypipe's parser produces Arrow record batches, and Parquet is a columnar
+serialization of Arrow-compatible data. Writing is a direct encoding
+step; no row-by-row conversion is involved.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/polars/
+========================================================================
+
+# Polars { #polars }
+
+Polars reads Arrow tables natively through `pl.from_arrow`, so rypipe
+output lands in a Polars DataFrame without an intermediate pandas step.
+
+## Setup { #setup }
+
+```bash
+pip install "crxml[all]"
+```
+
+The `all` extra includes polars, pandas, and pyarrow.
+
+## Basic usage { #basic-usage }
+
+Use the built-in `to_polars` sink:
+
+```python
+from crxml import CrystalXMLSource, CastTypes
+from rypipe import to_polars
+
+df = to_polars(
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float})
+)
+
+df.group_by("Department").agg(pl.col("Amount").sum())
+```
+
+`to_polars` accepts a Source, a Pipeline, or any iterable of dicts.
+
+## Streaming construction { #streaming-construction }
+
+For large inputs, pass a `memory` budget. Batches are produced via
+`iter_record_batches` and concatenated incrementally, so the parser never
+holds the whole file in memory:
+
+```python
+from crxml import CrystalXMLSource
+from rypipe import to_polars
+
+df = to_polars(
+    CrystalXMLSource("big-report.xml", row_tag="Details"),
+    memory="64MiB",
+)
+```
+
+All output still resides in memory; the budget bounds the parsing side
+only. Adapters without streaming support materialize the input table
+first.
+
+## Direct Arrow { #direct-arrow }
+
+If you already have an Arrow table, pass it straight to Polars:
+
+```python
+from crxml import CrystalXMLSource
+import polars as pl
+
+table = CrystalXMLSource("report.xml", row_tag="Details").to_arrow()
+df = pl.from_arrow(table)
+```
+
+Polars reads Arrow memory directly (zero copy for most types via the
+Arrow C Data Interface).
+
+## Why this works { #why-this-works }
+
+Polars is built on Arrow. `pl.from_arrow` accepts `pyarrow.Table`,
+`pyarrow.RecordBatch`, and any object implementing the Arrow PyCapsule
+interface, so rypipe's columnar output moves into Polars without
+row-by-row conversion.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/spark/
+========================================================================
+
+# Apache Spark { #spark }
+
+PySpark creates DataFrames from pandas DataFrames, and with Arrow
+optimization enabled the transfer is columnar rather than row-by-row.
+
+## Setup { #setup }
+
+```bash
+pip install "crxml[all]" pyspark
+```
+
+## Basic usage { #basic-usage }
+
+```python
+from crxml import CrystalXMLSource, CastTypes, to_pandas
+from pyspark.sql import SparkSession
+
+spark = (
+    SparkSession.builder
+    .appName("rypipe")
+    .config("spark.sql.execution.arrow.pyspark.enabled", "true")
+    .getOrCreate()
+)
+
+pdf = to_pandas(
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float})
+)
+
+df = spark.createDataFrame(pdf)
+df.groupBy("Department").sum("Amount").show()
+```
+
+With `arrow.pyspark.enabled`, `createDataFrame` serializes the pandas
+DataFrame through Arrow. Since `to_pandas` defaults to Arrow-backed
+dtypes, the data stays columnar from parser to Spark.
+
+## SQL queries { #sql }
+
+```python
+df.createOrReplaceTempView("sales")
+spark.sql("""
+    SELECT Department, SUM(Amount) AS total
+    FROM sales
+    GROUP BY Department
+""").show()
+```
+
+## When to reach for Spark { #when-to-reach-for-spark }
+
+Spark adds distributed scheduling overhead; for single-machine workloads
+rypipe plus DuckDB or Polars is usually faster. Use this integration when
+the data must land in an existing Spark cluster, a Hive metastore, or a
+Spark-managed table format.
+
+## Why this works { #why-this-works }
+
+PySpark's Arrow optimization uses the same Arrow columnar format rypipe
+produces. The pandas DataFrame acts as the handoff point, and Arrow
+memory moves into the Spark JVM without Python object serialization.
+
+========================================================================
+PAGE: https://rypipe.emiliano-go.com/integrations/sql/
+========================================================================
+
+# Direct SQL databases { #direct-sql }
+
+rypipe has no database connector of its own. It produces Arrow tables,
+which you load into a SQL database with either **ADBC** (Arrow-native,
+fastest) or **pandas + SQLAlchemy** (broadest database support).
+
+## Setup { #setup }
+
+```bash
+# ADBC route (PostgreSQL example; also: adbc-driver-sqlite, adbc-driver-flightsql)
+pip install "crxml[all]" adbc-driver-postgresql
+
+# SQLAlchemy route
+pip install "crxml[all]" sqlalchemy psycopg2-binary
+```
+
+## ADBC (recommended) { #adbc }
+
+ADBC drivers ingest Arrow data in bulk without row-by-row inserts. Pass
+the rypipe Arrow table to `adbc_ingest`:
+
+```python
+from crxml import CrystalXMLSource, CastTypes
+import adbc_driver_postgresql.dbapi as dbapi
+
+table = (
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float})
+).to_arrow()
+
+with dbapi.connect("postgresql://localhost/mydb") as con, con.cursor() as cur:
+    cur.adbc_ingest("sales", table, mode="create_append")
+```
+
+Available ADBC drivers include PostgreSQL, SQLite, Snowflake, BigQuery,
+and Flight SQL. The `table` argument accepts any Arrow-compatible object,
+so no pandas conversion happens at any point.
+
+!!! tip
+
+    All values come out of the parser as strings. Use `CastTypes` in the
+    pipeline so database columns get real numeric types instead of
+    `VARCHAR`.
+
+## SQLAlchemy + pandas { #sqlalchemy }
+
+For databases without an ADBC driver, convert to pandas and use
+`DataFrame.to_sql`:
+
+```python
+from crxml import CrystalXMLSource, CastTypes, to_pandas
+from sqlalchemy import create_engine
+
+df = to_pandas(
+    CrystalXMLSource("report.xml", row_tag="Details")
+    | CastTypes({"Amount": float})
+)
+
+engine = create_engine("postgresql://localhost/mydb")
+df.to_sql("sales", engine, if_exists="append", index=False)
+```
+
+## SQLite { #sqlite }
+
+SQLite works through either route, ADBC:
+
+```python
+import adbc_driver_sqlite.dbapi as dbapi
+
+with dbapi.connect("sales.db") as con, con.cursor() as cur:
+    cur.adbc_ingest("sales", table, mode="create_append")
+```
+
+or the standard library via pandas:
+
+```python
+import sqlite3
+
+with sqlite3.connect("sales.db") as con:
+    df.to_sql("sales", con, if_exists="replace", index=False)
+```
+
+## Large inputs { #large-inputs }
+
+For inputs that don't fit comfortably in memory, ingest batch by batch
+using `iter_record_batches` with an ADBC connection:
+
+```python
+from crxml import CrystalXMLSource
+import adbc_driver_postgresql.dbapi as dbapi
+
+source = CrystalXMLSource("big-report.xml", row_tag="Details")
+
+with dbapi.connect("postgresql://localhost/mydb") as con, con.cursor() as cur:
+    for i, batch in enumerate(source.iter_record_batches(memory="64MiB")):
+        cur.adbc_ingest(
+            "sales",
+            batch,
+            mode="create" if i == 0 else "append",
+        )
+```
+
+Each batch is bounded by the `memory` budget; the database accumulates
+the full result.
+
+## Why this works { #why-this-works }
+
+rypipe produces Arrow tables. ADBC is an Arrow-native database API:
+drivers consume columnar batches directly and translate them into the
+database's bulk-load protocol (e.g. PostgreSQL `COPY`), avoiding the
+per-row overhead of traditional drivers.
 
 ========================================================================
 PAGE: https://rypipe.emiliano-go.com/performance/
@@ -13465,6 +14165,7 @@ ExecutionPlan::new()
     | `.with_auto_dict(true)` | `auto_dict=True` |
     | `.with_strict_types(true)` | `strict_types=True` |
     | `.with_max_split_chunks(n)` | `max_split_chunks=n` or `chunks=n` |
+    | `.with_min_chunk_bytes(n)` | `min_chunk_bytes=n` |
     | `.with_observer(Arc::new(obs))` | `observer={"on_row_rejected": fn, ...}` |
 
     ```python
@@ -15285,7 +15986,7 @@ let batch = Pipeline::new(MySplitter, MyDecoder::new())
     .read_path("data.myfmt", false, false)?;
 ```
 
-`rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python, you can publish a Rust-only adapter and depend on `rypipe-core = "0.3"` alone.
+`rypipe-python` is an *additional* crate, not a replacement. The engine never depends on Python, you can publish a Rust-only adapter and depend on `rypipe-core = "0.5"` alone.
 
 ## 7. Design principle: data-driven development { #7-design-principle-data-driven-development }
 
@@ -15312,7 +16013,7 @@ Yes. See [Rust API](./reference/rust-api.md) and [Writing a format adapter](./bu
 Measured: <1% of wall time for 90 k rows × 10 fields; 17 of 17 data-integrity tests assert bit-identical results across `read_bytes` (Rust), `read_bytes_par`, and `read_bytes_stream` via both APIs. See [Performance](./performance.md) for `bench_throughput`.
 
 **“Will you maintain both APIs?”**
-Yes. `rypipe-core` is versioned independently (`0.3.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
+Yes. `rypipe-core` is versioned independently (`0.5.x`). `rypipe-python` follows `pyo3` (0.29) and `arrow` (59.2) and is tested on CPython 3.10-3.14. Breaking adapter APIs bumps the minor version.
 
 ---
 

@@ -137,10 +137,7 @@ impl BoundedExecutor {
         let capped = num_batches.min(self.split_cap);
         let t = std::time::Instant::now();
         let split_points = splitter.find_split_points_with(bytes, capped, min_chunk_bytes);
-        crate::profiling::add(
-            crate::profiling::SPLIT,
-            t.elapsed().as_nanos() as u64,
-        );
+        crate::profiling::add(crate::profiling::SPLIT, t.elapsed().as_nanos() as u64);
         let chunks = split_points_to_ranges(&split_points, bytes.len());
         (chunks, rows_per_batch, bytes_per_row, oversize)
     }
@@ -162,16 +159,10 @@ impl BoundedExecutor {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let t = std::time::Instant::now();
             parser.validate(bytes)?;
-            crate::profiling::add(
-                crate::profiling::VALIDATE,
-                t.elapsed().as_nanos() as u64,
-            );
+            crate::profiling::add(crate::profiling::VALIDATE, t.elapsed().as_nanos() as u64);
             let t = std::time::Instant::now();
             let result = parser.parse_chunk_generic(bytes, &mut engine);
-            crate::profiling::add(
-                crate::profiling::PARSE,
-                t.elapsed().as_nanos() as u64,
-            );
+            crate::profiling::add(crate::profiling::PARSE, t.elapsed().as_nanos() as u64);
             result
         }))
         .unwrap_or_else(|payload| {
@@ -200,10 +191,7 @@ impl BoundedExecutor {
     ) -> Result<()> {
         let t = std::time::Instant::now();
         let mut batch = engine.finish()?;
-        crate::profiling::add(
-            crate::profiling::EXPORT,
-            t.elapsed().as_nanos() as u64,
-        );
+        crate::profiling::add(crate::profiling::EXPORT, t.elapsed().as_nanos() as u64);
         if let Some(ref filter) = plan.filter {
             batch = apply_compare_filter(batch, filter)?;
         }
@@ -222,6 +210,7 @@ impl BoundedExecutor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn consume_chunks<I, C>(
         &self,
         chunks: I,
@@ -386,13 +375,12 @@ impl BoundedExecutor {
             return Ok(());
         }
 
-        let (mut chunks, rows_per_batch, bytes_per_row, oversize) =
-            self.plan_chunks(
-                bytes,
-                splitter,
-                plan.min_chunk_bytes
-                    .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
-            );
+        let (mut chunks, rows_per_batch, bytes_per_row, oversize) = self.plan_chunks(
+            bytes,
+            splitter,
+            plan.min_chunk_bytes
+                .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
+        );
 
         // Guard against degenerate splitter output that produces no ranges.
         if chunks.is_empty() {
@@ -411,7 +399,15 @@ impl BoundedExecutor {
                 budget,
             )
         });
-        self.consume_chunks(chunks, rows_per_batch, oversize, plan, consumer, ledger, stats)
+        self.consume_chunks(
+            chunks,
+            rows_per_batch,
+            oversize,
+            plan,
+            consumer,
+            ledger,
+            stats,
+        )
     }
 
     /// Parse an in-memory byte slice in bounded batches, returning one
@@ -557,13 +553,12 @@ impl BoundedExecutor {
             return Ok(());
         }
 
-        let (mut chunks, rows_per_batch, bytes_per_row, oversize) =
-            self.plan_chunks(
-                bytes,
-                splitter,
-                plan.min_chunk_bytes
-                    .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
-            );
+        let (mut chunks, rows_per_batch, bytes_per_row, oversize) = self.plan_chunks(
+            bytes,
+            splitter,
+            plan.min_chunk_bytes
+                .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
+        );
 
         // Guard against degenerate splitter output that produces no ranges.
         if chunks.is_empty() {
@@ -599,7 +594,15 @@ impl BoundedExecutor {
                 budget,
             )
         });
-        self.consume_chunks(parsed_chunks, rows_per_batch, oversize, plan, consumer, ledger, stats)
+        self.consume_chunks(
+            parsed_chunks,
+            rows_per_batch,
+            oversize,
+            plan,
+            consumer,
+            ledger,
+            stats,
+        )
     }
 }
 
@@ -675,8 +678,7 @@ mod tests {
             bytes: &[u8],
             sink: &mut dyn crate::decoder::ColumnarSink,
         ) -> crate::Result<()> {
-            let text =
-                std::str::from_utf8(bytes).map_err(|e| crate::Error::Plan(e.to_string()))?;
+            let text = std::str::from_utf8(bytes).map_err(|e| crate::Error::Plan(e.to_string()))?;
             for line in text.lines() {
                 if line.is_empty() {
                     continue;
@@ -700,11 +702,11 @@ mod tests {
 
     impl Splitter for AlignedSplitter {
         fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
-            let start = if from == 0 { 0 } else { ((from + 11) / 12) * 12 };
+            let start = from.div_ceil(12) * 12;
             (start < bytes.len()).then_some(start)
         }
 
-        fn estimate_bytes_per_row(&self, sample: &[u8]) -> usize {
+        fn estimate_bytes_per_row(&self, _sample: &[u8]) -> usize {
             12
         }
     }
