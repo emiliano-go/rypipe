@@ -49,7 +49,7 @@ pub use bounded::{MemoryBudget, MAX_SPLIT_CHUNKS};
 pub use budget::{BudgetLedger, BudgetPartition, StreamStats};
 pub use consumer::{BatchConsumer, CollectingConsumer, DiscardingConsumer};
 #[cfg(feature = "streaming-parser")]
-pub use diagnostics::{NoopDiagnostics, ParseDiagnostics};
+pub use diagnostics::{CollectingDiagnostics, NoopDiagnostics, ParseDiagnostics};
 #[cfg(feature = "streaming-parser")]
 pub use streaming_parser::{RecordStream, StreamState, StreamingRecordParser};
 pub use decoder::{
