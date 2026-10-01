@@ -129,6 +129,10 @@ pub struct ExecutionPlan {
     /// Cap on the number of bounded-streaming batches/chunks. Defaults to
     /// `MAX_SPLIT_CHUNKS` (100,000) when `None`.
     pub max_split_chunks: Option<usize>,
+    /// Opt-in chunk-size floor for split planning. `None` uses the engine
+    /// default ([`crate::MIN_CHUNK_BYTES`], 2 MiB). Lower it for many small
+    /// cores (more, smaller chunks); raise it for fewer, larger chunks.
+    pub min_chunk_bytes: Option<usize>,
     /// Optional row observer; hooks fire from parse threads during the read.
     pub observer: Option<std::sync::Arc<dyn crate::RowObserver>>,
 }
@@ -147,6 +151,7 @@ impl std::fmt::Debug for ExecutionPlan {
             .field("dict_max_size", &self.dict_max_size)
             .field("strict_types", &self.strict_types)
             .field("max_split_chunks", &self.max_split_chunks)
+            .field("min_chunk_bytes", &self.min_chunk_bytes)
             .field("observer", &self.observer.is_some())
             .finish()
     }
@@ -268,6 +273,12 @@ impl ExecutionPlan {
     /// Override the bounded-streaming split cap (default 100,000 chunks).
     pub fn with_max_split_chunks(mut self, cap: usize) -> Self {
         self.max_split_chunks = Some(cap);
+        self
+    }
+
+    /// Override the split-planning chunk-size floor (default 2 MiB).
+    pub fn with_min_chunk_bytes(mut self, bytes: usize) -> Self {
+        self.min_chunk_bytes = Some(bytes.max(1));
         self
     }
 

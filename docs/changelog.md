@@ -7,6 +7,13 @@ description: Release notes for rypipe, newest first. Tracks features, fixes, and
 
 All notable changes to rypipe, newest first. Versions follow semantic versioning and are tagged in the repository.
 
+## [Unreleased]
+
+### Added
+
+- **Incremental streaming parsers (`streaming-parser` feature).** `StreamingRecordParser` + `RecordStream` let an adapter consume arbitrarily chunked input (including non-seekable feeds) and emit adapter-defined records one at a time, with a `ParseDiagnostics` channel for recoverable events (malformed record, truncated input). This surface was added to support the xmlstreamer adapter, whose streaming engine previously lived outside rypipe; the engine now owns the buffer, compaction, EOF handshake and diagnostics, while the adapter keeps format-specific framing.
+- **Chunk-size floor knob.** `ExecutionPlan` gains an opt-in `min_chunk_bytes` (and `with_min_chunk_bytes`), with a matching `min_chunk_bytes` plan kwarg in the Python bindings and adapter readers. It overrides the default 2 MiB split-planning floor so adapters can tune the chunk count for heterogeneous CPUs and small/large files; the default is unchanged. Engines call the new `Splitter::find_split_points_with`, which defers to an adapter's `find_split_points` at the default floor. Added while optimizing the xmlstreamer adapter (2 performance cores + 8 efficiency cores).
+
 ## [0.4.0] - 2026-09-16
 
 ### Added
@@ -163,7 +170,7 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 ### Added
 
 - **SIMD scan module with runtime dispatch.** `scan/` module with AVX2/SSE NEON detection; the engine picks the fastest path at runtime.
-- **Tier ladder in core.** Performance tiers (`S5` through `S10`) behind `bench` feature for benchmarking individual optimizations.
+- **Tier ladder in core.** Performance tiers behind the `bench` feature for benchmarking individual optimizations.
 - **`Splitter` default method + `SkipRegionFinder` + chunk floor.** `find_split_points` has a complete default implementation. `SkipRegionFinder` defines byte ranges that must not be split on. `plan_chunk_count` enforces a minimum chunk size.
 - **`dict.rs` incremental dictionary unification.** Builds dictionary-encoded columns incrementally across chunks.
 - **Parallel streaming + `BatchConsumer` + `StreamingBatchIterator`.** True parallel bounded-memory streaming via `read_path_stream_par`.

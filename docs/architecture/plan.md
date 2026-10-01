@@ -23,6 +23,7 @@ pub struct ExecutionPlan {
     pub dict_max_size: Option<usize>,
     pub strict_types: bool,
     pub max_split_chunks: Option<usize>,
+    pub min_chunk_bytes: Option<usize>,
     pub observer: Option<Arc<dyn RowObserver>>,
 }
 ```
@@ -43,6 +44,9 @@ pub struct ExecutionPlan {
   declared type instead of silently storing null (builder: `with_strict_types`).
 - **`max_split_chunks`**: Cap on bounded-streaming chunks (default 100,000;
   builder: `with_max_split_chunks`).
+- **`min_chunk_bytes`**: Opt-in split-planning chunk-size floor (default 2 MiB;
+  builder: `with_min_chunk_bytes`). Lower it for many small cores, raise it for
+  fewer/larger chunks.
 - **`observer`**: Optional `RowObserver` whose hooks fire from parse threads
   (builder: `with_observer`).
 
@@ -217,6 +221,7 @@ Compare uses native-typed comparison with numeric promotion (Int64↔Float64).
 - `auto_dict_max_size` → `dict_max_size`
 - `strict_types` → `strict_types`
 - `max_split_chunks` → `max_split_chunks`
+- `min_chunk_bytes` → `min_chunk_bytes`
 - `observer` → `observer` (dict of hook callables, e.g. `{"on_row_rejected": fn}`)
 
 The conversion is done by `execution_plan_from_kwargs` in `plan_kwargs.rs`.

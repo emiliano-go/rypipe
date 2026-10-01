@@ -6,7 +6,7 @@ use crate::value::Value;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
-// S4: Chunk-size floor
+// Chunk-size floor
 // ---------------------------------------------------------------------------
 
 /// Minimum chunk size in bytes. Sub-MB chunks collapse throughput due to
@@ -27,9 +27,15 @@ pub enum SplitMode {
 }
 
 /// Plan the number of chunks given input size, thread count, and mode.
-/// Returns a value in `[threads, MAX_SPLIT_CHUNKS]` with a 2 MiB floor.
-pub fn plan_chunk_count(bytes: usize, threads: usize, mode: SplitMode) -> usize {
-    let by_size = bytes / MIN_CHUNK_BYTES.max(1);
+/// Returns a value in `[threads, MAX_SPLIT_CHUNKS]` with a floor of
+/// `min_chunk_bytes` (default [`MIN_CHUNK_BYTES`] via [`plan_chunk_count`]).
+pub fn plan_chunk_count_with(
+    bytes: usize,
+    threads: usize,
+    mode: SplitMode,
+    min_chunk_bytes: usize,
+) -> usize {
+    let by_size = bytes / min_chunk_bytes.max(1);
     let cap = match mode {
         SplitMode::Parallel => 16usize.saturating_mul(threads),
         SplitMode::Streaming => 8usize.saturating_mul(threads),
@@ -37,8 +43,13 @@ pub fn plan_chunk_count(bytes: usize, threads: usize, mode: SplitMode) -> usize 
     by_size.min(cap).max(threads).min(MAX_SPLIT_CHUNKS)
 }
 
+/// [`plan_chunk_count_with`] using the default [`MIN_CHUNK_BYTES`] floor.
+pub fn plan_chunk_count(bytes: usize, threads: usize, mode: SplitMode) -> usize {
+    plan_chunk_count_with(bytes, threads, mode, MIN_CHUNK_BYTES)
+}
+
 // ---------------------------------------------------------------------------
-// S3: SkipRegionFinder: byte ranges where a candidate boundary is invalid
+// SkipRegionFinder: byte ranges where a candidate boundary is invalid
 // ---------------------------------------------------------------------------
 
 /// Finds byte ranges (comments, CDATA, quoted fields, string literals) where
@@ -97,7 +108,7 @@ pub fn in_skip_region(bytes: &[u8], at: usize, finder: &dyn SkipRegionFinder) ->
 }
 
 // ---------------------------------------------------------------------------
-// S1: Splitter trait with default
+// Splitter trait with default
 // ---------------------------------------------------------------------------
 
 /// How records are separated in the input.
@@ -184,17 +195,58 @@ pub trait Splitter: Send + Sync {
     /// 3. Reject candidates inside skip regions via `in_skip_region`.
     /// 4. Dedup, sort, prepend 0.
     /// 5. Apply chunk floor via `plan_chunk_count`.
+    ///
+    /// This is the default-floor entry point. Adapters that override it keep
+    /// working; engines call [`Splitter::find_split_points_with`] instead, and
+    /// that defers to this override at the default floor.
     fn find_split_points(&self, bytes: &[u8], max_chunks: usize) -> Vec<usize> {
-        if max_chunks <= 1 || bytes.is_empty() {
+        default_find_split_points(self, bytes, max_chunks, MIN_CHUNK_BYTES)
+    }
+
+    /// Find split points with an explicit chunk-size floor.
+    ///
+    /// The floor is opt-in: lowering it yields more, smaller chunks (better
+    /// load balancing on many or small cores, at more scheduling overhead);
+    /// raising it yields fewer, larger chunks. Default is [`MIN_CHUNK_BYTES`].
+    ///
+    /// At the default floor this calls [`Splitter::find_split_points`], so an
+    /// adapter's override is honored; a non-default floor uses the engine's
+    /// default planning (override `find_split_points_with` to customize it).
+    fn find_split_points_with(
+        &self,
+        bytes: &[u8],
+        max_chunks: usize,
+        min_chunk_bytes: usize,
+    ) -> Vec<usize> {
+        if min_chunk_bytes == MIN_CHUNK_BYTES {
+            return self.find_split_points(bytes, max_chunks);
+        }
+        default_find_split_points(self, bytes, max_chunks, min_chunk_bytes)
+    }
+}
+
+/// The engine's default chunk planning, shared by the `Splitter` methods.
+fn default_find_split_points<S: Splitter + ?Sized>(
+    splitter: &S,
+    bytes: &[u8],
+    max_chunks: usize,
+    min_chunk_bytes: usize,
+) -> Vec<usize> {
+    if max_chunks <= 1 || bytes.is_empty() {
             return vec![0, bytes.len()];
         }
-        let n = plan_chunk_count(bytes.len(), max_chunks, SplitMode::Parallel);
-        let skip = self.skip_regions();
+        let n = plan_chunk_count_with(
+            bytes.len(),
+            max_chunks,
+            SplitMode::Parallel,
+            min_chunk_bytes,
+        );
+        let skip = splitter.skip_regions();
         // Planning must not start a global worker pool for bounded readers.
         let mut points: Vec<usize> = (1..n)
             .filter_map(|i| {
                 let approx = bytes.len() / n * i;
-                let pos = self.next_record_start(bytes, approx)?;
+                let pos = splitter.next_record_start(bytes, approx)?;
                 // Reject candidates inside skip regions.
                 if skip.is_some_and(|finder| in_skip_region(bytes, pos, finder)) {
                     return None;
@@ -214,8 +266,7 @@ pub trait Splitter: Send + Sync {
         if *points.last().unwrap_or(&0) != bytes.len() {
             points.push(bytes.len());
         }
-        points
-    }
+    points
 }
 
 // ---------------------------------------------------------------------------
@@ -607,5 +658,42 @@ mod tests {
                 "duplicate or unsorted points for max_chunks={max_chunks}: {points:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod chunk_floor_tests {
+    use super::*;
+
+    /// A splitter that overrides the documented entry point with a sentinel.
+    struct FixedSplitter;
+    impl Splitter for FixedSplitter {
+        fn next_record_start(&self, bytes: &[u8], from: usize) -> Option<usize> {
+            (from..bytes.len()).find(|&p| bytes[p] == b'\n').map(|p| p + 1)
+        }
+        fn estimate_bytes_per_row(&self, _sample: &[u8]) -> usize {
+            4
+        }
+        fn find_split_points(&self, _bytes: &[u8], _max_chunks: usize) -> Vec<usize> {
+            vec![0, 7]
+        }
+    }
+
+    #[test]
+    fn adapter_override_is_honored_at_the_default_floor() {
+        // Engines call find_split_points_with; at the default floor it must
+        // defer to an adapter's find_split_points override.
+        assert_eq!(
+            FixedSplitter.find_split_points_with(b"ignored", 8, MIN_CHUNK_BYTES),
+            vec![0, 7]
+        );
+    }
+
+    #[test]
+    fn a_lower_floor_yields_more_chunks() {
+        let bytes = 8 << 20; // 8 MiB
+        let default = plan_chunk_count_with(bytes, 4, SplitMode::Parallel, MIN_CHUNK_BYTES);
+        let small = plan_chunk_count_with(bytes, 4, SplitMode::Parallel, 256 * 1024);
+        assert!(small > default, "default={default} small={small}");
     }
 }

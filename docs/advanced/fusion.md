@@ -97,11 +97,12 @@ pub struct ExecutionPlan {
     pub dict_max_size: Option<usize>,             // auto-dict max entries (default 256)
     pub strict_types: bool,                       // abort on non-null parse failures
     pub max_split_chunks: Option<usize>,          // bounded-streaming chunk cap
+    pub min_chunk_bytes: Option<usize>,           // split chunk-size floor
     pub observer: Option<Arc<dyn RowObserver>>,   // per-row observer hooks
 }
 ```
 
-The plan is built by `_build_plan_kwargs()` on the Python side and consumed by `TableBuilder` on the Rust side. The Python-facing kwargs accepted by `rypipe-python` entry points are: `field_mapping`, `drop_fields`, `filter`, `field_types`, `dictionary_columns`, `schema` (mapped to `schema_order`), `auto_dict`, `auto_dict_threshold` (mapped to `dict_threshold`), and `auto_dict_max_size` (mapped to `dict_max_size`).
+The plan is built by `_build_plan_kwargs()` on the Python side and consumed by `TableBuilder` on the Rust side. The Python-facing kwargs accepted by `rypipe-python` entry points are: `field_mapping`, `drop_fields`, `filter`, `field_types`, `dictionary_columns`, `schema` (mapped to `schema_order`), `auto_dict`, `auto_dict_threshold` (mapped to `dict_threshold`), `auto_dict_max_size` (mapped to `dict_max_size`), and `min_chunk_bytes`.
 
 ## Field resolution order { #field-resolution-order }
 

@@ -7,7 +7,7 @@ title: "Optimizations"
 Every optimization in `rypipe-core`, why it matters, and what it replaces.
 These changes are not format-specific; they benefit every adapter equally.
 
-## 1. Dense column storage (2C-S1) { #1-dense-column-storage }
+## 1. Dense column storage { #1-dense-column-storage }
 
 **Before:** `HashMap<String, ColumnBuilder>` required two hash probes per
 field: one in `ensure_column` (create if missing), one in `get_mut` (push
@@ -37,7 +37,7 @@ fn feed_row(sink: &mut TableBuilder) {
 per row at ~10 ns per hash, this saves ~100 ns per row. On a 533 MB file
 with ~480K rows, that is ~48 ms saved.
 
-## 2. Dirty bitmask null-fill (2C-S2) { #2-dirty-bitmask-null-fill }
+## 2. Dirty bitmask null-fill { #2-dirty-bitmask-null-fill }
 
 **Before:** For each row, loop over all columns:
 ```rust
@@ -236,7 +236,7 @@ if let Some(close) = find_literal(bytes, pos, &close_finder) {
 Vec allocations + Finder constructions. Measured: +10% single-thread,
 +9% parallel.
 
-## 10. Scan primitives (S5) { #10-scan-primitives }
+## 10. Scan primitives { #10-scan-primitives }
 
 **Before:** Raw `memchr` calls without fast path.
 
@@ -258,7 +258,7 @@ let (i, hit) = find2(bytes, pos, b'<', b'"')?; // dual-byte, same fast path
 **Impact:** 15% on the `next_lt` hot path (byte-at-position check avoids
 AVX2 prologue on 2/3 of calls).
 
-## 11. Engine-provided Splitter default (S1) { #11-engine-provided-splitter-default }
+## 11. Engine-provided Splitter default { #11-engine-provided-splitter-default }
 
 **Before:** Adapters implement `find_split_points` from scratch, which is a
 recurring source of performance bugs: sampling too little data causes

@@ -112,6 +112,7 @@ impl BoundedExecutor {
         &self,
         bytes: &[u8],
         splitter: &dyn Splitter,
+        min_chunk_bytes: usize,
     ) -> (Vec<Range<usize>>, usize, usize, bool) {
         let bytes_per_row = splitter
             .estimate_bytes_per_row(&bytes[..bytes.len().min(65536)])
@@ -134,7 +135,7 @@ impl BoundedExecutor {
 
         let num_batches = bytes.len().div_ceil(batch_bytes).max(1);
         let capped = num_batches.min(self.split_cap);
-        let split_points = splitter.find_split_points(bytes, capped);
+        let split_points = splitter.find_split_points_with(bytes, capped, min_chunk_bytes);
         let chunks = split_points_to_ranges(&split_points, bytes.len());
         (chunks, rows_per_batch, bytes_per_row, oversize)
     }
@@ -365,7 +366,12 @@ impl BoundedExecutor {
         }
 
         let (mut chunks, rows_per_batch, bytes_per_row, oversize) =
-            self.plan_chunks(bytes, splitter);
+            self.plan_chunks(
+                bytes,
+                splitter,
+                plan.min_chunk_bytes
+                    .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
+            );
 
         // Guard against degenerate splitter output that produces no ranges.
         if chunks.is_empty() {
@@ -531,7 +537,12 @@ impl BoundedExecutor {
         }
 
         let (mut chunks, rows_per_batch, bytes_per_row, oversize) =
-            self.plan_chunks(bytes, splitter);
+            self.plan_chunks(
+                bytes,
+                splitter,
+                plan.min_chunk_bytes
+                    .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
+            );
 
         // Guard against degenerate splitter output that produces no ranges.
         if chunks.is_empty() {
@@ -607,7 +618,7 @@ mod tests {
         let budget = MemoryBudget::new(1024);
 
         let default_chunks = BoundedExecutor::new(budget)
-            .plan_chunks(&data, &NewlineSplitter)
+            .plan_chunks(&data, &NewlineSplitter, crate::decoder::MIN_CHUNK_BYTES)
             .0
             .len();
         assert!(
@@ -618,7 +629,7 @@ mod tests {
         for cap in [1, 2, 3] {
             let chunks = BoundedExecutor::new(budget)
                 .with_split_cap(cap)
-                .plan_chunks(&data, &NewlineSplitter)
+                .plan_chunks(&data, &NewlineSplitter, crate::decoder::MIN_CHUNK_BYTES)
                 .0;
             assert!(
                 chunks.len() <= cap.max(1),

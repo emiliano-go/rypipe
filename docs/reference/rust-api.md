@@ -209,6 +209,7 @@ pub struct ExecutionPlan {
     pub dict_max_size: Option<usize>,             // auto-dict max size
     pub strict_types: bool,                       // reject malformed data
     pub max_split_chunks: Option<usize>,          // cap on streaming chunks
+    pub min_chunk_bytes: Option<usize>,           // split chunk-size floor
     pub observer: Option<Arc<dyn RowObserver>>,   // per-row hooks
 }
 ```
@@ -231,6 +232,7 @@ ExecutionPlan::new()
     .with_dict_max_size(256)
     .with_strict_types(true)
     .with_max_split_chunks(1000)
+    .with_min_chunk_bytes(512 * 1024)
 ```
 
 !!! note "From the Python side"
@@ -251,6 +253,7 @@ ExecutionPlan::new()
     | `.with_auto_dict(true)` | `auto_dict=True` |
     | `.with_strict_types(true)` | `strict_types=True` |
     | `.with_max_split_chunks(n)` | `max_split_chunks=n` or `chunks=n` |
+    | `.with_min_chunk_bytes(n)` | `min_chunk_bytes=n` |
     | `.with_observer(Arc::new(obs))` | `observer={"on_row_rejected": fn, ...}` |
 
     ```python

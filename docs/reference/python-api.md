@@ -298,6 +298,7 @@ class CrystalXMLSource(Source):
         memory=None,                     # str | int | None: memory bound
         chunks=None,                     # int | None: number of parallel chunks
         max_split_chunks=None,           # int | None: max split chunks
+        min_chunk_bytes=None,            # int | None: split chunk-size floor
         # ... plus all Source.__init__ kwargs ...
     )
 ```

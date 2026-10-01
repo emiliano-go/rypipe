@@ -226,7 +226,12 @@ impl ParallelStreamingExecutor {
                 64 * 1024
             });
         let num_chunks = actual_bytes.len().div_ceil(chunk_size).max(n).min(10000);
-        let split_points = splitter.find_split_points(actual_bytes, num_chunks);
+        let split_points = splitter.find_split_points_with(
+            actual_bytes,
+            num_chunks,
+            plan.min_chunk_bytes
+                .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
+        );
         let mut ranges = crate::decoder::split_points_to_ranges(&split_points, actual_bytes.len());
         if ranges.is_empty() {
             ranges.push(0..actual_bytes.len());

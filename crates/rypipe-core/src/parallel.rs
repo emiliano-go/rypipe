@@ -64,7 +64,12 @@ impl ParallelExecutor {
     {
         reset_chunk_profile();
         let t_split = Instant::now();
-        let split_points = splitter.find_split_points(bytes, num_chunks);
+        let split_points = splitter.find_split_points_with(
+            bytes,
+            num_chunks,
+            plan.min_chunk_bytes
+                .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
+        );
         SPLIT_SCAN_NS.store(t_split.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let mut ranges = split_points_to_ranges(&split_points, bytes.len());
 

@@ -33,6 +33,7 @@ pub fn execution_plan_from_kwargs(
     auto_dict_max_size: Option<usize>,
     strict_types: bool,
     max_split_chunks: Option<usize>,
+    min_chunk_bytes: Option<usize>,
     observer: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ExecutionPlan> {
     let mut plan = ExecutionPlan::new();
@@ -75,6 +76,13 @@ pub fn execution_plan_from_kwargs(
         }
     }
     plan.max_split_chunks = max_split_chunks;
+
+    if let Some(min) = min_chunk_bytes {
+        if min == 0 {
+            return Err(crate::PlanError::new_err("min_chunk_bytes must be >= 1"));
+        }
+        plan.min_chunk_bytes = Some(min);
+    }
 
     if let Some(obs) = observer {
         let dict = obs.cast::<pyo3::types::PyDict>().map_err(|_| {

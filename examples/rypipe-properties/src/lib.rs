@@ -94,7 +94,7 @@ impl RecordParser for PropertiesParser {
 #[cfg(feature = "python")]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None, field_types=None, dictionary_columns=None, schema=None, auto_dict=false, auto_dict_threshold=None, auto_dict_max_size=None, strict_types=false, max_split_chunks=None, observer=None, use_mmap=false, prefault=false))]
+#[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None, field_types=None, dictionary_columns=None, schema=None, auto_dict=false, auto_dict_threshold=None, auto_dict_max_size=None, strict_types=false, max_split_chunks=None, min_chunk_bytes=None, observer=None, use_mmap=false, prefault=false))]
 fn read_properties(
     py: Python<'_>,
     path: String,
@@ -109,6 +109,7 @@ fn read_properties(
     auto_dict_max_size: Option<usize>,
     strict_types: bool,
     max_split_chunks: Option<usize>,
+    min_chunk_bytes: Option<usize>,
     observer: Option<Bound<'_, PyAny>>,
     use_mmap: bool,
     prefault: bool,
@@ -125,6 +126,7 @@ fn read_properties(
         auto_dict_max_size,
         strict_types,
         max_split_chunks,
+        min_chunk_bytes,
         observer.as_ref(),
     )?;
     let batch = py.detach(|| {

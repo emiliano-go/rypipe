@@ -1093,11 +1093,12 @@ pub struct ExecutionPlan {
     pub dict_max_size: Option<usize>,             // auto-dict max entries (default 256)
     pub strict_types: bool,                       // abort on non-null parse failures
     pub max_split_chunks: Option<usize>,          // bounded-streaming chunk cap
+    pub min_chunk_bytes: Option<usize>,           // split chunk-size floor
     pub observer: Option<Arc<dyn RowObserver>>,   // per-row observer hooks
 }
 ```
 
-The plan is built by `_build_plan_kwargs()` on the Python side and consumed by `TableBuilder` on the Rust side. The Python-facing kwargs accepted by `rypipe-python` entry points are: `field_mapping`, `drop_fields`, `filter`, `field_types`, `dictionary_columns`, `schema` (mapped to `schema_order`), `auto_dict`, `auto_dict_threshold` (mapped to `dict_threshold`), and `auto_dict_max_size` (mapped to `dict_max_size`).
+The plan is built by `_build_plan_kwargs()` on the Python side and consumed by `TableBuilder` on the Rust side. The Python-facing kwargs accepted by `rypipe-python` entry points are: `field_mapping`, `drop_fields`, `filter`, `field_types`, `dictionary_columns`, `schema` (mapped to `schema_order`), `auto_dict`, `auto_dict_threshold` (mapped to `dict_threshold`), `auto_dict_max_size` (mapped to `dict_max_size`), and `min_chunk_bytes`.
 
 ## Field resolution order { #field-resolution-order }
 
@@ -4405,7 +4406,7 @@ PAGE: https://rypipe.emiliano-go.com/architecture/optimizations/
 Every optimization in `rypipe-core`, why it matters, and what it replaces.
 These changes are not format-specific; they benefit every adapter equally.
 
-## 1. Dense column storage (2C-S1) { #1-dense-column-storage }
+## 1. Dense column storage { #1-dense-column-storage }
 
 **Before:** `HashMap<String, ColumnBuilder>` required two hash probes per
 field: one in `ensure_column` (create if missing), one in `get_mut` (push
@@ -4435,7 +4436,7 @@ fn feed_row(sink: &mut TableBuilder) {
 per row at ~10 ns per hash, this saves ~100 ns per row. On a 533 MB file
 with ~480K rows, that is ~48 ms saved.
 
-## 2. Dirty bitmask null-fill (2C-S2) { #2-dirty-bitmask-null-fill }
+## 2. Dirty bitmask null-fill { #2-dirty-bitmask-null-fill }
 
 **Before:** For each row, loop over all columns:
 ```rust
@@ -4634,7 +4635,7 @@ if let Some(close) = find_literal(bytes, pos, &close_finder) {
 Vec allocations + Finder constructions. Measured: +10% single-thread,
 +9% parallel.
 
-## 10. Scan primitives (S5) { #10-scan-primitives }
+## 10. Scan primitives { #10-scan-primitives }
 
 **Before:** Raw `memchr` calls without fast path.
 
@@ -4656,7 +4657,7 @@ let (i, hit) = find2(bytes, pos, b'<', b'"')?; // dual-byte, same fast path
 **Impact:** 15% on the `next_lt` hot path (byte-at-position check avoids
 AVX2 prologue on 2/3 of calls).
 
-## 11. Engine-provided Splitter default (S1) { #11-engine-provided-splitter-default }
+## 11. Engine-provided Splitter default { #11-engine-provided-splitter-default }
 
 **Before:** Adapters implement `find_split_points` from scratch, which is a
 recurring source of performance bugs: sampling too little data causes
@@ -4751,6 +4752,7 @@ pub struct ExecutionPlan {
     pub dict_max_size: Option<usize>,
     pub strict_types: bool,
     pub max_split_chunks: Option<usize>,
+    pub min_chunk_bytes: Option<usize>,
     pub observer: Option<Arc<dyn RowObserver>>,
 }
 ```
@@ -4945,6 +4947,7 @@ Compare uses native-typed comparison with numeric promotion (Int64↔Float64).
 - `auto_dict_max_size` → `dict_max_size`
 - `strict_types` → `strict_types`
 - `max_split_chunks` → `max_split_chunks`
+- `min_chunk_bytes` → `min_chunk_bytes`
 - `observer` → `observer` (dict of hook callables, e.g. `{"on_row_rejected": fn}`)
 
 The conversion is done by `execution_plan_from_kwargs` in `plan_kwargs.rs`.
@@ -10893,7 +10896,7 @@ use rypipe_python::{
 #[pyo3(signature = (path, field_mapping=None, drop_fields=None, filter=None,
     field_types=None, dictionary_columns=None, schema=None, auto_dict=false,
     auto_dict_threshold=None, auto_dict_max_size=None, strict_types=false,
-    max_split_chunks=None, observer=None, use_mmap=false, prefault=false))]
+    max_split_chunks=None, min_chunk_bytes=None, observer=None, use_mmap=false, prefault=false))]
 fn read_log(
     py: Python<'_>,
     path: String,
@@ -10908,6 +10911,7 @@ fn read_log(
     auto_dict_max_size: Option<usize>,
     strict_types: bool,
     max_split_chunks: Option<usize>,
+    min_chunk_bytes: Option<usize>,
     observer: Option<Bound<'_, PyAny>>,
     use_mmap: bool,
     prefault: bool,
@@ -11380,7 +11384,7 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 ### Added
 
 - **SIMD scan module with runtime dispatch.** `scan/` module with AVX2/SSE NEON detection; the engine picks the fastest path at runtime.
-- **Tier ladder in core.** Performance tiers (`S5` through `S10`) behind `bench` feature for benchmarking individual optimizations.
+- **Tier ladder in core.** Performance tiers behind the `bench` feature for benchmarking individual optimizations.
 - **`Splitter` default method + `SkipRegionFinder` + chunk floor.** `find_split_points` has a complete default implementation. `SkipRegionFinder` defines byte ranges that must not be split on. `plan_chunk_count` enforces a minimum chunk size.
 - **`dict.rs` incremental dictionary unification.** Builds dictionary-encoded columns incrementally across chunks.
 - **Parallel streaming + `BatchConsumer` + `StreamingBatchIterator`.** True parallel bounded-memory streaming via `read_path_stream_par`.
@@ -12950,6 +12954,7 @@ class CrystalXMLSource(Source):
         memory=None,                     # str | int | None: memory bound
         chunks=None,                     # int | None: number of parallel chunks
         max_split_chunks=None,           # int | None: max split chunks
+        min_chunk_bytes=None,            # int | None: split chunk-size floor
         # ... plus all Source.__init__ kwargs ...
     )
 ```
@@ -13416,6 +13421,7 @@ pub struct ExecutionPlan {
     pub dict_max_size: Option<usize>,             // auto-dict max size
     pub strict_types: bool,                       // reject malformed data
     pub max_split_chunks: Option<usize>,          // cap on streaming chunks
+    pub min_chunk_bytes: Option<usize>,           // split chunk-size floor
     pub observer: Option<Arc<dyn RowObserver>>,   // per-row hooks
 }
 ```
@@ -13438,6 +13444,7 @@ ExecutionPlan::new()
     .with_dict_max_size(256)
     .with_strict_types(true)
     .with_max_split_chunks(1000)
+    .with_min_chunk_bytes(512 * 1024)
 ```
 
 !!! note "From the Python side"

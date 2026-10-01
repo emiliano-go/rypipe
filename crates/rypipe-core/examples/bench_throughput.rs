@@ -1,6 +1,6 @@
 //! Standalone throughput benchmark for the rypipe-core engine.
 //!
-//! Features (S2):
+//! Features:
 //! - Build-SHA gating: refuses to run if binary SHA doesn't match HEAD
 //! - Adaptive median-of-N: sample until 1.31×CoV ≤ 5%, capped at 31
 //! - Per-config subprocess isolation: `--only-config N` runs one config
@@ -26,7 +26,7 @@ use rypipe_core::{
 const ROWS: usize = 5_000_000;
 
 // ---------------------------------------------------------------------------
-// S2a: Build-SHA gating
+// Build-SHA gating
 // ---------------------------------------------------------------------------
 
 const BUILD_SHA: &str = env!("RYPIPE_BUILD_SHA");
@@ -215,7 +215,7 @@ fn current_rss() -> Option<Rss> {
 }
 
 // ---------------------------------------------------------------------------
-// S2b: Adaptive median-of-N
+// Adaptive median-of-N
 // ---------------------------------------------------------------------------
 
 fn adaptive_median(f: impl Fn() -> Result<usize>) -> (f64, f64, usize, usize) {
@@ -253,7 +253,7 @@ fn adaptive_median(f: impl Fn() -> Result<usize>) -> (f64, f64, usize, usize) {
 }
 
 // ---------------------------------------------------------------------------
-// S2e: Steady-state (20× inner loop for fast configs)
+// Steady-state (20× inner loop for fast configs)
 // ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
@@ -384,11 +384,11 @@ fn run_stream_config(
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
-    // S2a: Build-SHA gating
+    // Build-SHA gating
     let allow_dirty = std::env::args().any(|a| a == "--allow-dirty");
     verify_build_sha(allow_dirty);
 
-    // S2c: Per-config isolation
+    // Per-config isolation
     let only_config: Option<usize> = std::env::args()
         .position(|a| a == "--only-config")
         .and_then(|i| std::env::args().nth(i + 1))
@@ -398,7 +398,7 @@ fn main() -> Result<()> {
     let bytes = data.len();
     let mb = bytes as f64 / 1_000_000.0;
 
-    // S2d: Provenance
+    // Provenance
     let thp = read_thp_defrag();
     println!("rypipe-core bench_throughput  SHA={BUILD_SHA}");
     println!("  THP defrag: {thp}");

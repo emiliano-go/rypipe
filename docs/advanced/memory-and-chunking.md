@@ -32,7 +32,8 @@ file size and execution mode.
 4. Splits the file into batches sized to fit the memory budget, capped at 100,000
    split points by default. This executor cap is separate from the default
    splitter's 1024-point cap and is configurable via `max_split_chunks` on the
-   plan. A batch can still exceed the allowance when one record or either cap
+   plan. The split-planning chunk-size floor (default 2 MiB) is overridable via
+   `min_chunk_bytes` on the plan. A batch can still exceed the allowance when one record or either cap
    prevents finer splitting.
 5. Parses each batch into a `TableBuilder`, exports it to a `RecordBatch`, and resets the builder.
 6. Returns a `Vec<RecordBatch>`; the caller concatenates.

@@ -5,8 +5,8 @@
 //! and reports cumulative ms/MB, deltas, shares, CoV, and `n` per tier.
 //!
 //! Also provides:
-//! - `alloc_baseline`: allocation pressure harness (S8)
-//! - `ParProfile`: phase timing counters (S9)
+//! - `alloc_baseline`: allocation pressure harness
+//! - `ParProfile`: phase timing counters
 //!
 //! Usage:
 //!     cargo test --features bench --release -- ladder --nocapture
@@ -377,7 +377,7 @@ fn bench_tier<S: Splitter, P: RecordParser, Sink: ColumnarSink>(
 }
 
 // ---------------------------------------------------------------------------
-// S8: alloc_baseline: allocation pressure harness
+// alloc_baseline: allocation pressure harness
 // ---------------------------------------------------------------------------
 
 /// Run a closure and report allocation statistics.
@@ -453,7 +453,7 @@ pub fn alloc_baseline<F: Fn() -> usize>(label: &str, f: F) {
 }
 
 // ---------------------------------------------------------------------------
-// S9: ParProfile: phase timing counters
+// ParProfile: phase timing counters
 // ---------------------------------------------------------------------------
 
 /// Phase timing counters for parallel execution.

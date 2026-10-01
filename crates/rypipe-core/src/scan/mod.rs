@@ -26,7 +26,7 @@
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
-// S6: Runtime SIMD dispatch
+// Runtime SIMD dispatch
 // ---------------------------------------------------------------------------
 
 static HAS_AVX2: OnceLock<bool> = OnceLock::new();
@@ -46,7 +46,7 @@ pub fn avx2() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// S5: Core scan primitives
+// Core scan primitives
 // ---------------------------------------------------------------------------
 
 /// Find byte `b` at or after position `from`.

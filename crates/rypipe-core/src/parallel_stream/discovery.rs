@@ -40,7 +40,12 @@ pub(super) fn discover_schema_for_file<P: RecordParser>(
         .len()
         .div_ceil(chunk_size)
         .clamp(1, crate::MAX_SPLIT_CHUNKS);
-    let points = splitter.find_split_points(bytes, count);
+    let points = splitter.find_split_points_with(
+        bytes,
+        count,
+        plan.min_chunk_bytes
+            .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
+    );
     let ranges = crate::decoder::split_points_to_ranges(&points, bytes.len());
     let planning_bytes = points
         .capacity()
