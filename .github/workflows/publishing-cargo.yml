@@ -86,16 +86,31 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
+      # A crate must exist on crates.io before a trusted publisher can be
+      # configured for it, so the first version is published manually. Detect
+      # that case here and skip the OIDC exchange (which would otherwise fail
+      # with no trusted publisher configured) and the publish step.
+      - name: Check whether this version is already published
+        id: check
+        run: |
+          version="$(grep -m1 '^version' crates/rypipe-python/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          code="$(curl -s -o /dev/null -w '%{http_code}' -H 'User-Agent: rypipe-release' "https://crates.io/api/v1/crates/rypipe-python/${version}")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "200" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::rypipe-python ${version} is already published; skipping"
+          fi
+
       - name: Authenticate with crates.io
+        if: steps.check.outputs.published != 'true'
         uses: rust-lang/crates-io-auth-action@82864bf380abd3e242c564a5ba58dd29d6265b00 # v1
         id: auth
 
       # rypipe-python depends on rypipe-core by version. The core job runs
       # first, and cargo blocks until a published crate is indexed, so the
-      # dependency resolves by the time this step runs. The helper script skips
-      # a version that is already published, which covers the one-time manual
-      # bootstrap required before crates.io trusted publishing can be set up.
+      # dependency resolves by the time this step runs.
       - name: Publish rypipe-python
+        if: steps.check.outputs.published != 'true'
         run: bash scripts/publish-crate.sh rypipe-python
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
