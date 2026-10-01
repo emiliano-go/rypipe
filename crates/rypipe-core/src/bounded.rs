@@ -135,7 +135,12 @@ impl BoundedExecutor {
 
         let num_batches = bytes.len().div_ceil(batch_bytes).max(1);
         let capped = num_batches.min(self.split_cap);
+        let t = std::time::Instant::now();
         let split_points = splitter.find_split_points_with(bytes, capped, min_chunk_bytes);
+        crate::profiling::add(
+            crate::profiling::SPLIT,
+            t.elapsed().as_nanos() as u64,
+        );
         let chunks = split_points_to_ranges(&split_points, bytes.len());
         (chunks, rows_per_batch, bytes_per_row, oversize)
     }
@@ -155,8 +160,19 @@ impl BoundedExecutor {
             TableBuilder::with_plan((bytes.len() / bytes_per_row.max(512)).max(64), plan);
         engine.set_memory_budget(budget)?;
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let t = std::time::Instant::now();
             parser.validate(bytes)?;
-            parser.parse_chunk_generic(bytes, &mut engine)
+            crate::profiling::add(
+                crate::profiling::VALIDATE,
+                t.elapsed().as_nanos() as u64,
+            );
+            let t = std::time::Instant::now();
+            let result = parser.parse_chunk_generic(bytes, &mut engine);
+            crate::profiling::add(
+                crate::profiling::PARSE,
+                t.elapsed().as_nanos() as u64,
+            );
+            result
         }))
         .unwrap_or_else(|payload| {
             let msg = if let Some(s) = payload.downcast_ref::<&str>() {
@@ -182,7 +198,12 @@ impl BoundedExecutor {
         ledger: &mut BudgetLedger,
         stats: &mut StreamStats,
     ) -> Result<()> {
+        let t = std::time::Instant::now();
         let mut batch = engine.finish()?;
+        crate::profiling::add(
+            crate::profiling::EXPORT,
+            t.elapsed().as_nanos() as u64,
+        );
         if let Some(ref filter) = plan.filter {
             batch = apply_compare_filter(batch, filter)?;
         }

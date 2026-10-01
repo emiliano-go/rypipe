@@ -64,6 +64,9 @@ __all__ = [
     "iter_record_batches",
     "register_adapter",
     "resolve_engine",
+    "reset_stage_profile",
+    "disable_stage_profile",
+    "stage_profile",
     "RenameFields",
     "DropFields",
     "CastTypes",
@@ -92,6 +95,9 @@ PlanError = _rypipe.PlanError
 MergeError = _rypipe.MergeError
 ParserError = _rypipe.ParserError
 resolve_engine = _rypipe.resolve_engine
+reset_stage_profile = _rypipe.reset_stage_profile
+disable_stage_profile = _rypipe.disable_stage_profile
+stage_profile = _rypipe.stage_profile
 
 # Map common extensions to adapter names. Adapters must register themselves
 # under these names for auto-detection to work.

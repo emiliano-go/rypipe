@@ -265,6 +265,27 @@ fn parse_memory_string(s: &str) -> PyResult<u64> {
     Ok((num * multiplier as f64) as u64)
 }
 
+/// Start stage timing for the next read (clears previous counters).
+#[pyfunction]
+fn reset_stage_profile() {
+    rypipe_core::profiling::reset();
+}
+
+/// Stop stage timing.
+#[pyfunction]
+fn disable_stage_profile() {
+    rypipe_core::profiling::disable();
+}
+
+/// `[(stage, total_nanos, calls), ...]` for the last timed read.
+#[pyfunction]
+fn stage_profile() -> Vec<(String, u64, u64)> {
+    rypipe_core::profiling::snapshot()
+        .into_iter()
+        .map(|(name, nanos, calls)| (name.to_string(), nanos, calls))
+        .collect()
+}
+
 #[pymodule]
 fn _rypipe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ParseError", m.py().get_type::<ParseError>())?;
@@ -273,6 +294,9 @@ fn _rypipe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("MergeError", m.py().get_type::<MergeError>())?;
     m.add("ParserError", m.py().get_type::<ParserError>())?;
     m.add_function(wrap_pyfunction!(resolve_engine, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_stage_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(disable_stage_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(stage_profile, m)?)?;
     m.add_function(wrap_pyfunction!(_cast_strings, m)?)?;
     // Build provenance: the git SHA this .so was compiled from.
     m.add("__build_sha__", env!("RYPIPE_BUILD_SHA"))?;

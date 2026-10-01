@@ -70,7 +70,9 @@ impl ParallelExecutor {
             plan.min_chunk_bytes
                 .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
         );
-        SPLIT_SCAN_NS.store(t_split.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let split_ns = t_split.elapsed().as_nanos() as u64;
+        SPLIT_SCAN_NS.store(split_ns, Ordering::Relaxed);
+        crate::profiling::add(crate::profiling::SPLIT, split_ns);
         let mut ranges = split_points_to_ranges(&split_points, bytes.len());
 
         // Guard against degenerate splitter output that produces no ranges.
@@ -92,8 +94,18 @@ impl ParallelExecutor {
                         64
                     };
                     let mut sink = TableBuilder::with_plan(est, Arc::clone(&plan));
+                    let t = Instant::now();
                     parser.validate(&bytes[range.clone()])?;
+                    crate::profiling::add(
+                        crate::profiling::VALIDATE,
+                        t.elapsed().as_nanos() as u64,
+                    );
+                    let t = Instant::now();
                     parser.parse_chunk_generic(&bytes[range.clone()], &mut sink)?;
+                    crate::profiling::add(
+                        crate::profiling::PARSE,
+                        t.elapsed().as_nanos() as u64,
+                    );
                     Ok(sink)
                 }))
                 .unwrap_or_else(|payload| {
@@ -152,7 +164,13 @@ impl ParallelExecutor {
         // merge path, which surfaces a precise `Error::Merge` for irreconcilable
         // type mismatches instead of an opaque Arrow schema error.
         if !plan.auto_dict && schemas_consistent(&engines) {
-            return engines_to_record_batches(engines, &plan);
+            let t = Instant::now();
+            let out = engines_to_record_batches(engines, &plan);
+            crate::profiling::add(
+                crate::profiling::EXPORT,
+                t.elapsed().as_nanos() as u64,
+            );
+            return out;
         }
 
         // Incremental dict path for auto_dict: per-chunk upgrade in parallel,
@@ -262,11 +280,16 @@ impl ParallelExecutor {
         }
 
         // Merge path.
+        let t_merge = Instant::now();
         let mut merged = TableBuilder::with_plan(engines.len().max(64) * 512, Arc::clone(&plan));
         for engine in engines {
             merged.extend(engine)?;
         }
         let batch = merged.finish()?;
+        crate::profiling::add(
+            crate::profiling::MERGE,
+            t_merge.elapsed().as_nanos() as u64,
+        );
         if let Some(ref filter) = plan.filter {
             return Ok(vec![apply_compare_filter(batch, filter)?]);
         }
