@@ -278,6 +278,7 @@ impl TableBuilder {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn bytes_used(&self) -> usize {
         self.columns.iter().map(|c| c.bytes_used()).sum::<usize>()
             + self.column_order.iter().map(|s| s.len()).sum::<usize>()

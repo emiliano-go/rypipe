@@ -563,6 +563,15 @@ pub trait ColumnarSink {
         false
     }
 
+    /// Return true to abort parsing early. Parsers should check this between
+    /// records. Bounded single-pass sinks use it to stop promptly when the
+    /// consumer has gone away (e.g. a dropped streaming iterator), instead of
+    /// finishing the whole input. Default false (never stop early).
+    #[inline]
+    fn should_stop(&self) -> bool {
+        false
+    }
+
     /// Whether every wanted column for the current row already has a value.
     /// The adapter can byte-jump to the row close tag when this returns true,
     /// skipping remaining fields.  Composes with `row_rejected` (a row can

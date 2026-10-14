@@ -175,11 +175,26 @@ mod tests {
             LineParser.validate(bytes)
         }
         fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
-            self.0.fetch_add(
-                bytes.iter().filter(|&&b| b == b'\n').count(),
-                Ordering::SeqCst,
-            );
-            LineParser.parse_chunk(bytes, sink)
+            // Count a row only once it has actually been parsed, so an early
+            // `should_stop` (consumer disconnected) is observable.
+            let text = std::str::from_utf8(bytes).unwrap();
+            for line in text.lines() {
+                if sink.should_stop() {
+                    break;
+                }
+                if line.is_empty() {
+                    continue;
+                }
+                self.0.fetch_add(1, Ordering::SeqCst);
+                sink.begin_row();
+                for token in line.split_whitespace() {
+                    if let Some((k, v)) = token.split_once('=') {
+                        sink.put_field(k, Value::Str(Cow::Borrowed(v)));
+                    }
+                }
+                sink.end_row();
+            }
+            Ok(())
         }
     }
 
@@ -249,6 +264,9 @@ mod tests {
         fn parse_chunk(&self, bytes: &[u8], sink: &mut dyn ColumnarSink) -> Result<()> {
             let text = std::str::from_utf8(bytes).unwrap();
             for line in text.lines() {
+                if sink.should_stop() {
+                    break;
+                }
                 if line.is_empty() {
                     continue;
                 }

@@ -38,6 +38,7 @@ pub mod plan;
 pub mod profiling;
 pub mod scan;
 pub mod schema;
+pub mod spill;
 pub mod streaming;
 #[cfg(feature = "streaming-parser")]
 pub mod streaming_parser;

@@ -1,18 +1,16 @@
-#[cfg(feature = "mmap")]
-use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 
-use crate::arrow_export::apply_compare_filter;
 use crate::budget::{BudgetLedger, StreamStats};
 use crate::consumer::CollectingConsumer;
 use crate::decoder::{split_points_to_ranges, RecordParser, Splitter};
 use crate::engine::TableBuilder;
 use crate::input::InputBuffer;
 use crate::plan::ExecutionPlan;
+use crate::spill::SpillSink;
 use crate::Result;
 
 /// A memory budget expressed in bytes.
@@ -108,6 +106,10 @@ impl BoundedExecutor {
 
     /// Derive chunk ranges and batch sizing from an in-memory sample of the
     /// input. Returns `(chunk_ranges, rows_per_batch, bytes_per_row)`.
+    ///
+    /// Retained as a planning utility (and exercised by the split-cap test);
+    /// the single-pass `run_slice_spill` path no longer calls it.
+    #[allow(dead_code)]
     fn plan_chunks(
         &self,
         bytes: &[u8],
@@ -142,26 +144,71 @@ impl BoundedExecutor {
         (chunks, rows_per_batch, bytes_per_row, oversize)
     }
 
-    fn parse_chunk<P>(
-        parser: &P,
+    /// Parse a whole byte slice in one pass through `SpillSink`, flushing
+    /// batches to `consumer` as they fill. Replaces the chunked
+    /// parse-each-chunk-then-`extend` path: no split points, no merge copy.
+    #[allow(clippy::too_many_arguments)]
+    fn run_slice_spill<P, C>(
+        &self,
         bytes: &[u8],
+        splitter: &dyn Splitter,
+        parser: &P,
         plan: Arc<ExecutionPlan>,
-        bytes_per_row: usize,
-        budget: MemoryBudget,
-    ) -> Result<TableBuilder>
+        consumer: &mut C,
+        ledger: &mut BudgetLedger,
+        stats: &mut StreamStats,
+    ) -> Result<()>
     where
         P: RecordParser,
+        C: crate::consumer::BatchConsumer,
     {
-        budget.check(bytes.len())?;
-        let mut engine =
-            TableBuilder::with_plan((bytes.len() / bytes_per_row.max(512)).max(64), plan);
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let sample = &bytes[..bytes.len().min(65536)];
+        let bytes_per_row = splitter.estimate_bytes_per_row(sample).max(1);
+        let batch_target = self.batch_target_bytes();
+        // Budget cannot hold one row: batches are oversize regardless, so
+        // floor the batch size (per-row batches explode consumer cost) and do
+        // not flush early on capacity.
+        let oversize = batch_target < bytes_per_row;
+        let total_rows_est = bytes.len() / bytes_per_row;
+        let min_rows = if oversize {
+            MIN_ROWS_OVERSIZE_BATCH
+        } else {
+            1
+        };
+        let rows_per_batch = (batch_target / bytes_per_row)
+            .max(min_rows)
+            .min(total_rows_est.max(1));
+        let soft_cap = (self.budget.bytes() / 4).max(1);
+        let budget = self.budget.share(4);
+
+        // The engine never holds more than one batch before spilling, so size
+        // its preallocation off the batch, not the whole input. Sizing off the
+        // input would trip a strict budget at construction time.
+        let mut engine = TableBuilder::with_plan(rows_per_batch.max(64), plan);
         engine.set_memory_budget(budget)?;
+        ledger.set_builders(engine.capacity_bytes());
+
+        let mut sink = SpillSink::new(
+            engine,
+            consumer,
+            rows_per_batch,
+            batch_target,
+            soft_cap,
+            oversize,
+            self.budget,
+            ledger,
+            stats,
+        );
+
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let t = std::time::Instant::now();
             parser.validate(bytes)?;
             crate::profiling::add(crate::profiling::VALIDATE, t.elapsed().as_nanos() as u64);
             let t = std::time::Instant::now();
-            let result = parser.parse_chunk_generic(bytes, &mut engine);
+            let result = parser.parse_chunk_generic(bytes, &mut sink);
             crate::profiling::add(crate::profiling::PARSE, t.elapsed().as_nanos() as u64);
             result
         }))
@@ -177,129 +224,8 @@ impl BoundedExecutor {
                 "worker panicked during bounded parse: {msg}"
             )))
         })?;
-        engine.check_memory_budget()?;
-        Ok(engine)
-    }
 
-    fn consume_batch<C: crate::consumer::BatchConsumer>(
-        &self,
-        mut engine: TableBuilder,
-        plan: &ExecutionPlan,
-        consumer: &mut C,
-        ledger: &mut BudgetLedger,
-        stats: &mut StreamStats,
-    ) -> Result<()> {
-        let t = std::time::Instant::now();
-        let mut batch = engine.finish()?;
-        crate::profiling::add(crate::profiling::EXPORT, t.elapsed().as_nanos() as u64);
-        if let Some(ref filter) = plan.filter {
-            batch = apply_compare_filter(batch, filter)?;
-        }
-        let batch_bytes = batch.get_array_memory_size();
-        self.budget.share(4).check(batch_bytes)?;
-        if batch.num_rows() == 1 && batch_bytes > self.batch_target_bytes() {
-            stats.oversize_batches += 1;
-        }
-        let rows = batch.num_rows();
-        ledger.charge_in_flight(batch_bytes);
-        let res = consumer.consume(batch);
-        ledger.release_in_flight(batch_bytes);
-        res?;
-        stats.batches += 1;
-        stats.rows += rows;
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn consume_chunks<I, C>(
-        &self,
-        chunks: I,
-        rows_per_batch: usize,
-        oversize: bool,
-        plan: Arc<ExecutionPlan>,
-        consumer: &mut C,
-        ledger: &mut BudgetLedger,
-        stats: &mut StreamStats,
-    ) -> Result<()>
-    where
-        I: IntoIterator<Item = Result<TableBuilder>>,
-        C: crate::consumer::BatchConsumer,
-    {
-        let mut batch_engine = TableBuilder::with_plan(rows_per_batch.min(64), Arc::clone(&plan));
-        batch_engine.set_memory_budget(self.budget.share(4))?;
-        let mut rows_in_batch = 0usize;
-        for chunk_engine in chunks {
-            let chunk_engine = chunk_engine?;
-            let chunk_rows = chunk_engine.num_rows();
-            ledger.set_builders(
-                batch_engine
-                    .capacity_bytes()
-                    .saturating_add(chunk_engine.capacity_bytes()),
-            );
-            let adaptive = (self.budget.bytes() / 8)
-                .saturating_mul(chunk_rows)
-                .checked_div(chunk_engine.capacity_bytes().max(1))
-                .unwrap_or(1)
-                .max(1);
-            // Oversize regime (budget cannot hold one input row): every
-            // batch is oversize regardless (permitted in ordinary mode), so
-            // keep the planned minimum batch size instead of adapting to
-            // per-row splits, and do not flush early — accumulation across
-            // chunks is what keeps the batch count (and consumer cost)
-            // sub-linear.
-            let rows_per_batch = if oversize {
-                rows_per_batch
-            } else {
-                rows_per_batch.min(adaptive)
-            };
-            if !oversize
-                && rows_in_batch > 0
-                && batch_engine
-                    .capacity_bytes()
-                    .saturating_add(chunk_engine.capacity_bytes())
-                    > self.budget.bytes() / 4
-            {
-                let batch = batch_engine.split_off(batch_engine.num_rows());
-                self.consume_batch(batch, &plan, consumer, ledger, stats)?;
-                ledger.set_builders(batch_engine.capacity_bytes());
-                rows_in_batch = 0;
-            }
-            batch_engine.extend(chunk_engine)?;
-            batch_engine.check_memory_budget()?;
-            ledger.set_builders(batch_engine.capacity_bytes());
-            rows_in_batch += chunk_rows;
-            while rows_in_batch >= rows_per_batch
-                || (!oversize && batch_engine.bytes_used() >= self.budget.bytes())
-            {
-                if batch_engine.num_rows() == 0 {
-                    break;
-                }
-                let n = rows_per_batch.min(batch_engine.num_rows());
-                let n = if !oversize
-                    && batch_engine.bytes_used() >= self.budget.bytes()
-                    && batch_engine.num_rows() > 1
-                {
-                    let est = (batch_engine.num_rows() as f64 * self.budget.bytes() as f64
-                        / batch_engine.bytes_used() as f64) as usize;
-                    est.clamp(1, n)
-                } else {
-                    n
-                };
-                self.consume_batch(batch_engine.split_off(n), &plan, consumer, ledger, stats)?;
-                ledger.set_builders(batch_engine.capacity_bytes());
-                rows_in_batch = rows_in_batch.saturating_sub(n);
-            }
-        }
-        if let Some(err) = batch_engine.unknown_error.take() {
-            return Err(crate::Error::Merge(err));
-        }
-        if let Some(err) = batch_engine.strict_error.take() {
-            return Err(err);
-        }
-        if batch_engine.num_rows() > 0 {
-            self.consume_batch(batch_engine, &plan, consumer, ledger, stats)?;
-        }
-        Ok(())
+        sink.finish_run()
     }
 
     /// Parse an in-memory byte slice in bounded batches, calling `consumer` per batch.
@@ -371,43 +297,7 @@ impl BoundedExecutor {
         P: RecordParser + Clone + Send + Sync,
         C: crate::consumer::BatchConsumer,
     {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-
-        let (mut chunks, rows_per_batch, bytes_per_row, oversize) = self.plan_chunks(
-            bytes,
-            splitter,
-            plan.min_chunk_bytes
-                .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
-        );
-
-        // Guard against degenerate splitter output that produces no ranges.
-        if chunks.is_empty() {
-            chunks.push(0..bytes.len());
-        }
-
-        let parse_plan = Arc::clone(&plan);
-        let budget = self.budget.share(4);
-        budget.check(chunks.capacity() * std::mem::size_of::<Range<usize>>())?;
-        let chunks = chunks.into_iter().map(move |chunk| {
-            Self::parse_chunk(
-                &parser,
-                &bytes[chunk.start..chunk.end],
-                Arc::clone(&parse_plan),
-                bytes_per_row,
-                budget,
-            )
-        });
-        self.consume_chunks(
-            chunks,
-            rows_per_batch,
-            oversize,
-            plan,
-            consumer,
-            ledger,
-            stats,
-        )
+        self.run_slice_spill(bytes, splitter, &parser, plan, consumer, ledger, stats)
     }
 
     /// Parse an in-memory byte slice in bounded batches, returning one
@@ -530,8 +420,9 @@ impl BoundedExecutor {
         consumer.finish()
     }
 
-    /// Streaming path for mapped inputs: plan against the mapping, drop it,
-    /// then read each chunk with a reusable buffer.
+    /// Streaming path for mapped inputs: parse the mapping directly in one
+    /// pass. The mapping is retained (no drop-and-re-read copy); the operating
+    /// system can reclaim clean pages under pressure.
     #[cfg(feature = "mmap")]
     #[allow(clippy::too_many_arguments)]
     fn run_mapped_stream<P, C>(
@@ -549,60 +440,7 @@ impl BoundedExecutor {
         C: crate::consumer::BatchConsumer,
     {
         let bytes = input.as_slice();
-        if bytes.is_empty() {
-            return Ok(());
-        }
-
-        let (mut chunks, rows_per_batch, bytes_per_row, oversize) = self.plan_chunks(
-            bytes,
-            splitter,
-            plan.min_chunk_bytes
-                .unwrap_or(crate::decoder::MIN_CHUNK_BYTES),
-        );
-
-        // Guard against degenerate splitter output that produces no ranges.
-        if chunks.is_empty() {
-            chunks.push(0..bytes.len());
-        }
-
-        let InputBuffer::Mmap(handle) = input else {
-            unreachable!("mapped input required");
-        };
-        let mut file = handle.file;
-        drop(handle.mmap);
-
-        // Reusable buffer sized to the largest chunk to avoid per-chunk alloc.
-        let max_chunk = chunks.iter().map(|r| r.len()).max().unwrap_or(0);
-        let budget = self.budget.share(4);
-        budget.check(
-            max_chunk.saturating_add(chunks.capacity() * std::mem::size_of::<Range<usize>>()),
-        )?;
-        let mut chunk_buf = Vec::with_capacity(max_chunk);
-        ledger.set_input(chunk_buf.capacity());
-
-        let parse_plan = Arc::clone(&plan);
-        let parsed_chunks = chunks.into_iter().map(move |chunk| {
-            let chunk_len = chunk.len();
-            chunk_buf.resize(chunk_len, 0);
-            file.seek(SeekFrom::Start(chunk.start as u64))?;
-            file.read_exact(&mut chunk_buf)?;
-            Self::parse_chunk(
-                &parser,
-                &chunk_buf,
-                Arc::clone(&parse_plan),
-                bytes_per_row,
-                budget,
-            )
-        });
-        self.consume_chunks(
-            parsed_chunks,
-            rows_per_batch,
-            oversize,
-            plan,
-            consumer,
-            ledger,
-            stats,
-        )
+        self.run_slice_spill(bytes, splitter, &parser, plan, consumer, ledger, stats)
     }
 }
 
