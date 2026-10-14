@@ -588,6 +588,7 @@ impl TableBuilder {
     /// the declared `field_types` type is recorded as the first strict
     /// violation (surfaced by `finish()`). Nulls and non-string values never
     /// trigger it.
+    #[inline]
     fn record_strict_violation_at(&mut self, idx: usize, value: &Value<'_>) {
         if !self.plan.strict_types || self.strict_error.is_some() {
             return;
@@ -1076,6 +1077,37 @@ impl ColumnarSink for TableBuilder {
             b.pop();
         }
         b.push_value(value);
+    }
+
+    /// `put_field_at` specialized for a known `&str` value: skips the `Value`
+    /// construction and its match. Used by adapters that know a field is a
+    /// plain string (no declared type). Falls back to the general path when a
+    /// memory budget or a filter row-buffer is active.
+    #[inline]
+    fn put_str_at(&mut self, slot: u32, value: &str) {
+        if self.memory_limit.is_some() || self.row_buf.is_some() {
+            self.put_field_at(slot, Value::Str(std::borrow::Cow::Borrowed(value)));
+            return;
+        }
+        let idx = slot as usize;
+        if idx >= self.columns.len() {
+            return;
+        }
+        if self.plan.strict_types {
+            self.record_strict_violation_at(idx, &Value::Str(std::borrow::Cow::Borrowed(value)));
+        }
+        if self.plan.observer.is_some() {
+            self.notify_put_field(idx, &Value::Str(std::borrow::Cow::Borrowed(value)));
+        }
+        let word = idx / 64;
+        let bit = idx % 64;
+        self.row_dirty[word] |= 1u64 << bit;
+        let b = &mut self.columns[idx];
+        let row_count = self.row_count;
+        if b.len() > row_count {
+            b.pop();
+        }
+        b.push_str(Some(value));
     }
 
     #[inline]

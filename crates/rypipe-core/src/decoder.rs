@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::Range;
 
 use arrow::record_batch::RecordBatch;
@@ -504,6 +505,14 @@ pub trait ColumnarSink {
     #[inline]
     fn put_field_at(&mut self, _slot: u32, value: Value<'_>) {
         let _ = value;
+    }
+
+    /// Push a known-`&str` field into a known slot, bypassing the `Value`
+    /// round trip. Default forwards to `put_field_at`; sinks that store strings
+    /// directly (e.g. `TableBuilder`) override it for the hot path.
+    #[inline]
+    fn put_str_at(&mut self, slot: u32, value: &str) {
+        self.put_field_at(slot, Value::Str(Cow::Borrowed(value)));
     }
 
     /// Resolve a field name and push it in one call, avoiding the double
