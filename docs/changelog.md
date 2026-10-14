@@ -9,6 +9,28 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-14
+
+### Added
+
+- **`ColumnarSink::should_stop`.** A default-`false` hook a parser can poll between records to abort the current parse early. Bounded single-pass sinks set it when the consumer has gone away, so a dropped streaming iterator stops the worker promptly instead of finishing the whole input.
+
+### Changed
+
+- **Bounded streaming is now a single pass.** `BoundedExecutor`'s `run_stream` / `run_bytes_stream` (and their `_with_stats` / consumer variants) parse the whole input through one `TableBuilder` and spill finished `RecordBatch`es to the consumer via the new `SpillSink`, replacing the previous "parse each pre-split chunk into its own builder, then `merge::extend` every chunk" path. This removes a second full copy of all column data, the per-chunk engine churn, and the split-planning pass from the single-threaded streaming path. On the xmlstreamer CDATA feed this moved single-thread bounded streaming from ~0.6x to ~1.0-1.1x of a raw quick-xml scan; flat feeds from ~1.0x to ~1.1-1.5x. Delivered rows, columns, schema-union behaviour, `StreamStats`, budget accounting and the memory-budget contract are unchanged.
+- **Mapped streaming parses in place.** `run_mapped_stream` reads the memory-mapped input directly instead of dropping the mapping and re-reading each chunk through a reusable buffer.
+- **Oversize-regime batching preserved.** When the budget cannot hold a single row, the spilling sink keeps the `MIN_ROWS_OVERSIZE_BATCH` floor and does not flush early on capacity, so per-row batches cannot explode consumer cost.
+- **Multi-delimiter `BlockMasks` and quote-aware `next_unquoted`.** Every delimiter's bitmask is computed from one 64-byte load, and `next_unquoted` derives an inside-quotes mask with a SWAR prefix-XOR, so delimiters inside quoted values are skipped with no per-byte state machine.
+- **`ColumnarSink::put_str_at` string fast path.** Push a known `&str` into a known slot without the `Value` round trip; `TableBuilder` writes straight into the column, falling back when a strict memory budget or a filter row buffer is active.
+
+### Documentation
+
+- **Ecosystem overview page.** A new integrations page lists adapters and links them from the documentation navigation.
+
+### Notes
+
+- `BoundedExecutor::plan_chunks` is retained as a planning utility (and for its split-cap test) but is no longer on the streaming hot path. `TableBuilder::bytes_used` is now unused internally.
+
 ## [0.5.1] - 2026-10-01
 
 ### Fixed
