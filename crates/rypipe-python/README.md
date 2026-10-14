@@ -22,7 +22,7 @@ adapter, where the adapter crate is compiled into its own wheel.
 
 ```toml
 [dependencies]
-rypipe_python = { package = "rypipe-python", version = "0.5.0" }
+rypipe_python = { package = "rypipe-python", version = "0.6.0" }
 ```
 
 ```rust
