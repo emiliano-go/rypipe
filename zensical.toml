@@ -138,6 +138,7 @@ name = "rypipe on PyPI"
 
 [[project.nav]]
 "Integrations" = [
+    "integrations/index.md",
     { "Arrow ecosystem" = "integrations/arrow.md" },
     { "DuckDB" = "integrations/duckdb.md" },
     { "Polars" = "integrations/polars.md" },
