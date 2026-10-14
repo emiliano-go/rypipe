@@ -173,11 +173,7 @@ impl BoundedExecutor {
         // not flush early on capacity.
         let oversize = batch_target < bytes_per_row;
         let total_rows_est = bytes.len() / bytes_per_row;
-        let min_rows = if oversize {
-            MIN_ROWS_OVERSIZE_BATCH
-        } else {
-            1
-        };
+        let min_rows = if oversize { MIN_ROWS_OVERSIZE_BATCH } else { 1 };
         let rows_per_batch = (batch_target / bytes_per_row)
             .max(min_rows)
             .min(total_rows_est.max(1));

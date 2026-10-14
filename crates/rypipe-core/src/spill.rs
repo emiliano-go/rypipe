@@ -10,8 +10,8 @@
 
 use arrow::record_batch::RecordBatch;
 
-use crate::budget::{BudgetLedger, StreamStats};
 use crate::bounded::MemoryBudget;
+use crate::budget::{BudgetLedger, StreamStats};
 use crate::consumer::BatchConsumer;
 use crate::decoder::ColumnarSink;
 use crate::engine::TableBuilder;
