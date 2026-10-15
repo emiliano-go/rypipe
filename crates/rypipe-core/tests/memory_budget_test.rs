@@ -386,3 +386,38 @@ fn ordered_stream_backpressures_workers_behind_a_slow_chunk() {
         .collect::<rypipe_core::Result<Vec<_>>>();
     assert!(failed.unwrap_err().to_string().contains("worker panicked"));
 }
+
+#[test]
+fn spill_stream_matches_single_engine_values() {
+    // The single-pass spilling bounded reader must deliver exactly what the
+    // single-engine `read_bytes` does, value for value, across batch
+    // boundaries. This guards SpillSink forwarding of the ColumnarSink fast
+    // paths (put_field / put_field_at / put_str_at); a missed forward would
+    // silently drop data.
+    let data: String = (0..2_000)
+        .map(|i| format!("{i}=text-{}\n", i % 7))
+        .collect();
+    let single = pipeline().read_bytes(data.as_bytes()).unwrap();
+    let streamed = pipeline()
+        .read_bytes_stream(data.as_bytes(), MemoryBudget::new(4_096))
+        .unwrap();
+
+    let streamed_rows: usize = streamed.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(streamed_rows, single.num_rows());
+    assert!(
+        streamed.len() >= 2,
+        "expected the spill path to split into batches"
+    );
+
+    let merged = arrow::compute::concat_batches(&streamed[0].schema(), &streamed).unwrap();
+    assert_eq!(merged.schema(), single.schema());
+    assert_eq!(merged.num_rows(), single.num_rows());
+    for i in 0..single.num_columns() {
+        assert_eq!(
+            merged.column(i).to_data(),
+            single.column(i).to_data(),
+            "column {} differs",
+            single.schema().field(i).name()
+        );
+    }
+}
