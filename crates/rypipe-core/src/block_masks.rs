@@ -127,6 +127,7 @@ impl<'a> BlockMasks<'a> {
             return;
         }
         if base + 64 <= self.buf.len() {
+            // SAFETY: the guard proves 64 readable bytes start at `base`.
             unsafe { masks64(self.buf.as_ptr().add(base), delims, out, n) };
         } else {
             // Tail: copy remainder into stack array, compute, mask off beyond len.
@@ -136,6 +137,7 @@ impl<'a> BlockMasks<'a> {
             }
             let mut tmp = [0u8; 64];
             tmp[..rem].copy_from_slice(&self.buf[base..base + rem]);
+            // SAFETY: `tmp` is a 64-byte array (the remainder, zero-padded).
             unsafe { masks64(tmp.as_ptr(), delims, out, n) };
             let keep = (1u64 << rem) - 1;
             for m in out.iter_mut().take(n) {
@@ -187,6 +189,7 @@ impl<'a> BlockMasks<'a> {
     fn compute_one(&self, d: u8) -> u64 {
         let base = self.base;
         if base + 64 <= self.buf.len() {
+            // SAFETY: the guard proves 64 readable bytes start at `base`.
             unsafe { mask64(self.buf.as_ptr().add(base), d) }
         } else {
             let rem = self.buf.len().saturating_sub(base);
@@ -195,6 +198,7 @@ impl<'a> BlockMasks<'a> {
             }
             let mut tmp = [0u8; 64];
             tmp[..rem].copy_from_slice(&self.buf[base..base + rem]);
+            // SAFETY: `tmp` is a 64-byte array; the mask is trimmed to `rem`.
             (unsafe { mask64(tmp.as_ptr(), d) }) & ((1u64 << rem) - 1)
         }
     }
@@ -429,13 +433,17 @@ unsafe fn mask64(p: *const u8, needle: u8) -> u64 {
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2() {
+            // SAFETY: the function contract guarantees 64 readable bytes; AVX2
+            // is available (checked).
             return unsafe { mask64_avx2(p, needle) };
         }
+        // SAFETY: the contract guarantees 64 readable bytes; SSE2 is baseline.
         unsafe { mask64_sse2(p, needle) }
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
         let _ = has_avx2();
+        // SAFETY: the contract guarantees 64 readable bytes.
         unsafe { mask64_scalar(p, needle) }
     }
 }
@@ -492,14 +500,19 @@ unsafe fn masks64(p: *const u8, delims: &[u8], out: &mut [u64], n: usize) {
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2() {
+            // SAFETY: the function contract guarantees 64 readable bytes and
+            // `out[..n]` writable; AVX2 is available (checked).
             unsafe { masks64_avx2(p, delims, out, n) };
             return;
         }
+        // SAFETY: the contract guarantees 64 readable bytes and out[..n]; SSE2
+        // is baseline.
         unsafe { masks64_sse2(p, delims, out, n) };
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
         let _ = has_avx2();
+        // SAFETY: the contract guarantees 64 readable bytes and out[..n].
         unsafe { masks64_scalar(p, delims, out, n) };
     }
 }
@@ -825,6 +838,7 @@ mod tests {
             *byte = (i % 17) as u8;
         }
         for offset in 0..64 {
+            // SAFETY: `bytes` is 128 bytes, so `offset..offset+64` is in bounds.
             unsafe {
                 let ptr = bytes.as_ptr().add(offset);
                 let mut expected = [0u64; MAX_DELIMS];

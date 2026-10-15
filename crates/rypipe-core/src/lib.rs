@@ -6,6 +6,7 @@
 
 #![allow(unexpected_cfgs)]
 #![allow(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]

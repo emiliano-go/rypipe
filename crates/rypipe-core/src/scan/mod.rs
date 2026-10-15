@@ -105,6 +105,11 @@ pub fn find_literal(hay: &[u8], at: usize, finder: &memchr::memmem::Finder) -> O
 ///
 /// # Panics
 ///
+/// # Safety
+///
+/// The caller must have validated `b` as UTF-8. The chunk validator runs
+/// `simdutf8` over every chunk before this is reachable.
+///
 /// Panics in debug mode if the bytes are not valid UTF-8.
 #[inline]
 pub unsafe fn utf8_after_chunk_validation(b: &[u8]) -> &str {
@@ -217,6 +222,7 @@ mod tests {
     #[test]
     fn test_utf8_after_chunk_validation() {
         let valid = "hello world";
+        // SAFETY: the literal is valid UTF-8.
         unsafe {
             assert_eq!(utf8_after_chunk_validation(valid.as_bytes()), valid);
         }

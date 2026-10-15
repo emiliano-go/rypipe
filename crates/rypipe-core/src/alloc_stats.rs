@@ -100,6 +100,8 @@ pub fn reset() {
 /// every operation into the static counters above.
 pub struct Counting<A>(pub A);
 
+// SAFETY: `Counting` forwards every operation unchanged to the inner
+// allocator, so it upholds the same `GlobalAlloc` contract.
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
     /// # Safety
     ///

@@ -71,7 +71,9 @@ pub struct MmapHandle {
 #[cfg(feature = "mmap")]
 impl MmapHandle {
     fn new(file: std::fs::File, prefault: bool) -> Result<Self> {
-        // The input must not be modified or truncated while mapped.
+        // SAFETY: memmap2 requires the file not be mutated while mapped; the
+        // input file is opened read-only and the caller contract forbids
+        // truncating or modifying it for the life of the mapping.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         #[cfg(unix)]
         {
