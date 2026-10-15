@@ -46,6 +46,9 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --all-features
 
+      - name: Test core under overflow checks
+        run: RUSTFLAGS="-C overflow-checks=on" cargo test -p rypipe-core --all-features --release
+
       - name: Clippy workspace
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
