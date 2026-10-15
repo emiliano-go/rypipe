@@ -9,6 +9,20 @@ All notable changes to rypipe, newest first. Versions follow semantic versioning
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-15
+
+### Changed
+
+- **Every `unsafe` block is documented, and undocumented ones fail the build.** `#![deny(clippy::undocumented_unsafe_blocks)]` is enabled in `rypipe-core`, and the SIMD mask helpers and their callers, the counting allocator, the memory map, and the post-validation UTF-8 borrow each carry a `SAFETY` (or `# Safety`) note describing its invariant.
+
+### Notes
+
+- **`Cargo.lock` is now tracked.** CI and downstream audits resolve the exact dependency set instead of re-resolving on every build; Dependabot keeps it current.
+
+### CI
+
+- **Core tests run under overflow checks.** A release-mode `cargo test -p rypipe-core` with `-C overflow-checks=on` fails on integer overflow that the normal release profile would wrap silently.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added
